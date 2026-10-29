@@ -830,9 +830,24 @@ def runnable(st):
         if all(st.item(d)["status"] in ("ok", "skipped") for d in it["deps"]):
             out.append(it)
             busy |= set(it["dirs"])
-    if not out and not any(it["status"] == "running" for it in st.items):
+    if not out and not any(it["status"] == "running" for it in st.items) and (not owner_can_unblock(st)
+                                                                            or st.data.get("close_anyway")):
         close = [it for it in st.items if it.get("close") and it["status"] == "pending"]
         out += close
+    return out
+
+
+def owner_can_unblock(st):
+    """The blocked items an owner's answer can still put back -- a job out of attempts, a step that needs a permission
+    -- that hold pending work. The close waits for that answer (`retry`, or `close-anyway`) instead of closing the
+    round over them (weekly round 2026-10-29: the close was handed out over a library's blocked head cascade that the
+    owner unblocked minutes later). A graded S1/S2 finding (`blocking`) is not one: it goes to the next plan, and the
+    close reports it."""
+    out = []
+    for x in st.items:
+        if x["status"] == "blocked" and not (x.get("result") or {}).get("blocking") and not x.get("close"):
+            if any(p["status"] == "pending" and blocked_by(st, p) == x["id"] for p in st.items):
+                out.append(x["id"])
     return out
 
 
@@ -937,7 +952,10 @@ def job_rules(st, it):
              f"Never run a full gate run or a Gate C client yourself except as `python3 {TOOLS / 'round.py'} gate "
              f"--state {st.path} -- <the command>` (one full run on this machine at a time); A/B gates need no lock.",
              "Run long commands with their output to a file and read only its tail, RESIDUE.md or the summary they "
-             "print -- never a whole build log."]
+             "print -- never a whole build log.",
+             "A command longer than your tool's timeout: start it in the background and end your turn -- you are "
+             "woken when it ends. Never poll it (no sleep loops, no wait re-armed every few minutes): each wake "
+             "re-sends your whole context (weekly round 2026-10-29: a worker re-armed a 10-minute wait for hours)."]
     if F:
         rules.insert(1, f"Fork {it['fork']} ({'version branches' if F['kind'] == 'branches' else 'single-version'}), "
                         f"clone {F['dir']}, head {F['head']}. Frozen input: {st.data['frozen']}. Round directory "
@@ -2827,6 +2845,20 @@ def run_tool(state_path, iid):
 
 # ---------------------------------------------------------------- the commands
 
+def set_aside(summary):
+    """An earlier attempt's summary at a job's summary path, renamed <job>.prevN.md: `resume` records whatever summary
+    it finds there as the outcome of the job that is out (weekly round 2026-10-29: a container restart killed a
+    retried job's second pass, and resume recorded the first pass's `RESULT: failed` as the second, spending the last
+    attempt). -> the new path, or None."""
+    summary = pathlib.Path(summary)
+    if not summary.is_file():
+        return None
+    n = 1
+    while summary.with_name(f"{summary.stem}.prev{n}.md").exists():
+        n += 1
+    return summary.rename(summary.with_name(f"{summary.stem}.prev{n}.md"))
+
+
 def dispatch_agent(st, it):
     """Claim an agent item (or a failed tool item's fixer) and write its job file. -> the job JSON."""
     fixing = it["kind"] == "tool"
@@ -2837,6 +2869,7 @@ def dispatch_agent(st, it):
     jf = jobs / f"{jid}.md"
     jf.write_text(job_text(st, it, fixing), encoding="utf-8")
     summary = st.rdir / "round/summaries" / f"{jid}.md"
+    set_aside(summary)
     if fixing:
         it["fixing"] = True
         it["fixes"] += 1
@@ -2936,7 +2969,9 @@ def cmd_drive(a, out=print):
             for it in st.items:
                 if it["status"] == "blocked":
                     out(f"round: BLOCKED {it['id']}: {it.get('note', '')[:300]}")
-            out(f"round: once the owner answered one: python3 {TOOLS / 'round.py'} retry <id> --why ... [--allow]")
+            out(f"round: once the owner answered one: python3 {TOOLS / 'round.py'} retry <id> --why ... [--allow]"
+                + (f", or, when the owner chose to close the round over it: python3 {TOOLS / 'round.py'} close-anyway "
+                   "--why ..." if owner_can_unblock(st) else ""))
         if all(it["status"] in TERMINAL for it in st.items):
             out("round: ROUND DONE")
     return 3 if stuck else 0
@@ -3164,6 +3199,10 @@ def cmd_retry(a, out=print):
             out(f"round: {it['id']} is {it['status']}: nothing to retry")
             return 2
         it.update(status="pending", fixes=0, attempts=0, note=f"retried at {now()}: {a.why or 'by the session'}")
+        st.data.pop("close_anyway", None)
+        for c in st.items:                  # a close handed out over this item is stale: the round goes on
+            if c.get("close") and c["status"] == "running":
+                c.update(status="pending", note=f"re-queued: {a.id} was retried after the close was handed out")
         # its last outcome goes (a stale `blocking` would block the merge again); a release keeps its dispatch marks,
         # so a retried release waits for a run it already started instead of dispatching a second one
         it["result"] = {k: v for k, v in it.get("result", {}).items() if k in ("dispatching_at", "dispatched_at")}
@@ -3171,6 +3210,16 @@ def cmd_retry(a, out=print):
         if a.allow:
             it["allow_once"] = True
     out(f"round: {a.id} pending again")
+    return 0
+
+
+def cmd_close_anyway(a, out=print):
+    """The owner chose to close the round over the blocked items `owner_can_unblock` names: the close is handed out at
+    the next drive, which reports them as not done."""
+    with State.tx(a.state) as st:
+        held = owner_can_unblock(st)
+        st.data["close_anyway"] = {"at": now(), "why": a.why or "", "over": held}
+    out(f"round: the close is released over {', '.join(held) or 'nothing'}: drive again")
     return 0
 
 
@@ -4276,6 +4325,45 @@ def self_check():
         rec("round_close", "RESULT: ok\n")
         rc, o = q(cmd_drive, a)
         expect(rc == 3 and "BLOCKED examplemod@1.21.4:review" in o, f"stuck: exit 3 naming the blocked item: {o}")
+        # 2026-10-29: a job out of attempts (no graded finding) holds the close until the owner answers; retry
+        # re-queues a handed-out close; close-anyway releases it; a re-dispatched job's old summary is moved aside
+        with State.tx(state) as st:
+            rv = st.item("examplemod@1.21.4:review")
+            saved_rv = {k: rv[k] for k in ("status", "result", "note")}
+            rv.update(status="blocked", result={}, note="examplemod@1.21.4_review: failed")
+            cl = next(x for x in st.items if x.get("close"))
+            cl["status"] = "pending"
+            held_, rn_ = owner_can_unblock(st), [x["id"] for x in runnable(st)]
+        expect(held_ == ["examplemod@1.21.4:review"] and "round:close" not in rn_,
+               f"a failed-out item holding pending work holds the close: {held_} {rn_}")
+        rc, o = q(cmd_drive, a)
+        expect(rc == 3 and "BLOCKED examplemod@1.21.4:review" in o and "close-anyway" in o and "round_close" not in o,
+               f"drive: exit 3, the BLOCKED line and the owner's two answers, no close job: {o}")
+        rc, o = q(cmd_close_anyway, argparse.Namespace(state=state, why="owner: close"))
+        with State.tx(state) as st:
+            rn_ = [x["id"] for x in runnable(st)]
+            st.item("round:close")["status"] = "running"     # handed out
+        expect(rc == 0 and "round:close" in rn_, f"close-anyway releases the close: {rn_} {o}")
+        rc, o = q(cmd_retry, argparse.Namespace(id="examplemod@1.21.4:review", why="owner: retry", allow=False, state=state))
+        with State.tx(state) as st:
+            expect(st.item("round:close")["status"] == "pending" and not st.data.get("close_anyway"),
+                   "retry re-queues a close handed out over the item and withdraws close-anyway")
+            summ = st.rdir / "round/summaries" / "examplemod@1.21.4_review.md"
+            summ.parent.mkdir(parents=True, exist_ok=True)
+            summ.write_text("RESULT: failed\nan earlier attempt\n", encoding="utf-8")
+            p1 = set_aside(summ)
+            summ.write_text("RESULT: failed\na second one\n", encoding="utf-8")
+            p2 = set_aside(summ)
+            st.item("examplemod@1.21.4:review").update(status="running", kind="agent")
+        expect(not summ.exists() and p1 and p1.name == "examplemod@1.21.4_review.prev1.md" and p2
+               and p2.name == "examplemod@1.21.4_review.prev2.md" and set_aside(summ) is None,
+               f"an earlier attempt's summary is set aside, numbered: {p1} {p2}")
+        rc, o = q(cmd_resume, argparse.Namespace(state=state))
+        with State.tx(state) as st:
+            expect(st.item("examplemod@1.21.4:review")["status"] == "running" and "redispatch" in o,
+                   f"after a restart the job is offered again, not recorded from an old summary: {o[-400:]}")
+            st.item("examplemod@1.21.4:review").update(saved_rv)
+            st.item("round:close")["status"] = "ok"
         rc, o = q(cmd_status, argparse.Namespace(state=state, json=False, markdown=True))
         expect("BLOCKED review" in o and "x-mc1.21.8" in o, f"status: {o}")
         # S3-1: retry clears the old outcome; a new record replaces blocking / fixed wholesale
@@ -5167,11 +5255,14 @@ def main(argv=None):
     for name, h in (("drive", "run every mechanical step; print the agent jobs"), ("next", "the runnable items"),
                     ("status", "a compact table"), ("resume", "after a restart"), ("run", "run one mechanical step"),
                     ("record", "record an agent job's outcome"), ("gate", "a full gate run under the one-gate lock"),
-                    ("retry", "a blocked or failed item back to pending")):
+                    ("retry", "a blocked or failed item back to pending"),
+                    ("close-anyway", "the owner chose to close over the blocked items")):
         s = sub.add_parser(name, help=h)
         s.add_argument("--state", default=STATE_DEFAULT)
         if name in ("run", "record", "retry"):
             s.add_argument("id")
+        if name == "close-anyway":
+            s.add_argument("--why", help="the owner's answer (recorded)")
         if name == "retry":
             s.add_argument("--why", help="what changed (recorded)")
             s.add_argument("--allow", action="store_true", help="the owner allowed this one step on the plan issue")
@@ -5190,7 +5281,8 @@ def main(argv=None):
         print(f"round: no {a.state}: run `round.py init` first")
         return 2
     return {"init": cmd_init, "drive": cmd_drive, "next": cmd_next, "status": cmd_status, "resume": cmd_resume,
-            "run": cmd_run, "record": cmd_record, "gate": cmd_gate, "retry": cmd_retry}[a.cmd](a)
+            "run": cmd_run, "record": cmd_record, "gate": cmd_gate, "retry": cmd_retry,
+            "close-anyway": cmd_close_anyway}[a.cmd](a)
 
 
 if __name__ == "__main__":
