@@ -1207,7 +1207,17 @@ def job_task(st, it):
                 f"    python3 {T / 'fork-branches.py'} cascade --repo {F['dir']} --apply-decisions {dec} --gates ab "
                 f"--untaken-ok {st.data['frozen']}",
                 f"It runs the head cascade {x['from']}..{x['to']} (its --apply first). Never resolve a decision by hand.",
-                f"Acceptance: the cascade green at {v}; every decision applied or an open entry named in the summary."]
+                "A version the cascade leaves red (`cascade STOPPED at <v>: red after the merge` or `still red`: the "
+                "authors' new code meeting <v>'s API) is this job's to port, not the owner's: run the fixer the cascade "
+                f"names there, `python3 {T / 'fork-port.py'} --repo <that version's worktree> --target <v> --from-stage "
+                f"measure --budget 15 --gates ab --untaken-ok {st.data['frozen']}` (or fix RESIDUE.md's errors at <v> by "
+                "hand), commit on that version's branch, then run the cascade command above again: it resumes at <v>. "
+                "The cascade's own $0 compile budget and its `ask the person` choices are for a run with no fixer; this "
+                "job is the fixer. RESULT: blocked only for a version still red after two such passes, naming it and "
+                "its RESIDUE.md (weekly round 2026-10-29: a library's 1.21.8 stopped red on 6 compile errors and the "
+                "job returned blocked, holding every version above it).",
+                f"Acceptance: the cascade green at {v} and through {x['to']}; every decision applied or an open entry "
+                "named in the summary."]
     if s == "reconcile":
         ed = it["extra"]["edited"]
         lines = [f"Reconcile {it['fork']}'s hand-edited copies of MMVU's shared code with MMVU's newer template at {v}, "
@@ -3988,6 +3998,13 @@ def self_check():
             lj_text = job_text(st_, st_.item("examplelow@1.21.1:lowest"))
         expect("lowest: <ID> <version>" in lj_text and "never a checkout" in lj_text and "a candidate, not proof" in lj_text
                and "LOW-3 (S1): fixed at 26.1.2" in lj_text, f"the lowest job's prompt: {lj_text}")
+        with State.tx(lo_state, write=False) as st_:
+            dx = dict(st_.item("examplelow@1.21.1:lowest"), id="examplelow@1.21.1:decisions", step="decisions",
+                      extra={"from": "neoforge-1.21.1", "to": "26.1.2", "decisions": []})
+            dj_text = job_text(st_, dx)
+        expect("is this job's to port, not the owner's" in dj_text and "--from-stage measure --budget 15" in dj_text
+               and "two such passes" in dj_text and "through 26.1.2" in dj_text,
+               f"the head cascade's job fixes a version the cascade leaves red, with a budget: {dj_text}")
         rc, o, items = init(fz_lo(ids4), cf_lo, [f"{LO}={low}"], lo_state)
         before = [x["id"] for x in items]
         # the false positive (the hit is right at those versions): the job confirms nothing lower -- nothing changes
