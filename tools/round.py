@@ -807,6 +807,13 @@ def cmd_init(a):
             print(f"round: --fork must be owner/repo=DIR, got {s!r}")
             return 2
         dirs[slug] = pathlib.Path(d).resolve()
+    through = {}
+    for s in getattr(a, "through", None) or []:
+        slug, sep, v = s.partition("=")
+        if not sep or "/" not in slug or not v:
+            print(f"round: --through must be owner/repo=VERSION (or =none), got {s!r}")
+            return 2
+        through[slug] = v
     if a.config:
         cfg = json.loads(pathlib.Path(a.config).read_text(encoding="utf-8"))
     else:
@@ -817,8 +824,14 @@ def cmd_init(a):
             return 2
         cfg = json.loads(r.stdout)
     forks = {}
+    unknown = sorted(set(through) - {cf["repo"] for cf in cfg["forks"]})
+    if unknown:
+        print(f"round: --through names a fork not in the set: {', '.join(unknown)}")
+        return 2
     for cf in cfg["forks"]:
         slug = cf["repo"]
+        if through.get(slug) == "none":
+            continue            # left out of this round: no item, no gate against it, its branches untouched
         if slug not in dirs:
             print(f"round: no --fork {slug}=DIR (every fork of the set needs its clone; round-preflight.py says so first)")
             return 2
@@ -842,6 +855,14 @@ def cmd_init(a):
                        "versions": ladder(d, base),
                        "library": cf.get("role") == "library", "automerge": bool(cf.get("automerge")),
                        "depends_on": cf.get("depends_on", []), "ledger_issues": cf.get("ledger_issues", [])}
+        if slug in through:
+            # a trial round: the ladder stops at this version (the versions above are untouched this round)
+            vs, t = forks[slug]["versions"], through[slug]
+            if t != base and t not in vs:
+                print(f"round: --through {slug}={t}: not one of its versions ({', '.join([base] + vs)})")
+                return 2
+            forks[slug]["versions"] = vs[:vs.index(t) + 1] if t in vs else []
+            forks[slug]["through"] = t
         fz_f = next((x for x in frozen["forks"] if x["repo"] == slug), {})
         fixes = fz_f.get("fixes") or [{"id": i, "at": base} for i in fz_f.get("selected", [])]
         if kind == "single":
@@ -4118,7 +4139,7 @@ def self_check():
         (rd / "cfg.json").write_text(json.dumps(cfg), encoding="utf-8")
         state = str(rd / STATE_DEFAULT)
 
-        def init(frozen, cf, forks, st_path):
+        def init(frozen, cf, forks, st_path, through=None):
             fzp = pathlib.Path(st_path).parent / "frozen.json"
             fzp.parent.mkdir(parents=True, exist_ok=True)
             fzp.write_text(json.dumps(frozen), encoding="utf-8")
@@ -4126,7 +4147,7 @@ def self_check():
             cfp.write_text(json.dumps(cf), encoding="utf-8")
             ns = argparse.Namespace(frozen=str(fzp), fork=forks, config=str(cfp), state=st_path, force=True,
                                     round_dir=str(pathlib.Path(st_path).parent.parent), date="2026-10-21",
-                                    since="2026-10-21T15:00:00Z")
+                                    since="2026-10-21T15:00:00Z", through=through)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc_ = cmd_init(ns)
@@ -4303,6 +4324,14 @@ def self_check():
         expect(rc == 0 and not any(it["step"] == "lowest" for it in items)
                and [it["version"] for it in items if it["step"] == "backlog"] == ["1.21.1"],
                f"a fix at the lowest branch: nothing below to check, the queue as before: {[it['id'] for it in items]}")
+        # a trial round: the library's ladder stops at 1.21.4, the dependent is left out (no item, no gate against it)
+        rc, o, items = init(fz(), cfg, both, state, through=[f"{LIB}=1.21.4", f"{DEP}=none"])
+        expect(rc == 0 and {it["version"] for it in items if it["fork"] == LIB} <= {"1.21.1", "1.21.4"}
+               and any(it["version"] == "1.21.4" for it in items) and not any(it["fork"] == DEP for it in items)
+               and not any("depgate" in it["step"] for it in items),
+               f"--through: the ladder stops at the version, a fork left out has no item: {[it['id'] for it in items]}")
+        rc, o, _ = init(fz(), cfg, both, state, through=[f"{LIB}=1.21.9"])
+        expect(rc == 2 and "not one of its versions" in o, f"--through a version the fork has not: refused: {o}")
         rc, o, items = init(fz(), cfg, both, state)
         expect(rc == 0 and "owner/examplelib: branches 1.21.1..1.21.8" in o, f"init: {rc} {o}")
         ids = [it["id"] for it in items]
@@ -5529,6 +5558,8 @@ def main(argv=None):
     p.add_argument("--round-dir", default=".", help="the round's working directory (default .)")
     p.add_argument("--state"); p.add_argument("--force", action="store_true", help="start over (the old state is lost)")
     p.add_argument("--date", help="the work branches' date (default today)"); p.add_argument("--since", help="the round's start (ISO)")
+    p.add_argument("--through", action="append", metavar="OWNER/REPO=VERSION",
+                   help="a trial round: stop this fork's ladder at VERSION (=none leaves the fork out of the round)")
     for name, h in (("drive", "run every mechanical step; print the agent jobs"), ("next", "the runnable items"),
                     ("status", "a compact table"), ("resume", "after a restart"), ("run", "run one mechanical step"),
                     ("record", "record an agent job's outcome"), ("gate", "a full gate run under the one-gate lock"),

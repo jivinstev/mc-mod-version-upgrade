@@ -417,8 +417,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
 
 - **`round.py init --frozen round/frozen.json --fork <owner/repo>=<clone> ...`** (after step 1's freeze; every fork, the
   library first) builds `round/STATE.json`: per fork and version, in ladder order, the steps below as typed items with
-  their dependencies -- the library before its dependents, each version after the one below it merged, the head before
-  the versions. A version gets items only when it has work this round -- the head cascade of the authors' code the
+  their dependencies -- the library before its dependents, each version after the one below it cascaded (pipelined), the head
+  before the versions. `--through <owner/repo>=<version>` (repeatable; `=none` leaves that fork out) makes a trial round
+  whose ladder stops at that version; the weekly round never passes it. A version gets items only when it has work this round -- the head cascade of the authors' code the
   plan takes, a selected fix at or below it, a library release of this round to re-pin to, a ticked dependency bump
   at it, or this repository's shared library moved past it (below) -- so a plan that selects nothing, on forks already
   on the current shared library, builds nothing but the close. It refuses a clone whose origin is not that fork. A
