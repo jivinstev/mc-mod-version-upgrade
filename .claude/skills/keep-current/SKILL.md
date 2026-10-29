@@ -366,6 +366,12 @@ this is the order and the rules around them. The round runs this repository's **
 so it gets the tools' fixes); only Tuesday's plan workflow is pinned, at `migrator_sha` in that file, so that a plan is
 reproducible from its commit. The two meet only at the plan issue: if `read-plan` cannot read it, stop and report.
 
+**While a round runs, nothing else pushes to the forks' branches or dispatches their Port CI** -- the owner's own
+publishing session included. Hold those until the round's closing comment. A commit landing on a version branch
+between a PR's CI and its merge changes the merged tree, so the release cannot reuse the PR's CI run and builds again.
+A dispatch on the same commit was once taken for the round's own release run (weekly rounds 2026-10-28; the release
+wait now takes only the round's own run).
+
 **What the round may do unattended is the `allow` list** in that file (the prompt repeats it verbatim), and nothing
 more: `push-version-branches` (commit to the fork's head branch -- its known-issues ledger and README Ports block
 included -- and its `neoforge-<v>` branches; never force-push), `pre-release` (dispatch Port CI with `release=true`;
@@ -486,8 +492,14 @@ it small, so the orchestration is a tool, which replaces the four rules above:
 - **`drive` exit 3 is a stop for the session**: its BLOCKED lines name each item that cannot go on (a graded S1/S2, a
   fixer that failed twice, a step the `allow` list does not hold -- the driver has already asked the owner on the plan
   issue for that one). Everything that does not depend on a blocked item goes on; the close job comes once nothing else
-  can run. Once the owner answered (a re-grade below S2 recorded, or that one step allowed in a plan-issue reply),
-  `round.py retry <id> --why "<the answer>"` (`--allow` for the allowed step) puts it back. `round.py status` is a
+  can run -- but not over an item the owner can still put back (a job out of attempts, a step waiting on a permission)
+  that holds other work: then `drive` exits 3 and the session asks the owner on the plan issue, retry or close. Once the
+  owner answered (a re-grade below S2 recorded, that one step allowed, or `retry` in a plan-issue reply),
+  `round.py retry <id> --why "<the answer>"` (`--allow` for the allowed step) puts it back, and a close handed out
+  before goes back to the queue; an answer `close` is `round.py close-anyway --why "<the answer>"`, and the next
+  `drive` hands out the close, which reports those items as not done. A graded S1/S2 needs no answer: the close reports
+  it and the next plan takes it. A job whose worker a restart killed is offered again by `round.py resume` and never
+  counts as an attempt (its earlier attempt's summary is set aside as `<job>.prevN.md`). `round.py status` is a
   compact table.
 - **The library pre-merge dependent gate.** A library version merges only after the dependent's Gate C passed against
   the library's candidate jar: after the library version's own gates and review, the driver gates each dependent that
