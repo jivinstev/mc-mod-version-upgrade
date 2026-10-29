@@ -1637,10 +1637,20 @@ def t_ci_check(st, it, log):
     at = log_size(log)
     r = sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci-check", "--repo", F["dir"]], log)
     warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
+    # the head with a PR this round: setup regenerates its workflow on the work branch and the PR carries it, as on a
+    # single-version fork (a fixer's commit on the local head branch never reaches that PR -- measured, trial round
+    # 2026-10-29: the head stayed stale through both fixer jobs)
+    head_pr = any(x["fork"] == it["fork"] and x["version"] == F["base"] and x["step"] == "pr" for x in st.items)
+    stale_head = [ln for ln in warn if "(the head branch)" in ln] if head_pr else []
+    warn = [ln for ln in warn if ln not in stale_head]
     if warn:
         raise StepError(f"{len(warn)} workflow warning(s): {warn[0][:300]}")
     pushed = push_ci_regen(st, it)
-    return "workflows current" + (f"; the regeneration pushed on {', '.join(pushed)}" if pushed else ""), {"pushed": pushed}
+    note = "workflows current" + (f"; the regeneration pushed on {', '.join(pushed)}" if pushed else "")
+    if stale_head:
+        return (note.replace("workflows current", "version workflows current") + "; the head's stale workflow is "
+                "regenerated at setup on the work branch"), {"pushed": pushed, "stale_workflow": stale_head[0][:300]}
+    return note, {"pushed": pushed}
 
 
 def push_ci_regen(st, it):
@@ -1733,7 +1743,7 @@ def t_setup(st, it, log):
         sh(st, it, [sys.executable if c == "python3" else c for c in cmd], log)
         n += 1
     c = commit_paths(d, ["."], "Dependency updates the plan ticked (keep-current round)") if n else None
-    cc = seg_item(st, it, "ci-check") if F["kind"] == "single" else None
+    cc = seg_item(st, it, "ci-check")
     w = regen_workflow(st, it, d, log) if cc and cc["result"].get("stale_workflow") else None
     return (f"on {it['extra']['branch']}" + (f"; {n} bump(s), {c[:12]}" if c else "")
             + (f"; workflow regenerated at the newest kit, {w[:12]}" if w else "")), {}
@@ -5007,6 +5017,19 @@ def self_check():
             sh = rec_out("fork-branches: ci-check: workflows current\n")
             note, _r = t_ci_check(_St2(), {"fork": "o/x"}, log_)
             expect(note == "workflows current", f"a re-run after the regeneration passes; the old warning is not counted: {note}")
+            hw = "fork-branches: ci-check: WARNING neoforge-9.9 (the head branch): its workflow pins Port CI kit 61, older than kit 62\n"
+            sh = rec_out(hw)
+            try:
+                t_ci_check(_St2(), {"fork": "o/x"}, log_)
+                expect(False, "a stale head with no PR this round passed the check (nothing would regenerate it)")
+            except StepError:
+                pass
+            st_pr = _St2()
+            st_pr.items = [{"fork": "o/x", "version": "9.9", "step": "pr"}]
+            sh = rec_out(hw)
+            note, r_ = t_ci_check(st_pr, {"fork": "o/x"}, log_)
+            expect("regenerated at setup" in note and "kit 61" in r_.get("stale_workflow", ""),
+                   f"a stale head with a PR this round: recorded for setup to regenerate, never a fixer job: {note} {r_}")
             G.update(vco=lambda st_, f_, v_: str(gd), commit_paths=lambda d_, p_, m_: None)
             fz_ = rd_ / "round/frozen.json"
             for present in (False, True):
