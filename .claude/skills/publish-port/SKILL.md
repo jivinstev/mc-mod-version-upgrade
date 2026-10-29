@@ -83,7 +83,20 @@ own words -- their description and credits -- and the permission link are exempt
      loader and version.
    A dependency that is another fork port (`"port": "owner/fork"`) is linked to THAT fork's community project.
 2. Read both files. The page must say "unofficial", credit and link the original and its authors, keep the
-   licence and copyright, and say how the port differs -- CurseForge's moderation asks for all of it. The config
+   licence and copyright, and say how the port differs -- CurseForge's moderation asks for all of it.
+   **Known issues** on the page: every open S2 of the fork's known-issues ledger (`.port/KNOWN-ISSUES.json` on the
+   head branch; an open S1 is never published, so in practice the S2s), each in one line for players with the
+   Minecraft versions it is open at, then a quiet link for the smaller ones and the details. S3s and S4s are not
+   listed. The link goes to the fork's pinned **Known issues** issue, the whole ledger by version and severity:
+   `known-issues.py issue --repo <fork> --slug owner/fork` creates it from the ledger (and pins it), or updates its
+   body in place -- run it whenever the ledger changes on the head branch (it asks first on a new fork: it posts
+   publicly). With no such issue the link is the fork's issue tracker. Setup writes the section; `known-issues.py
+   page --repo <fork> --fork owner/fork [--details-url URL]` prints it again. The page check refuses a numbered
+   issue link anywhere else on the page. Each listed issue's line is its `player` text (set with
+   `known-issues.py add --player` or `player ID TEXT`; the ledger's technical title otherwise) -- say what a
+   player notices and that it is being worked on, in neutral words: the page check refuses "bug", "broken",
+   "fixed" and the like. When an S2 opens or is closed at a published version, regenerate the section and update
+   the page (Modrinth: a PR plus a `publish_setup` dispatch; CurseForge: paste it on the project's page). The config
    also carries Modrinth's `environment` (default `client_and_server`; Modrinth keeps it per version, and every
    upload sends it) and `disclosures` (mandatory on Modrinth where they apply): setup always writes **derivative
    work** (the original, linked) and **AI-generated content** (code and text: the port's changes and the page).
