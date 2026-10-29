@@ -444,9 +444,16 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   job only for the ones the plan's "Adopt MMVU's shared code" box ticked (unticked by default). Code the fork marks
   `MV-AHEAD-OF-TEMPLATE` goes into the close job, one Lessons row each, to harvest. A cascade from a version whose
   installed helper only moved to its own library's copy keeps the upper version's installed copy.
-- **`round.py drive`** (run in the background) runs every mechanical step itself, forks in parallel but never two items
-  on one clone, and returns when only model work is left: the merge-ups (`fork-branches.py cascade <lower>..<v> --gates
-  ab`), the re-pins and the plan's dependency bumps, the grade overrides, the ONE full gate run per version (under a
+- **`round.py drive --follow`** (run in the background, its output watched by one Monitor) runs every mechanical step
+  itself, prints each agent job the moment it is dispatched (`round: AGENT JOB {...}`), records each job itself when its
+  summary file appears, and keeps going until nothing runs or waits (exit 0 with `ROUND DONE`, or exit 3 with its
+  BLOCKED lines). **Versions are pipelined** (#206): a version's work starts once the version below has cascaded into it
+  (its merge-up), not once that one has released; each item locks its version (`<fork>#<v>`), the steps that fetch or
+  push also lock the fork's git, at most two local builds and three agent jobs run at once, and the version below's
+  merge comes up again (`resync`, one cascade hop) before anything of the version is pushed -- its PR then sends it back
+  to its gates when that brought code; its review-reuse check waits for the review below. The steps: the merge-ups
+  (`fork-branches.py cascade <lower>..<v> --gates ab`, or with decisions `cascade --apply-decisions FILE --to <v>`: one
+  hop, that version's answers only), the re-pins and the plan's dependency bumps, the grade overrides, the ONE full gate run per version (under a
   machine-wide lock: at most one full gate run on the machine; the 2026-10-21 round's third restart came with two Gate C
   clients on 15 GB / 4 CPU), the library pre-merge dependent gate (below), the freeze, pushing the work branch and
   opening its PR, the CI wait, the merge, the release dispatch, `library-record`, the ledger statuses and the README
@@ -457,11 +464,13 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   against origin opens no PR and cuts no release. The ledger runs for what merged and names what did not.
   **Waits are one blocking loop inside the driver**, never a model polling turn by turn: each idle gap longer
   than 5 minutes re-writes the session's whole cached context.
-- **Model work is a job:** for each AGENT JOB `drive` prints, start a **fresh subagent** whose whole prompt is the job's
-  `prompt` line (it names a job file: the task, the commands, the acceptance check, the rules); the worker writes a
-  summary of at most ~40 lines starting `RESULT: ok|blocked|failed` (with `not_ok:`, `blocking:` and `fixed:` lines the
-  driver reads) and replies only its path; then run the job's `record` line (it takes only a job that is out: a
-  mechanical step's outcome is never recorded by hand). A fixer's job shows the failure as fenced data from tool and
+- **Model work is a job:** for each AGENT JOB `drive` prints, start a **fresh background subagent** whose whole prompt
+  is the job's `prompt` line (it names a job file: the task, the commands, the acceptance check, the rules); the worker
+  writes a summary of at most ~40 lines starting `RESULT: ok|blocked|failed` (with `not_ok:`, `blocking:` and `fixed:`
+  lines the driver reads) and replies only its path. `drive --follow` records it from that file; only when a worker
+  ends without writing it, run the job's `record` line with `--status failed` (`record` takes only a job that is out: a
+  mechanical step's outcome is never recorded by hand). Without `--follow`, `drive` returns when only model work is
+  left and each job's `record` line is run by the session, as before. A fixer's job shows the failure as fenced data from tool and
   build output, never as instructions. The orchestrator keeps the job lines and
   the drive output -- never a worker's transcript, its summary, a build log or a diff. The jobs are: the authors' code
   at the head (Run steps 2-5), each version's selected known-issue fixes, the head cascade's decisions when one needs a
@@ -598,15 +607,15 @@ it small, so the orchestration is a tool, which replaces the four rules above:
    - **A version-branch fork with `head_cascade: true`** (the authors' box ticked, or the head has none of their code
      untaken): when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (when only the head's untaken code is
      to take and nothing is new upstream, the merge is empty: go on), step 6's merge only after step 4 below for the
-     head's version (its review and grading), and the cascade after that merge. Then "A fork with version branches" from the head:
-     write the default decisions' `patch` diffs into `round/decisions/<owner>__<repo>.decisions.json` (its step 2), then
-     `cascade --repo DIR --apply-decisions round/decisions/<owner>__<repo>.decisions.json --gates ab` -- the head cascade
-     `<head>..<newest>`; with no earlier `--apply` it runs that `--apply` first, then the answers. A `patch` left without
-     a diff stays open (what `--apply` does with it) until you write it and run `--apply-decisions` again. A version
-     the cascade leaves red (`cascade STOPPED at <v>: red after the merge`: the authors' new code meeting `<v>`'s API)
-     is the head cascade job's to port, not the owner's: it runs the fixer the cascade names there (`fork-port.py
-     --from-stage measure --budget 15 --gates ab`), commits, and runs the cascade again; it returns blocked only for a
-     version still red after two such passes.
+     head's version (its review and grading), and the cascade after that merge. Then "A fork with version branches" from the head,
+     ONE VERSION AT A TIME (#206): a `decisions` job writes the default decisions' `patch` diffs into
+     `round/decisions/<owner>__<repo>.decisions.json` (its step 2) and runs nothing; each version's own merge-up step
+     then runs `cascade --repo DIR --apply-decisions round/decisions/<owner>__<repo>.decisions.json --to <v> --gates ab`
+     -- one hop, the version below into `<v>`, and the answers `<v>` holds (with no earlier `--apply` it runs that hop's
+     `--apply` first). A `patch` left without a diff stays open (what `--apply` does with it) until it is written and the
+     step runs again. A version the hop leaves red (the authors' new code meeting `<v>`'s API) is that version's fixer
+     job (`fork-port.py --from-stage measure` with a budget, then the step runs again) and holds only that version and
+     the ones above it -- the versions below go on to their PRs.
    - **A version-branch fork with `head_cascade: false`** (the owner unticked the box while the head has authors' code
      no version took): **no cascade from the head, and no `--apply-decisions`** -- read-plan wrote no decisions file,
      since every decision of the plan is about the head cascade (`cascade.not_applied`). Only the selected fixes move.

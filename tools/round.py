@@ -53,19 +53,23 @@ forks already on the current shared library, builds nothing but the close):
   a library head with a single-version dependent (or a single-version library) gets that depgate too, as does a
   version-branch library's version for a single-version dependent at that version; a set of version-branch forks only
   keeps its head as above
-  then per version in ladder order, each waiting for the one below it to merge:
+  then per version in ladder order, PIPELINED (#206): each starts once the one below has cascaded into it (its
+  mergeup), not once that one has merged:
       sync (fork-branches.py sync-shared --target <v>, its own commit; only a version the check named) -> mergeup
-      (fork-branches.py cascade <lower>..<v> --gates ab; the head cascade, with the plan's decisions, at the first
-      version -- an agent when a decision needs a patch written) -> repin (a dependent: the library's release of this
+      (ONE hop, fork-branches.py cascade <lower>..<v> --gates ab, or with the plan's decisions cascade --apply-decisions
+      FILE --to <v>; a `decisions` agent job at the first version writes the `patch` answers, nothing else; a hop left
+      red is that version's fixer job) -> repin (a dependent: the library's release of this
       round; the plan's dependency bumps) -> reconcile (an agent: a hand-edited shared copy whose template moved, never
       overwritten) -> adopt (an agent: only the copies the plan ticked) -> backlog (the issues the plan fixes AT this
       version) -> nochange (a version with no fix, sync, reconcile or adopt: nothing shipped changed -- its merge and
       records pushed, the push run awaited when the workflow changed, every step below skipped) -> reviewref (the
       review, fix and recheck skipped when REVIEW.md stays current through .port/CHANGE-REVIEWS.md) -> review ->
-      fix -> recheck -> gates (ONE full run: fork-port.py --from-stage measure --gates full, recording the gated commit;
+      fix -> recheck (reviewref waits for the review below, so a change reviewed there is reused) -> gates (ONE full run: fork-port.py --from-stage measure --gates full, recording the gated commit;
       on a ci_record fork -- its workflow takes from_run and dep_override -- the build and Gate A/B only, no lock: the
       PR's CI is the gate of record, its release's gates-<env>.md the record check-done reads)
-      -> freeze (and, after a clean fresh review, its reviewed changes in .port/CHANGE-REVIEWS.md) -> pr (only what the gates certified: code after the gated commit sends the version back to its gates)
+      -> freeze (and, after a clean fresh review, its reviewed changes in .port/CHANGE-REVIEWS.md) -> resync (once the
+      version below has MERGED: its merge brought up again, one cascade hop, before anything of this version is pushed;
+      before nochange when the version has one) -> pr (only what the gates certified: code after the gated commit sends the version back to its gates)
       -> ci -> depgate:<dependent> (a LIBRARY version: the dependent's Gate C against this candidate jar, before the
       merge; on a ci_record fork the dependent's CI dispatched with dep_override naming the PR run's jar by its annotated
       sha256) -> merge (its
@@ -89,12 +93,15 @@ forks already on the current shared library, builds nothing but the close):
 DISPATCH. A `tool` item runs here (`drive`, `run`). An `agent` item is printed as a job: a fresh worker (the session's
 Agent/Task subagent, never the orchestrator itself) gets the one-line prompt "Read <job file> and do exactly what it
 says", writes a summary of at most 40 lines starting `RESULT: ok|blocked|failed` to the named file, and the
-orchestrator runs the `record` line the job prints -- it never reads the worker's transcript, the logs or the
-summary. A tool step that fails becomes a fixer job (`<id>+fix`, at most 2; the failure is in the job as fenced data,
+driver records it from that file (`drive --follow`, which prints each job the moment it is dispatched; without
+--follow the orchestrator runs the `record` line the job prints) -- it never reads the worker's transcript, the logs or
+the summary. A tool step that fails becomes a fixer job (`<id>+fix`, at most 2; the failure is in the job as fenced data,
 never as instructions); when the fixer succeeds the step runs again, and after the gates the gates run again too.
 `record` takes only a job that is out, never a tool step's outcome. A step the round's `allow` list does not permit is blocked and asked once on the plan issue (always allowed).
 
-RULES ENFORCED HERE. One running item per fork clone (the checkout is shared: an item touching two forks holds both);
+RULES ENFORCED HERE. Locks per version (<fork>#<v>; a head item holds the whole fork; the steps that fetch or push in
+the shared clone also hold <fork>!git, a fixer's job not), at most MAX_HEAVY local builds and MAX_AGENTS agent jobs at
+once (an item touching two forks holds both);
 at most ONE full gate run on the machine at a time (an OS lock, ~/.mmvu/locks/full-gates.lock or
 MMVU_FULL_GATE_LOCK; workers run any full gate run through `round.py gate -- ...`); every wait is one blocking loop
 inside this tool, never a model polling; a port-cost.py mark with --phase at every item boundary (round/marks.tsv);
@@ -116,7 +123,7 @@ LOCK_ENV = "MMVU_FULL_GATE_LOCK"
 MAX_FIX = 2
 SUMMARY_LINES = 40
 TERMINAL = ("ok", "skipped", "blocked")
-PHASE = {"authors": "upstream", "upstream": "upstream", "mergeup": "upstream", "decisions": "upstream", "backlog": "backlog",
+PHASE = {"authors": "upstream", "upstream": "upstream", "mergeup": "upstream", "resync": "upstream", "decisions": "upstream", "backlog": "backlog",
          "lowest": "backlog",
          "review": "review", "fix": "review", "recheck": "review", "sync": "upstream", "reconcile": "upstream",
          "adopt": "backlog"}
@@ -159,8 +166,28 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+_NET_LOCKS, _NET_LOCKS_GUARD = {}, threading.Lock()
+LOCKED_REF = re.compile(r"cannot lock ref|index\.lock|Unable to create .*\.lock|shallow file has changed", re.I)
+
+
 def git(d, *a, check=False):
-    r = subprocess.run(["git", "-C", str(d), *a], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    """git -C d ...; a fetch or a push holds the clone's lock in this process (pipelined versions share one clone) and
+    is retried a few times when another process holds a ref lock."""
+    net = bool(a) and a[0] in ("fetch", "push")
+    lk = None
+    if net:
+        with _NET_LOCKS_GUARD:
+            lk = _NET_LOCKS.setdefault(str(pathlib.Path(d).resolve()), threading.Lock())
+    for n in range(5 if net else 1):
+        if lk:
+            with lk:
+                r = subprocess.run(["git", "-C", str(d), *a], capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace")
+        else:
+            r = subprocess.run(["git", "-C", str(d), *a], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if not (net and r.returncode and LOCKED_REF.search(r.stderr or "")):
+            break
+        time.sleep(2 + 3 * n)
     if check and r.returncode:
         raise StepError(f"git {' '.join(a[:3])}: {(r.stderr or r.stdout).strip()[-300:]}")
     return r
@@ -452,57 +479,76 @@ def build_queue(frozen, cfg, forks, date):
                 for dep in dependents.get(slug, []):
                     if (single or forks[dep]["kind"] == "single") and base in [forks[dep]["base"], *forks[dep]["versions"]]:
                         q.add(slug, base, f"depgate:{dep}", dirs=[slug, dep], extra={"dependent": dep})
-            q.add(slug, base, "merge")
+            head_merge = q.add(slug, base, "merge")
             release_of[(slug, base)] = q.add(slug, base, "release")
-        for v in segs:
+        # PIPELINED version branches (#206 A): version v's work starts once v-1 has CASCADED (its merge-up step), not
+        # once v-1 has released; v-1's merge comes back into v by the `resync` step just before v's PR, and the PR's
+        # check sends v back to its gates when that brought code. Each item locks its version (<fork>#<v>); the steps
+        # that fetch or push also lock the fork's git (<fork>!git), so versions overlap in reviews, gates and CI waits
+        # while the clone's network work stays one at a time.
+        anchor0 = head_merge if head_work else q.last.get(slug)
+        cascade_of, merge_of, review_of = {}, {}, {}
+        for i, v in enumerate(segs):
             k = F["versions"].index(v)
             prev = F["head"] if k == 0 else F["versions"][k - 1]
+            prev_seg = segs[i - 1] if i else None
+            q.last[slug] = cascade_of[prev_seg] if prev_seg else anchor0
+            addv = lambda step, v=v, **kw: q.add(slug, v, step, **dict(kw, dirs=kw.get("dirs") or vdirs(slug, v, step)))
             if v in sync_v:      # first: its own commit, before the merge-up and long before the gates
-                q.add(slug, v, "sync", extra={"changes": sh_[v]["changes"]})
+                addv("sync", extra={"changes": sh_[v]["changes"]})
             if k == 0 and not head_cascade and at.get(base):
                 # a fix at the head's version with no head cascade: its fix/<ID> branch (cut from the lowest version's
                 # port_taken, so it holds none of the authors' untaken code) is carried up with --port-ref; the versions
                 # above take it by their own merge-ups (keep-current, "A fork with version branches" step 2)
-                q.add(slug, v, "mergeup", extra={"from": F["head"], "port_refs": [f"fix/{x['id']}" for x in at[base]],
-                                                 "why": "the head's fixes on their fix/<ID> branches (no authors' code)"})
+                cascade_of[v] = addv("mergeup", extra={"from": F["head"], "port_refs": [f"fix/{x['id']}" for x in at[base]],
+                                                       "why": "the head's fixes on their fix/<ID> branches (no authors' code)"})
             elif k == 0 and not head_cascade:
-                q.add(slug, v, "mergeup", extra={"from": None, "why": "the plan does not take the authors' code: no "
-                                                 "cascade from the head (only the selected fixes move)"})
-            elif k == 0 and authors_up and any(d.get("choice") == "patch" for d in casc.get("decisions", [])):
-                q.add(slug, v, "decisions", extra={"from": prev, "to": F["versions"][-1], "decisions": casc["decisions"]})
+                cascade_of[v] = addv("mergeup", extra={"from": None, "why": "the plan does not take the authors' code: no "
+                                                       "cascade from the head (only the selected fixes move)"})
             else:
-                q.add(slug, v, "mergeup", extra={"from": prev, "head_cascade": k == 0,
-                                                 "decisions_file": k == 0 and authors_up and bool(casc.get("decisions"))})
+                if k == 0 and authors_up and any(d.get("choice") == "patch" for d in casc.get("decisions", [])):
+                    # the decisions' `patch` diffs written once, from the plan; each version's own merge-up applies them
+                    addv("decisions", extra={"from": prev, "to": F["versions"][-1], "decisions": casc["decisions"]})
+                # ONE hop per version (#206 A): a version the merge leaves red is that version's fixer job, and holds
+                # only itself and the versions above it
+                cascade_of[v] = addv("mergeup", extra={"from": prev, "head_cascade": k == 0,
+                                                       "decisions_file": authors_up and bool(casc.get("decisions"))})
             rel = [lb for lb in libs if rel_at(lb, v)]
             if rel or bumps.get(v):
-                q.add(slug, v, "repin", deps=[release_of[(lb, v)] for lb in rel],
-                      extra={"bumps": bumps.get(v, []), "libraries": rel})
+                addv("repin", deps=[release_of[(lb, v)] for lb in rel], extra={"bumps": bumps.get(v, []), "libraries": rel})
             if not (v in sync_v or v in rec_v or v in adopt_v or at.get(v)):
-                q.add(slug, v, "nochange")       # the merge-up alone: nothing shipped may have changed (t_nochange)
+                if prev_seg in merge_of:   # nochange pushes this branch to origin: never with v-1's unmerged commits
+                    addv("resync", deps=[merge_of[prev_seg]], extra={"from": f"neoforge-{prev_seg}", "before": "nochange"})
+                addv("nochange")       # the merge-up alone: nothing shipped may have changed (t_nochange)
             if v in rec_v:
-                q.add(slug, v, "reconcile", extra={"edited": [e for e in rec_v[v] if e.get("reconcile")]})
+                addv("reconcile", extra={"edited": [e for e in rec_v[v] if e.get("reconcile")]})
             if v in adopt_v:
-                q.add(slug, v, "adopt", extra={"adopt": adopt_v[v]})
+                addv("adopt", extra={"adopt": adopt_v[v]})
             if at.get(v):
-                q.add(slug, v, "backlog", extra={"fixes": at[v]})
-            q.add(slug, v, "reviewref")          # a change already reviewed lower down, file for file: no fresh review
-            seg_review(q, slug, v)
+                addv("backlog", extra={"fixes": at[v]})
+            # a change already reviewed lower down, file for file: no fresh review -- read once v-1's review is done
+            addv("reviewref", deps=[review_of[prev_seg]] if prev_seg in review_of else None)
+            for s_ in ("review", "fix", "recheck"):
+                review_of[v] = addv(s_)
             if v in sync_v and not (other_work(v) or v in rec_v or v in adopt_v):
                 # the version's only change is the shared library's own (reviewed in the migrator): a narrow review
                 q.items[-3]["extra"]["sync_only"] = True
-            g = q.add(slug, v, "gates")
-            q.add(slug, v, "freeze", extra={"libraries": rel})
+            g = addv("gates")
+            addv("freeze", extra={"libraries": rel})
+            if prev_seg in merge_of and not any(x["id"] == f"{F['name']}@{v}:resync" for x in q.items):
+                # v-1 merged since v cascaded: its merge (a reviewer's fix included) comes up first
+                addv("resync", deps=[merge_of[prev_seg]], extra={"from": f"neoforge-{prev_seg}"})
             for s in ("pr", "ci"):
-                q.add(slug, v, s)
+                addv(s)
             if F.get("library"):     # after its PR's CI (depgate_ci takes that run's candidate jar), before the merge
                 for dep in dependents.get(slug, []):
                     if v in forks[dep]["versions"] or sv_dep(dep, v):
-                        q.add(slug, v, f"depgate:{dep}", dirs=[slug, dep], extra={"dependent": dep})
-            q.add(slug, v, "merge")
-            release_of[(slug, v)] = q.add(slug, v, "release")
+                        addv(f"depgate:{dep}", dirs=[f"{slug}#{v}", f"{dep}#{v}"], extra={"dependent": dep})
+            merge_of[v] = addv("merge")
+            release_of[(slug, v)] = addv("release")
             for lb in rel:
-                q.add(slug, v, f"librecord:{forks[lb]['name']}", deps=[g, release_of[(slug, v)]], dirs=[slug, lb],
-                      extra={"library": lb}, after_last=False)
+                q.add(slug, v, f"librecord:{forks[lb]['name']}", deps=[g, release_of[(slug, v)]],
+                      dirs=[f"{slug}#{v}", f"{lb}#{v}"], extra={"library": lb}, after_last=False)
         # the ledger and README Ports block run for what merged, once nothing else of the fork can run (final)
         q.items.append({"id": f"{F['name']}@{base}:ledger", "fork": slug, "version": base, "step": "ledger", "arg": "",
                         "kind": "tool", "phase": "overhead", "deps": [], "dirs": [slug], "status": "pending", "fixes": 0,
@@ -620,6 +666,31 @@ def replan(st):
     new = build_queue(frozen, st.data["config"], st.data["forks"], st.data["date"])
     st.data["items"] = [old[it["id"]] if it["id"] in old and old[it["id"]]["status"] != "pending" else it for it in new]
     return len(new)
+
+
+GIT_STEPS = {"sync", "mergeup", "resync", "repin", "nochange", "pr", "merge", "release"}
+HEAVY_STEPS = {"sync", "mergeup", "resync", "repin", "gates"}      # local Gradle builds
+MAX_HEAVY = 2          # local builds at once on the machine (the cloud container's CPU and memory)
+MAX_AGENTS = 3         # agent jobs out at once (each a worker building and testing in its own worktree)
+
+
+def vdirs(slug, v, step):
+    """A version item's locks: its version (<fork>#<v>), and the fork's git (<fork>!git) for a step that fetches or
+    pushes in the shared clone."""
+    return [f"{slug}#{v}"] + ([f"{slug}!git"] if step.split(":", 1)[0] in GIT_STEPS else [])
+
+
+def dirs_clash(a, b):
+    """Do two lock sets clash? A bare fork (a head item, a fork-wide step) holds every lock of that fork; a version
+    lock holds that version; the fork's git lock is shared by its network steps."""
+    def fork_of(x):
+        return x.split("#", 1)[0].split("!", 1)[0]
+    for x in a:
+        for y in b:
+            if x == y or (("#" not in x and "!" not in x) and fork_of(y) == x) or (("#" not in y and "!" not in y)
+                                                                                    and fork_of(x) == y):
+                return True
+    return False
 
 
 def seg_review(q, slug, v):
@@ -807,31 +878,60 @@ def blocked_by(st, it, seen=None):
     return None
 
 
+def held_dirs(it):
+    """The locks an item holds while it runs: a tool step's fixer job (an agent working in the version's worktree) does
+    not hold the fork's git lock its step needs."""
+    if it.get("fixing") or (it["status"] == "failed" and it["kind"] == "tool"):
+        return [d for d in it["dirs"] if "!git" not in d]
+    return it["dirs"]
+
+
+def is_agent_work(it):
+    return it["kind"] == "agent" or bool(it.get("fixing")) or (it["status"] == "failed" and it["kind"] == "tool")
+
+
 def runnable(st):
-    busy = {f for it in st.items if it["status"] == "running" for f in it["dirs"]}
+    """The items that may start now, in queue order: every dependency done, no lock clashing with a running (or just
+    chosen) item's (dirs_clash), at most MAX_HEAVY local builds and MAX_AGENTS agent jobs at a time."""
+    running = [it for it in st.items if it["status"] == "running"]
+    busy = [held_dirs(it) for it in running]
+    heavy = sum(1 for it in running if it["kind"] == "tool" and not it.get("fixing") and it["step"] in HEAVY_STEPS)
+    agents = sum(1 for it in running if is_agent_work(it))
     out = []
+
+    def free(it):
+        return not any(dirs_clash(held_dirs(it), b) for b in busy)
+
+    def take(it):
+        nonlocal heavy, agents
+        out.append(it)
+        busy.append(held_dirs(it))
+        if is_agent_work(it):
+            agents += 1
+        elif it["step"] in HEAVY_STEPS:
+            heavy += 1
     for it in st.items:
         if it.get("close"):
             continue
         if it.get("final"):
             # the fork's ledger: once every other item of the fork is done or waits on a blocked one
-            if it["status"] == "pending" and not set(it["dirs"]) & busy and all(
+            if it["status"] == "pending" and free(it) and all(
                     x["status"] in TERMINAL or (x["status"] == "pending" and blocked_by(st, x))
                     for x in st.items if x["fork"] == it["fork"] and x is not it):
-                out.append(it)
-                busy |= set(it["dirs"])
+                take(it)
             continue
-        if it["status"] == "failed" and it["kind"] == "tool" and not set(it["dirs"]) & busy:
-            out.append(it)                                      # its fixer job
-            busy |= set(it["dirs"])
+        if is_agent_work(it) and it["status"] in ("pending", "failed") and agents >= MAX_AGENTS:
             continue
-        if it["status"] != "pending" or set(it["dirs"]) & busy:
+        if it["kind"] == "tool" and it["status"] == "pending" and it["step"] in HEAVY_STEPS and heavy >= MAX_HEAVY:
+            continue
+        if it["status"] == "failed" and it["kind"] == "tool" and free(it):
+            take(it)                                            # its fixer job
+            continue
+        if it["status"] != "pending" or not free(it):
             continue
         if all(st.item(d)["status"] in ("ok", "skipped") for d in it["deps"]):
-            out.append(it)
-            busy |= set(it["dirs"])
-    if not out and not any(it["status"] == "running" for it in st.items) and (not owner_can_unblock(st)
-                                                                            or st.data.get("close_anyway")):
+            take(it)
+    if not out and not running and (not owner_can_unblock(st) or st.data.get("close_anyway")):
         close = [it for it in st.items if it.get("close") and it["status"] == "pending"]
         out += close
     return out
@@ -1015,6 +1115,9 @@ FIX_HINT = {
     "mergeup": "A conflict or a red branch in the cascade: keep-current \"A fork with version branches\" step 2 (a red "
                "branch: RESIDUE.md, fork-port.py --from-stage measure with a budget) and step 3 (the 1.21.x -> 26.x "
                "boundary: resolve by hand inside the cascade's worktree, remake, cutout-check --fix, commit).",
+    "resync": "Bringing the version below up again (its merge since this version cascaded) left this version red or in "
+              "conflict: as for a merge-up -- resolve inside the cascade's worktree through this version's rows, or fix "
+              "RESIDUE.md's errors with fork-port.py --from-stage measure and a budget -- then commit.",
     "gates": "A red full gate run: read .port/<v>/GATES-RED.md and RESIDUE.md (or the ci-gates summary on a "
              "single-version branch), fix the cause at this version, commit. Do not re-run the full gates yourself.",
     "depgate": "The DEPENDENT's Gate C failed against this LIBRARY version's candidate jar (built from this version's "
@@ -1218,24 +1321,16 @@ def job_task(st, it):
     if s == "decisions":
         x = it["extra"]
         dec = st.rdir / "round/decisions" / (it["fork"].replace("/", "__") + ".decisions.json")
+        pending_ = [d_["id"] for d_ in x.get("decisions", []) if d_.get("choice") == "patch"]
         return [f"The head cascade of {it['fork']} with the plan's decisions: keep-current \"The weekly round\" step 3 "
-                f"(\"A version-branch fork with head_cascade: true\") and \"A fork with version branches\" step 2. Write "
-                f"the diff of each decision chosen `patch` into {dec} (in the port branch's names, from the entry or "
-                "CASCADE-PLAN.md), then:",
-                f"    python3 {T / 'fork-branches.py'} cascade --repo {F['dir']} --apply-decisions {dec} --gates ab "
-                f"--untaken-ok {st.data['frozen']}",
-                f"It runs the head cascade {x['from']}..{x['to']} (its --apply first). Never resolve a decision by hand.",
-                "A version the cascade leaves red (`cascade STOPPED at <v>: red after the merge` or `still red`: the "
-                "authors' new code meeting <v>'s API) is this job's to port, not the owner's: run the fixer the cascade "
-                f"names there, `python3 {T / 'fork-port.py'} --repo <that version's worktree> --target <v> --from-stage "
-                f"measure --budget 15 --gates ab --untaken-ok {st.data['frozen']}` (or fix RESIDUE.md's errors at <v> by "
-                "hand), commit on that version's branch, then run the cascade command above again: it resumes at <v>. "
-                "The cascade's own $0 compile budget and its `ask the person` choices are for a run with no fixer; this "
-                "job is the fixer. RESULT: blocked only for a version still red after two such passes, naming it and "
-                "its RESIDUE.md (weekly round 2026-10-29: a library's 1.21.8 stopped red on 6 compile errors and the "
-                "job returned blocked, holding every version above it).",
-                f"Acceptance: the cascade green at {v} and through {x['to']}; every decision applied or an open entry "
-                "named in the summary."]
+                f"(\"A version-branch fork with head_cascade: true\") and \"A fork with version branches\" step 2. This "
+                f"job WRITES THE ANSWERS ONLY: the diff of each decision chosen `patch` ({', '.join(pending_) or 'none'}) "
+                f"into {dec}, in the port branch's names, from CASCADE-PLAN.md (the plan's cascade files) -- one diff per "
+                "decision, or per version where the versions differ. Do not run the cascade: the driver runs it one "
+                f"version at a time ({x['from']}..{x['to']}, `cascade --apply-decisions --to <v>`), and a version it "
+                "leaves red is that version's own fixer job. Never resolve a decision by hand.",
+                f"Acceptance: {dec} is valid JSON with a `patch` for every decision listed (or take/keep/content where "
+                "the plan's entry says a diff cannot express it), committed nowhere -- it is the round's input file."]
     if s == "reconcile":
         ed = it["extra"]["edited"]
         lines = [f"Reconcile {it['fork']}'s hand-edited copies of MMVU's shared code with MMVU's newer template at {v}, "
@@ -1656,7 +1751,7 @@ def t_mergeup(st, it, log):
     cmd = [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d]
     dec = st.rdir / "round/decisions" / (it["fork"].replace("/", "__") + ".decisions.json")
     if x.get("decisions_file") and dec.is_file():
-        cmd += ["--apply-decisions", dec]
+        cmd += ["--apply-decisions", dec, "--to", v]     # ONE hop, this version's answers only (#206 A)
     else:
         cmd += [f"{frm}..{v}"]
     refs = x.get("port_refs") or []
@@ -1672,6 +1767,22 @@ def t_mergeup(st, it, log):
         return f"{', '.join(refs)} carried into neoforge-{v} (--port-ref), A/B green", {}
     sh(st, it, cmd + ["--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
     return f"{frm} merged into neoforge-{v}, A/B green", {}
+
+
+def t_resync(st, it, log):
+    """The version below, merged since this version cascaded from it (a reviewer's fix, its records), brought up
+    again before this version's PR: one plain cascade hop through this version's rows, A/B gated when it merged
+    anything. t_pr then sends the version back to its gates when that brought code."""
+    F, v, frm = st.fork(it["fork"]), it["version"], it["extra"]["from"]
+    d = F["dir"]
+    git(d, "fetch", "-q", "origin", check=True)
+    before = git(d, "rev-parse", f"refs/heads/neoforge-{v}").stdout.strip()
+    sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d, f"{frm}..{v}", "--gates", "ab",
+                "--untaken-ok", st.data["frozen"]], log)
+    after = git(d, "rev-parse", f"refs/heads/neoforge-{v}").stdout.strip()
+    moved = shipped_changes(d, before, after, v) if before and after and before != after else []
+    return (f"{frm} brought up again: " + (f"{len(moved)} shipped file(s) changed ({', '.join(moved[:4])})" if moved
+                                           else "nothing shipped changed")), {"moved": moved}
 
 
 NOT_SHIPPED = (".port/", ".github/", "docs/")
@@ -2775,7 +2886,7 @@ def t_ledger(st, it, log):
     return note, {"unmerged": unmerged, "refused": refused, "added": found_new}
 
 
-TOOL_IMPL = {"ci-check": t_ci_check, "grades": t_grades, "setup": t_setup, "upstream": t_upstream, "sync": t_sync,
+TOOL_IMPL = {"resync": t_resync, "ci-check": t_ci_check, "grades": t_grades, "setup": t_setup, "upstream": t_upstream, "sync": t_sync,
              "records": t_records, "done": t_done,
              "mergeup": t_mergeup,
              "repin": t_repin, "nochange": t_nochange, "reviewref": t_reviewref,
@@ -2919,6 +3030,26 @@ def cmd_run(a, out=print):
     return 0 if status == "ok" else 1
 
 
+FOLLOW_POLL = 20       # seconds between `drive --follow`'s looks at the jobs out
+
+
+def auto_record(state, out=print):
+    """`drive --follow`: record each agent job out whose summary has appeared (a summary from an earlier attempt was set
+    aside at dispatch, so whatever is there is this attempt's). -> how many were recorded."""
+    with State.tx(state, write=False) as st:
+        due = []
+        for it in st.items:
+            if it["status"] == "running" and is_agent_work(it):
+                jid = job_id(it, bool(it.get("fixing")))
+                sp = st.rdir / "round/summaries" / f"{jid}.md"
+                if sp.is_file() and parse_summary(sp.read_text(encoding="utf-8", errors="replace"))["status"]:
+                    due.append((jid, sp))
+    for jid, sp in due:
+        cmd_record(argparse.Namespace(id=jid, status=None, summary=str(sp), state=state), out)
+        sys.stdout.flush()
+    return len(due)
+
+
 def cmd_drive(a, out=print):
     """Run every runnable tool step (forks in parallel, one per clone, one full gate run at a time) until none is
     running or runnable; the agent jobs that came up are printed for the orchestrator. -> 0, or 3 when stuck."""
@@ -2928,6 +3059,7 @@ def cmd_drive(a, out=print):
             out(f"round: another drive is running on {a.state}: wait for it (its jobs are printed when it ends)")
             return 2
         jobs, ran = [], []
+        follow = bool(getattr(a, "follow", False))
         deadline = time.monotonic() + a.max_hours * 3600
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             running = {}
@@ -2942,20 +3074,37 @@ def cmd_drive(a, out=print):
                             finish(st, it, "blocked", f"needs the owner: {need}")
                             ask_owner(st, it, need)
                         elif it["kind"] == "agent" or it["status"] == "failed":
-                            jobs.append(dispatch_agent(st, it))
+                            j = dispatch_agent(st, it)
+                            jobs.append(j)
+                            if follow:          # at once: never held back while tool steps run (#206)
+                                out(f"round: AGENT JOB {json.dumps(j)}")
+                                sys.stdout.flush()
                         elif time.monotonic() < deadline:
                             claim(st, it)
                             running[pool.submit(run_tool, a.state, it["id"])] = it["id"]
-                if not running:
+                    out_ = [x for x in st.items if x["status"] == "running" and is_agent_work(x)] if follow else []
+                if follow:
+                    n_rec = auto_record(a.state, out)
+                    if n_rec:
+                        continue                # a recorded job may free the next items: look again at once
+                if not running and not out_:
                     break
-                done, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
+                if running:
+                    done, _ = concurrent.futures.wait(running, timeout=FOLLOW_POLL if follow else None,
+                                                      return_when=concurrent.futures.FIRST_COMPLETED)
+                else:                   # only agent jobs out: look for their summaries again in a while
+                    SLEEP(FOLLOW_POLL)
+                    done = set()
                 for fu in done:
                     iid = running.pop(fu)
                     status, note = fu.result()
                     ran.append(f"{iid} {status}: {note[:160]}")
-    for r in ran:
+                    if follow:
+                        out(f"round: ran {iid} {status}: {note[:160]}")
+                        sys.stdout.flush()
+    for r in ran if not getattr(a, "follow", False) else []:
         out(f"round: ran {r}")
-    if jobs:
+    if jobs and not getattr(a, "follow", False):
         out(f"round: {len(jobs)} AGENT JOB(S): start each as a fresh subagent with its `prompt` (nothing else), and when "
             "it ends run its `record` line; never read its transcript or summary here.")
         for j in jobs:
@@ -2964,7 +3113,7 @@ def cmd_drive(a, out=print):
     with State.tx(a.state, write=False) as st:
         live = any(it["status"] == "running" for it in st.items)
         left = [it for it in st.items if it["status"] in ("pending", "failed")]
-        stuck = not jobs and not ran and not live and left
+        stuck = not live and left and (getattr(a, "follow", False) or (not jobs and not ran))
         if stuck:
             for it in st.items:
                 if it["status"] == "blocked":
@@ -4051,9 +4200,9 @@ def self_check():
             dx = dict(st_.item("examplelow@1.21.1:lowest"), id="examplelow@1.21.1:decisions", step="decisions",
                       extra={"from": "neoforge-1.21.1", "to": "26.1.2", "decisions": []})
             dj_text = job_text(st_, dx)
-        expect("is this job's to port, not the owner's" in dj_text and "--from-stage measure --budget 15" in dj_text
-               and "two such passes" in dj_text and "through 26.1.2" in dj_text,
-               f"the head cascade's job fixes a version the cascade leaves red, with a budget: {dj_text}")
+        expect("WRITES THE ANSWERS ONLY" in dj_text and "Do not run the cascade" in dj_text
+               and "--apply-decisions --to <v>" in dj_text and "own fixer job" in dj_text,
+               f"the decisions job writes the patch answers only; each version's merge-up runs its hop (#206): {dj_text}")
         rc, o, items = init(fz_lo(ids4), cf_lo, [f"{LO}={low}"], lo_state)
         before = [x["id"] for x in items]
         # the false positive (the hit is right at those versions): the job confirms nothing lower -- nothing changes
@@ -4114,13 +4263,26 @@ def self_check():
         dg = "examplelib@1.21.4:depgate:owner/examplemod"
         expect(dg in by and pos["examplelib@1.21.4:review"] < pos["examplelib@1.21.4:gates"] < pos["examplelib@1.21.4:ci"]
                < pos[dg] < pos["examplelib@1.21.4:merge"] < pos["examplelib@1.21.4:release"]
-               and dg in by["examplelib@1.21.4:merge"]["deps"] and set(by[dg]["dirs"]) == {LIB, DEP}
+               and dg in by["examplelib@1.21.4:merge"]["deps"] and set(by[dg]["dirs"]) == {f"{LIB}#1.21.4", f"{DEP}#1.21.4"}
                and by[dg]["lock"] and by["examplelib@1.21.4:gates"]["lock"],
                f"the library version's merge waits for the dependent's Gate C against its candidate jar: {ids}")
         expect("examplelib@1.21.8:depgate:owner/examplemod" not in by and "examplelib@1.21.5:depgate:owner/examplemod" in by,
                "no dependent gate where the dependent has no branch at that version")
-        expect(by["examplelib@1.21.5:mergeup"]["deps"] == ["examplelib@1.21.4:release"]
-               and by["examplelib@1.21.4:mergeup"]["extra"]["from"] is None
+        rs5 = by.get("examplelib@1.21.5:resync", {})
+        expect(by["examplelib@1.21.5:mergeup"]["deps"] == ["examplelib@1.21.4:mergeup"]
+               and rs5.get("deps") == ["examplelib@1.21.5:mergeup", "examplelib@1.21.4:merge"]
+               and rs5.get("extra", {}).get("before") == "nochange"
+               and by["examplelib@1.21.5:nochange"]["deps"] == ["examplelib@1.21.5:resync"]
+               and by["examplelib@1.21.5:pr"]["deps"] == ["examplelib@1.21.5:freeze"]
+               and by["examplelib@1.21.5:reviewref"]["deps"] == ["examplelib@1.21.5:nochange", "examplelib@1.21.4:recheck"]
+               and rs5.get("extra", {}).get("from") == "neoforge-1.21.4"
+               and by["examplelib@1.21.5:gates"]["dirs"] == [f"{LIB}#1.21.5"]
+               and by["examplelib@1.21.5:pr"]["dirs"] == [f"{LIB}#1.21.5", f"{LIB}!git"],
+               f"pipelined (#206): a version starts once the one below has cascaded and brings that one's merge up "
+               f"again before anything of it is pushed (here its nochange push); its review reuse waits for the "
+               f"review below; version locks, the fork's git lock on network steps: {rs5} "
+               f"{by['examplelib@1.21.5:mergeup']['deps']}")
+        expect(by["examplelib@1.21.4:mergeup"]["extra"]["from"] is None
                and "examplelib@1.21.1:authors" not in by and "examplelib@1.21.1:backlog" not in by
                and by["examplelib@1.21.4:backlog"]["extra"]["fixes"][0]["id"] == "LIB-1",
                "each version waits for the one below it; no cascade from the head without the authors' code; the fix at "
@@ -4253,6 +4415,63 @@ def self_check():
             fake_st = State(st.path, {"items": [mk("a", ["o/lib"], "running"), mk("b", ["o/dep", "o/lib"]), mk("c", ["o/dep"]),
                                                 mk("d", ["o/dep"])]})
             expect([x["id"] for x in runnable(fake_st)] == ["c"], "one running item per clone, both for a two-clone item")
+        # #206: version locks, the fork's git lock, the build and agent caps, a fixer without the git lock
+        expect(dirs_clash(["o/lib"], ["o/lib#1.21.4"]) and dirs_clash(["o/lib#1.21.4"], ["o/lib#1.21.4"])
+               and not dirs_clash(["o/lib#1.21.4"], ["o/lib#1.21.5"]) and dirs_clash(["o/lib!git"], ["o/lib", "o/x#1"])
+               and dirs_clash(["o/lib#1.21.4", "o/lib!git"], ["o/lib#1.21.5", "o/lib!git"])
+               and not dirs_clash(["o/lib#1.21.4"], ["o/lib!git"]) and not dirs_clash(["o/lib#1"], ["o/libx#1"]),
+               "lock clashes: a bare fork holds all of it; versions apart; the git lock shared by network steps")
+        with State.tx(state, write=False) as st:
+            mk2 = lambda i, step, dirs, status="pending", kind="tool": {"id": i, "fork": "o/f", "version": "", "step": step,
+                                                                      "kind": kind, "deps": [], "dirs": dirs,
+                                                                      "status": status}
+            fake2 = State(st.path, {"items": [
+                mk2("g1", "gates", ["o/f#1"], "running"), mk2("g2", "gates", ["o/f#2"], "running"),
+                mk2("m3", "mergeup", ["o/f#3", "o/f!git"]),                        # a third build: over the cap
+                mk2("p4", "pr", ["o/f#4", "o/f!git"], "running"),
+                mk2("p5", "pr", ["o/f#5", "o/f!git"]),                             # the git lock is p4's
+                mk2("x6", "resync", ["o/f#6", "o/f!git"], "failed"),               # its fixer: no git lock
+                mk2("r7", "review", ["o/f#7"], kind="agent"), mk2("r8", "review", ["o/f#8"], kind="agent"),
+                mk2("r9", "review", ["o/f#9"], kind="agent")]})
+            got = [x["id"] for x in runnable(fake2)]
+        expect(got == ["x6", "r7", "r8"],
+               f"two builds at most, the git lock one at a time, a fixer without it, three agent jobs at most: {got}")
+        # #206: drive --follow prints a job the moment it is dispatched, records it when its summary appears, goes on
+        with tempfile.TemporaryDirectory() as fd:
+            fd = pathlib.Path(fd)
+            fsp = fd / "round" / "STATE.json"
+            (fd / "round" / "summaries").mkdir(parents=True)
+            fsp.write_text(json.dumps({"round_dir": str(fd), "forks": {}, "data": {}, "items": [
+                {"id": "o@1:job", "fork": "", "version": "1", "step": "job", "kind": "agent", "deps": [], "dirs": ["o#1"],
+                 "status": "pending", "fixes": 0, "extra": {}, "result": {}, "phase": "overhead", "lock": False},
+                {"id": "o@1:after", "fork": "", "version": "1", "step": "after", "kind": "tool", "deps": ["o@1:job"],
+                 "dirs": ["o#1"], "status": "pending", "fixes": 0, "extra": {}, "result": {}, "phase": "overhead",
+                 "lock": False}]}), encoding="utf-8")
+            G_ = globals()
+            keep2 = {k: G_[k] for k in ("dispatch_agent", "SLEEP")}
+            keep_after = TOOL_IMPL.get("after")
+
+            def disp(st_, it_):
+                it_["status"], it_["started"] = "running", now()
+                return {"id": "o@1_job", "prompt": "p", "summary": str(fd / "round/summaries/o@1_job.md"), "record": "r"}
+            G_["dispatch_agent"] = disp
+            G_["SLEEP"] = lambda n: (fd / "round/summaries/o@1_job.md").write_text("RESULT: ok\n", encoding="utf-8")
+            TOOL_IMPL["after"] = lambda st_, it_, log_: ("after ran", {})
+            try:
+                rc, o = q(cmd_drive, argparse.Namespace(state=str(fsp), max_hours=1.0, follow=True))
+            finally:
+                G_.update(keep2)
+                if keep_after is None:
+                    TOOL_IMPL.pop("after", None)
+                else:
+                    TOOL_IMPL["after"] = keep_after
+            fin = json.loads(fsp.read_text(encoding="utf-8"))
+            lines_ = o.splitlines()
+            ij = next((k for k, ln in enumerate(lines_) if ln.startswith("round: AGENT JOB ")), -1)
+            ir = next((k for k, ln in enumerate(lines_) if "o@1_job recorded ok" in ln), -1)
+            expect(rc == 0 and 0 <= ij < ir and [x["status"] for x in fin["items"]] == ["ok", "ok"]
+                   and "ROUND DONE" in o,
+                   f"drive --follow: the job line at once, recorded from its summary, the next step run, done: {o}")
 
         def rec(i, text, st_path=state):
             p_ = pathlib.Path(st_path).parent / "summaries" / f"{i}.md"
@@ -4584,8 +4803,8 @@ def self_check():
             ask_owner(st, st.item("examplelib@1.21.4:merge"), "merge-fork-prs")
         gh = real_gh
         expect(posted and posted[0]["body"].startswith("@owner the round needs"), f"the ask @mentions the login: {posted}")
-        git(dep, "checkout", "-q", "neoforge-1.21.5", check=True)
-        hw = dep / "build/fork-branches/1.21.1"
+        git(dep, "checkout", "-q", "-B", "selfcheck-elsewhere", check=True)   # the clone on another branch (pipelined
+        hw = dep / "build/fork-branches/1.21.1"                               # versions hold theirs in worktrees)
         git(dep, "worktree", "add", "-q", str(hw), "neoforge-1.21.1", check=True)
         gh = lambda path, method="GET", data=None: []
         with State.tx(rs, write=False) as st:
@@ -4593,7 +4812,7 @@ def self_check():
         note, r_ = t_ledger(st, st.item("examplemod@1.21.1:ledger"), tmp / "ledger.log")
         expect(os.path.samefile(holder(dep, "neoforge-1.21.1") or tmp, hw)
                and os.path.samefile(checkout(str(dep), "neoforge-1.21.1"), hw)
-               and git(dep, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "neoforge-1.21.5",
+               and git(dep, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "selfcheck-elsewhere",
                f"the head held by a clean worktree: the step works there, the clone stays where it is: {note} (holder {holder(dep, 'neoforge-1.21.1')!r}, hw {str(hw)!r})")
         (hw / "Main.java").write_text("dirty\n", encoding="utf-8")
         try:
@@ -5272,6 +5491,9 @@ def main(argv=None):
             s.add_argument("--json", action="store_true"); s.add_argument("--markdown", action="store_true")
         if name == "drive":
             s.add_argument("--max-hours", type=float, default=6.0, help="start no new step after this long")
+            s.add_argument("--follow", action="store_true", help="print each agent job the moment it is dispatched "
+                           "(`round: AGENT JOB {...}`), record each one when its summary appears, and keep going until "
+                           "nothing runs or waits -- the session only starts the workers")
         if name == "gate":
             s.add_argument("command", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv)
