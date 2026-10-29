@@ -408,7 +408,8 @@ def public_text_problems(text, permission=""):
             section = line.lower()
         if "credits" in section or ("the original" in section and "differs" not in section):
             continue
-        if re.search(r"/issues/\d+", line.replace(permission, "") if permission else line):
+        # the Known issues section links the fork's own Known issues issue (known-issues.py issue): that one is meant
+        if "known issues" not in section and re.search(r"/issues/\d+", line.replace(permission, "") if permission else line):
             probs.append(f"links a numbered issue: {line.strip()[:120]}")
         w = PUBLIC_WORDS.search(line)
         if w:
@@ -716,15 +717,17 @@ def original_credits_file(up):
     return None
 
 
-def known_issues_section(repo, fork):
+def known_issues_section(repo, fork, api=None):
     """The page's "Known issues" (lines): the open S1-S2s of the fork's known-issues ledger in their players' words,
-    S3 and S4 behind the closing link to the fork's issue tracker (known-issues.py page). A fork with no ledger gets
-    the link alone. Regenerate it (`known-issues.py page`) and paste it again when an S2 opens or is fixed."""
+    S3 and S4 behind the closing link -- the fork's pinned Known issues issue (known-issues.py issue) when it has one,
+    else its issue tracker (known-issues.py page). A fork with no ledger gets the link alone. Regenerate it
+    (`known-issues.py page`) and paste it again when an S2 opens or is fixed."""
+    ki = _known_issues()
+    url = ki.details_link(fork, api)
     led = pathlib.Path(repo) / ".port/KNOWN-ISSUES.json"
     if not led.is_file():
-        return ["## Known issues", "", f"Known issues and their status: [the port's issue tracker](https://github.com/{fork}/issues).", ""]
-    ki = _known_issues()
-    return ki.page(ki.read_ledger(led), fork).splitlines() + [""]
+        return ["## Known issues", "", f"Known issues and their status: [the port's issue tracker]({url}).", ""]
+    return ki.page(ki.read_ledger(led), fork, url).splitlines() + [""]
 
 
 def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
@@ -888,13 +891,22 @@ def self_check():
             {"id": "KI-2", "title": "a texture seam", "rubric": R_("cosmetic", "normal"), "severity": "S3",
              "override": None, "lowest": "1.21.1", "status": {"1.21.1": "open"}, "source": "player"}]}),
             encoding="utf-8")
-        sec = "\n".join(known_issues_section(kd, "o/f"))
+        none = lambda path, method="GET", data=None: []        # GitHub: no Known issues issue yet
+        sec = "\n".join(known_issues_section(kd, "o/f", none))
         expect(sec.startswith("## Known issues") and "**Minecraft 1.21.4 and 1.21.5:** Accessory stat bonuses don't apply"
                in sec and "texture seam" not in sec and "getAttributeModifiers" not in sec
                and "https://github.com/o/f/issues)" in sec and public_text_problems(sec) == [],
                f"the page lists the open S2 in players' words, not the S3, links the tracker, and is neutral: {sec}")
         expect("[the port's issue tracker](https://github.com/o/f/issues)" in "\n".join(known_issues_section(
-               pathlib.Path(kd) / "none", "o/f")), "no ledger: the tracker link alone")
+               pathlib.Path(kd) / "none", "o/f", none)), "no ledger: the tracker link alone")
+        pinned = lambda path, method="GET", data=None: [{"number": 4, "html_url": "https://github.com/o/f/issues/4",
+            "body": _known_issues().ISSUE_MARK + " -->"}] if "page=1" in path else []
+        sec4 = "\n".join(known_issues_section(kd, "o/f", pinned))
+        expect("(https://github.com/o/f/issues/4)" in sec4 and public_text_problems(sec4) == []
+               and public_text_problems("## Requirements\n- see https://github.com/o/f/issues/4") != []
+               and public_text_problems("## Known issues\n- the crash on load") != [],
+               "with a pinned Known issues issue the page links it; only that section may link an issue, and its "
+               "words are still checked")
     expect(public_text_problems("Permission: https://github.com/a/b/issues/9", "https://github.com/a/b/issues/9") == [],
            "the permission link is exempt")
     expect(public_text_problems("## The original\n- the blade lies broken\n## How it differs from the original\n"
