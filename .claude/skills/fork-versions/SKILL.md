@@ -440,6 +440,7 @@ into the ledger at its lowest affected version and the run goes on. `known-issue
     python3 tools/known-issues.py select  --repo DIR [--budget 3] [--touched PATH ...] [--version V ...] [--add ID] [--remove ID]
     python3 tools/known-issues.py render-issue  --repo DIR          # the pinned issue: issue by version, by severity
     python3 tools/known-issues.py release-notes --repo DIR --version 1.21.5 --tag <tag> [--min S3] [--platform mr|cf]
+    python3 tools/known-issues.py page --repo DIR --fork owner/repo   # the project page's Known issues: open S2s, S3/S4 behind a link
     python3 tools/known-issues.py blocks-publish --repo DIR --version 1.21.5 --platform mr|cf   # exit 1: an open S1
 
 `add` numbers a new entry in the ledger's own numbering (its most used prefix, zero-padded as it is: `EXM-025` after

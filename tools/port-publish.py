@@ -716,6 +716,17 @@ def original_credits_file(up):
     return None
 
 
+def known_issues_section(repo, fork):
+    """The page's "Known issues" (lines): the open S1-S2s of the fork's known-issues ledger in their players' words,
+    S3 and S4 behind the closing link to the fork's issue tracker (known-issues.py page). A fork with no ledger gets
+    the link alone. Regenerate it (`known-issues.py page`) and paste it again when an S2 opens or is fixed."""
+    led = pathlib.Path(repo) / ".port/KNOWN-ISSUES.json"
+    if not led.is_file():
+        return ["## Known issues", "", f"Known issues and their status: [the port's issue tracker](https://github.com/{fork}/issues).", ""]
+    ki = _known_issues()
+    return ki.page(ki.read_ledger(led), fork).splitlines() + [""]
+
+
 def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
     repo = pathlib.Path(repo).expanduser()
     ref = f"origin/{branch}"
@@ -802,7 +813,8 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
         lines.append(f"- {'Required' if d['type'] == 'required' else 'Optional'}: {what}")
     if not deps:
         lines.append(f"- Nothing beyond NeoForge {mc}.")
-    lines += ["", "## How releases are made", "",
+    lines += [""] + known_issues_section(repo, fork)
+    lines += ["## How releases are made", "",
               f"Every release is built by the original author's own build from https://github.com/{fork}, passes "
               "automated checks (it builds, loads on a dedicated server, runs in a real client), and is played by a "
               "person before it is published here.", ""]
@@ -863,6 +875,26 @@ def self_check():
                "m-2-mc1.21.1", {"body": "x\n\nPlayed by @someone on 2026-10-12."}, "o/f")
     expect(public_text_problems(nt, "https://example.invalid/ok") == [] and "Differences from the original" in nt and "Played by @someone" in nt,
            f"notes are neutral and carry differences: {public_text_problems(nt, 'https://example.invalid/ok')}")
+    # the page's Known issues: the ledger's open S2 in its player words, S3 behind the link; neutral public text
+    import tempfile
+    with tempfile.TemporaryDirectory() as kd:
+        (pathlib.Path(kd) / ".port").mkdir()
+        R_ = lambda f, r: {"failure": f, "visibility": "always", "reach": r, "workaround": False}
+        (pathlib.Path(kd) / ".port/KNOWN-ISSUES.json").write_text(json.dumps({"schema": 1, "issues": [
+            {"id": "KI-1", "title": "1.21.4+: getAttributeModifiers is never called", "rubric": R_("functional", "feature"),
+             "severity": "S2", "override": {"severity": "S2", "reason": "r", "by": "owner"}, "lowest": "1.21.4",
+             "status": {"1.21.1": "n/a", "1.21.4": "open", "1.21.5": "open"}, "source": "player",
+             "player": "Accessory stat bonuses don't apply yet; their other effects work"},
+            {"id": "KI-2", "title": "a texture seam", "rubric": R_("cosmetic", "normal"), "severity": "S3",
+             "override": None, "lowest": "1.21.1", "status": {"1.21.1": "open"}, "source": "player"}]}),
+            encoding="utf-8")
+        sec = "\n".join(known_issues_section(kd, "o/f"))
+        expect(sec.startswith("## Known issues") and "**Minecraft 1.21.4 and 1.21.5:** Accessory stat bonuses don't apply"
+               in sec and "texture seam" not in sec and "getAttributeModifiers" not in sec
+               and "https://github.com/o/f/issues)" in sec and public_text_problems(sec) == [],
+               f"the page lists the open S2 in players' words, not the S3, links the tracker, and is neutral: {sec}")
+        expect("[the port's issue tracker](https://github.com/o/f/issues)" in "\n".join(known_issues_section(
+               pathlib.Path(kd) / "none", "o/f")), "no ledger: the tracker link alone")
     expect(public_text_problems("Permission: https://github.com/a/b/issues/9", "https://github.com/a/b/issues/9") == [],
            "the permission link is exempt")
     expect(public_text_problems("## The original\n- the blade lies broken\n## How it differs from the original\n"

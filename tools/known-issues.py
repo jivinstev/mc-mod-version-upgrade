@@ -16,6 +16,8 @@ each Minecraft version (issue #135, part 1).
                                           [--add ID ...] [--remove ID ...] [--json]
     python3 tools/known-issues.py render-issue  [LEDGER]
     python3 tools/known-issues.py release-notes [LEDGER] --version MC --tag TAG [--min S3] [--platform P] [--repo DIR]
+    python3 tools/known-issues.py page    [LEDGER] --fork OWNER/REPO [--details-url URL] [--min S2]
+    python3 tools/known-issues.py player  [LEDGER] ID TEXT
     python3 tools/known-issues.py blocks-publish [LEDGER] --version MC --platform mr|cf
     python3 tools/known-issues.py reopens [LEDGER] --version MC (--severity S | --id ID)
     python3 tools/known-issues.py render-plan --input PLAN-INPUT.json --out ISSUE.json
@@ -58,7 +60,9 @@ THE SCHEMA (schema 1):
                                                 # reports a hit as a candidate a person or agent confirms
                "platforms": ["cf"],             # optional: only that platform's jar (mr Modrinth, cf CurseForge);
                                                 # absent: every platform
-               "notes": "..."}]}
+               "notes": "...",
+               "player": "..."}]}                 # optional: one line for players, in the words of the project
+                                                # page's "Known issues" (`page`); absent: the title
   A version missing from status is not affected. Which releases contain an issue is never stored: release-notes works
   it out from the tag (with --repo, a fixed@<commit> that is not in the tag counts as open there).
 
@@ -153,7 +157,7 @@ STATE_RE = re.compile(r"^(?:open|n/a|fixed@[0-9a-f]{7,40}|wontfix:\S.*|duplicate
 DEFAULT_BUDGET = 3
 TOP_KEYS = {"schema", "issues"}
 ISSUE_KEYS = {"id", "title", "rubric", "severity", "override", "lowest", "status", "source", "files", "pattern",
-              "platforms", "notes"}
+              "platforms", "notes", "player"}
 
 
 class Invalid(Exception):
@@ -263,6 +267,8 @@ def validate(data):
             raise Invalid(f"{where}: platforms must be a non-empty list of {', '.join(PLATFORMS)} (absent: all)")
         if "notes" in e and not isinstance(e["notes"], str):
             raise Invalid(f"{where}: notes must be text")
+        if "player" in e and (not isinstance(e["player"], str) or not e["player"].strip() or "\n" in e["player"]):
+            raise Invalid(f"{where}: player must be one line of text")
     for e in issues:              # duplicate:<ID> names another issue of this ledger
         for v, s in e["status"].items():
             if s.startswith("duplicate:") and (s[10:] == e["id"] or s[10:] not in seen):
@@ -496,6 +502,38 @@ def release_notes(data, version, tag, min_sev="S3", repo=None, platform=None):
     for e, extra in rows:
         lines.append(f"- **{e['severity']}** {e['title']} ({e['id']}){'' if platform else scope(e)}{extra}")
     lines += ["", f"_From the port's known-issues ledger; {'S1' if min_sev == 'S1' else 'S1-' + min_sev} listed._"]
+    return "\n".join(lines) + "\n"
+
+
+def span(vs, known):
+    """Minecraft versions as a player reads them: a run of consecutive known versions as "A to B"."""
+    idx = sorted(known.index(v) for v in vs)
+    runs, start = [], idx[0]
+    for a, b in zip(idx, idx[1:] + [None]):
+        if b != a + 1:
+            runs.append(known[start] if start == a else
+                        f"{known[start]} and {known[a]}" if a == start + 1 else f"{known[start]} to {known[a]}")
+            start = b
+    return ", ".join(runs)
+
+
+def page(data, fork, details_url=None, min_sev="S2"):
+    """The project page's "Known issues" section (Modrinth and CurseForge): each issue open at some version and graded
+    `min_sev` or worse (S1-S2 by default: an open S1 is never published, so in practice the S2s), in its `player`
+    words, with the versions it is open at. S3 and S4 are not listed; the closing line links the details for anyone
+    who wants them (the fork's issue tracker by default)."""
+    known = versions(data)
+    rows = [e for e in sorted(data["issues"], key=order)
+            if sev_rank(e["severity"]) <= sev_rank(min_sev) and open_versions(e)]
+    url = details_url or f"https://github.com/{fork}/issues"
+    lines = ["## Known issues", ""]
+    for e in rows:
+        text = (e.get("player") or e["title"]).strip().rstrip(".")
+        lines.append(f"- **Minecraft {span(open_versions(e), known)}:** {text}.{scope(e)}")
+    if rows:
+        lines += ["", f"Smaller known issues, and more detail on these: [the port's issue tracker]({url})."]
+    else:
+        lines.append(f"No major known issues. Smaller ones, and more detail: [the port's issue tracker]({url}).")
     return "\n".join(lines) + "\n"
 
 
@@ -1391,6 +1429,7 @@ def build_parser():
     p.add_argument("--pattern", help="an extended regex (git grep -E) whose match in the files means the defect is there")
     p.add_argument("--platform", action="append", dest="platforms", choices=PLATFORMS,
                    help="only this platform's jar is affected (repeatable; default: every platform)")
+    p.add_argument("--player", help="one line for players: the project page's words for it (page)")
     p = common(sub.add_parser("grade", help="re-grade an issue; an owner override wins and is recorded"))
     p.add_argument("id")
     rubric_args(p, False)
@@ -1424,6 +1463,12 @@ def build_parser():
     p.add_argument("--remove", action="append", default=[], metavar="ID")
     p.add_argument("--json", action="store_true")
     common(sub.add_parser("render-issue", help="the pinned issue's markdown"))
+    p = common(sub.add_parser("page", help="the project page's Known issues section (open S1-S2; S3/S4 behind a link)"))
+    p.add_argument("--fork", required=True, help="owner/repo: its issue tracker is the details link")
+    p.add_argument("--details-url", help="link the details here instead (a pinned known-issues issue)")
+    p.add_argument("--min", choices=SEVERITIES, default="S2", help="the threshold (default S2: S3 and S4 omitted)")
+    p = common(sub.add_parser("player", help="set an issue's one line for players (the project page's words)"))
+    p.add_argument("id"); p.add_argument("text")
     p = common(sub.add_parser("release-notes", help="the open issues of one version at a tag"))
     p.add_argument("--version", required=True); p.add_argument("--tag", required=True)
     p.add_argument("--min", choices=SEVERITIES, default="S3", help="the threshold (default S3: S4 omitted)")
@@ -1490,7 +1535,7 @@ def run(argv):
     path = pathlib.Path(a.ledger) if a.ledger else repo / ledger_rel(a.mod)
     if a.cmd == "render-ports":
         return cmd_render_ports(a, repo, out)
-    writes = a.cmd in ("add", "grade", "status")
+    writes = a.cmd in ("add", "grade", "status", "player")
     if writes and a.ref:
         raise Invalid(f"--ref is read-only: {a.cmd} writes the file on the head branch's checkout")
     data = read_ledger(path, repo, a.ref, a.mod)
@@ -1517,6 +1562,8 @@ def run(argv):
             e["pattern"] = a.pattern
         if a.platforms:
             e["platforms"] = sorted(set(a.platforms), key=PLATFORMS.index)
+        if a.player:
+            e["player"] = a.player.strip()
         e["severity"] = effective(e)
         data["issues"].append(e)
         write_ledger(path, data)
@@ -1591,6 +1638,15 @@ def run(argv):
         return 0
     if a.cmd == "render-issue":
         out(render_issue(data), end="")
+        return 0
+    if a.cmd == "page":
+        out(page(data, a.fork, a.details_url, a.min), end="")
+        return 0
+    if a.cmd == "player":
+        e = find(data, a.id)
+        e["player"] = a.text.strip()
+        write_ledger(path, data)
+        out(f"{e['id']}: player text set")
         return 0
     if a.cmd == "release-notes":
         text = release_notes(data, a.version, a.tag, a.min, repo if a.repo else None, a.platform)
@@ -1821,6 +1877,32 @@ def self_check():
     expect(derive(R("security", "invisible", "unusual", True)) == "S1", "security (a leaked token) grades S1")
     expect(derive(R("build", "rare", "feature", True)) == "S1", "build (the version does not compile) grades S1")
     expect(reopens("S1") and not any(reopens(s) for s in ("S2", "S3", "S4")), "only S1 reopens a done version")
+    # the project page's Known issues: open S2s (and S1s) in players' words with their versions; S3/S4 behind the link
+    pg = {"schema": 1, "issues": [
+        {"id": "KI-1", "title": "1.21.4+: a technical title", "rubric": R("functional", "always", "feature"),
+         "severity": "S2", "override": {"severity": "S2", "reason": "r", "by": "owner"}, "lowest": "1.21.4",
+         "status": {"1.21.1": "n/a", "1.21.4": "open", "1.21.5": "open", "1.21.8": "open", "26.1.2": "open"},
+         "source": "player", "player": "Accessory bonuses don't apply yet."},
+        {"id": "KI-2", "title": "a cosmetic seam", "rubric": R("cosmetic"), "severity": "S3", "override": None,
+         "lowest": "1.21.1", "status": {"1.21.1": "open"}, "source": "player"},
+        {"id": "KI-3", "title": "fixed functional bug", "rubric": R("functional"), "severity": "S2", "override": None,
+         "lowest": "1.21.1", "status": {"1.21.1": "fixed@abcdef1"}, "source": "player"}]}
+    validate(pg)
+    txt = page(pg, "o/fork")
+    expect(txt.startswith("## Known issues\n") and "- **Minecraft 1.21.4 to 26.1.2:** Accessory bonuses don't "
+           "apply yet." in txt and "cosmetic seam" not in txt and "fixed functional" not in txt
+           and "technical title" not in txt and "(https://github.com/o/fork/issues)" in txt,
+           f"page: the open S2 in players' words with its versions; no S3, nothing fixed; the details link: {txt}")
+    expect("cosmetic seam" in page(pg, "o/fork", min_sev="S3") and "No major known issues" in
+           page({"schema": 1, "issues": pg["issues"][1:]}, "o/fork", "https://example.invalid/k"),
+           "page --min S3 lists S3s; with no S2 open it says so, linking --details-url")
+    expect(span(["1.21.4", "1.21.5"], ["1.21.1", "1.21.4", "1.21.5"]) == "1.21.4 and 1.21.5"
+           and span(["1.21.1", "1.21.5"], ["1.21.1", "1.21.4", "1.21.5"]) == "1.21.1, 1.21.5",
+           "two in a row read 'and'; a gap in the ledger's versions splits the run")
+    try:
+        validate({"schema": 1, "issues": [{**pg["issues"][1], "player": "two\nlines"}]}); expect(False, "player: one line")
+    except Invalid:
+        pass
     import urllib.request
     urls, real_open = [], urllib.request.urlopen
 
