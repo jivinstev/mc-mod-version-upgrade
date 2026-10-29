@@ -366,6 +366,12 @@ this is the order and the rules around them. The round runs this repository's **
 so it gets the tools' fixes); only Tuesday's plan workflow is pinned, at `migrator_sha` in that file, so that a plan is
 reproducible from its commit. The two meet only at the plan issue: if `read-plan` cannot read it, stop and report.
 
+**While a round runs, nothing else pushes to the forks' branches or dispatches their Port CI** -- the owner's own
+publishing session included. Hold those until the round's closing comment. A commit landing on a version branch
+between a PR's CI and its merge changes the merged tree, so the release cannot reuse the PR's CI run and builds again.
+A dispatch on the same commit was once taken for the round's own release run (weekly rounds 2026-10-28; the release
+wait now takes only the round's own run).
+
 **What the round may do unattended is the `allow` list** in that file (the prompt repeats it verbatim), and nothing
 more: `push-version-branches` (commit to the fork's head branch -- its known-issues ledger and README Ports block
 included -- and its `neoforge-<v>` branches; never force-push), `pre-release` (dispatch Port CI with `release=true`;
