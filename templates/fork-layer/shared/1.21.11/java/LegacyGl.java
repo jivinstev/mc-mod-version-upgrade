@@ -287,15 +287,23 @@ public final class LegacyGl {
                 indexType = m.drawState().indexType();
             }
             // 1.21.1's BufferUploader/RenderType draws called shader.apply() right before drawing and shader.clear()
-            // after; a mod's ShaderInstance subclass overrides apply() to push its per-draw state (a mask, an opacity
-            // written into COLOR_MODULATOR after super.apply()), so it has to run here too
+            // after; a mod's ShaderInstance subclass overrides apply() to push its per-draw state (a mask's uniforms
+            // and sampler), so it has to run here too. A COLOR_MODULATOR write made inside apply() (an opacity, after
+            // super.apply()) is not kept: on 1.21.1 it came after apply()'s upload and the next draw's
+            // setDefaultUniforms overwrote it, so it never reached the GPU. A write made before the draw is kept.
             if (own != null) {
                 own.setDefaultUniforms();   // 1.21.1's VertexBuffer._drawWithShader ran this right before apply()
+                Uniform cm = own.COLOR_MODULATOR;
+                boolean wrote = cm != null && cm.touched();
+                float[] before = wrote && cm.floats() != null ? cm.floats().clone() : null;
                 own.apply();
+                if (cm != null) {
+                    if (before != null) cm.set(before);
+                    else if (!wrote) cm.consume();
+                }
             }
-            // 1.21.1's ShaderInstance.apply() uploaded RenderSystem's colour into COLOR_MODULATOR and a mod could
-            // overwrite it afterwards; 1.21.8 puts the colour in the DynamicTransforms block, so use the mod's value
-            // when it wrote one
+            // a COLOR_MODULATOR the mod wrote before the draw (kept above) replaces RenderSystem's colour; 1.21.8 puts
+            // the colour in the DynamicTransforms block
             boolean override = own != null && own.COLOR_MODULATOR != null && own.COLOR_MODULATOR.touched();
             float[] c = override ? own.COLOR_MODULATOR.floats() : shaderColor;
             GpuBufferSlice transforms = RenderSystem.getDynamicUniforms().writeTransform(

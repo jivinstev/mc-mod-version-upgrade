@@ -579,12 +579,23 @@ public final class LegacyGl {
             if (compiled == null) return;   // logged (or, for a vanilla shader, by the device)
             Uploaded up = into == null ? Uploaded.of(m) : Uploaded.inPass(m);
             // 1.21.1's BufferUploader/RenderType draws called shader.apply() right before drawing and shader.clear()
-            // after; a mod's ShaderInstance subclass overrides apply() to push its per-draw state (a mask, an opacity
-            // written into COLOR_MODULATOR after super.apply()), so it has to run here too
+            // after; a mod's ShaderInstance subclass overrides apply() to push its per-draw state (a mask's uniforms
+            // and sampler), so it has to run here too. A COLOR_MODULATOR write made inside apply() (an opacity, after
+            // super.apply()) is not kept: on 1.21.1 it came after apply()'s upload and the next draw's
+            // setDefaultUniforms overwrote it, so it never reached the GPU. A write made before the draw is kept.
             if (own != null) {
                 own.setDefaultUniforms();   // 1.21.1's VertexBuffer._drawWithShader ran this right before apply()
+                Uniform cm = own.COLOR_MODULATOR;
+                boolean wrote = cm != null && cm.touched();
+                float[] before = wrote && cm.floats() != null ? cm.floats().clone() : null;
                 own.apply();
+                if (cm != null) {
+                    if (before != null) cm.set(before);
+                    else if (!wrote) cm.consume();
+                }
             }
+            // a COLOR_MODULATOR the mod wrote before the draw (kept above) replaces RenderSystem's colour; 1.21.8 puts
+            // the colour in the DynamicTransforms block
             boolean override = own != null && own.COLOR_MODULATOR != null && own.COLOR_MODULATOR.touched();
             GpuBufferSlice transforms = transforms(own);
             java.util.List<GpuBuffer> temps = new java.util.ArrayList<>();
