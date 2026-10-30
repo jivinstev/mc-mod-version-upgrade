@@ -3440,6 +3440,10 @@ def cmd_retry(a, out=print):
         for c in st.items:                  # a close handed out over this item is stale: the round goes on
             if c.get("close") and c["status"] == "running":
                 c.update(status="pending", note=f"re-queued: {a.id} was retried after the close was handed out")
+            # the fork's ledger, already run while this item was blocked, runs again once the rest of the fork is done
+            # (measured, trial round 2026-10-29: it had written "no version merged" before the retried review)
+            if c.get("final") and c["fork"] == it["fork"] and c["status"] in ("ok", "skipped"):
+                c.update(status="pending", result={}, note=f"re-queued: {a.id} was retried after the ledger ran")
         # its last outcome goes (a stale `blocking` would block the merge again); a release keeps its dispatch marks,
         # so a retried release waits for a run it already started instead of dispatching a second one
         it["result"] = {k: v for k, v in it.get("result", {}).items() if k in ("dispatching_at", "dispatched_at")}
@@ -4678,10 +4682,16 @@ def self_check():
             rn_ = [x["id"] for x in runnable(st)]
             st.item("round:close")["status"] = "running"     # handed out
         expect(rc == 0 and "round:close" in rn_, f"close-anyway releases the close: {rn_} {o}")
+        with State.tx(state) as st:
+            fin_ = next(x for x in st.items if x.get("final") and x["fork"] == st.item("examplemod@1.21.4:review")["fork"])
+            fin_saved = {k: fin_.get(k) for k in ("status", "result", "note")}
+            fin_["status"] = "ok"                  # the ledger ran while the review was blocked
         rc, o = q(cmd_retry, argparse.Namespace(id="examplemod@1.21.4:review", why="owner: retry", allow=False, state=state))
         with State.tx(state) as st:
             expect(st.item("round:close")["status"] == "pending" and not st.data.get("close_anyway"),
                    "retry re-queues a close handed out over the item and withdraws close-anyway")
+            expect(st.item(fin_["id"])["status"] == "pending", "retry re-queues the fork's ledger that already ran")
+            st.item(fin_["id"]).update(fin_saved)
             summ = st.rdir / "round/summaries" / "examplemod@1.21.4_review.md"
             summ.parent.mkdir(parents=True, exist_ok=True)
             summ.write_text("RESULT: failed\nan earlier attempt\n", encoding="utf-8")
