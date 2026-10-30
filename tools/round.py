@@ -1162,7 +1162,10 @@ FIX_HINT = {
             "copy (fork-versions \"The shared library moved\").",
     "mergeup": "A conflict or a red branch in the cascade: keep-current \"A fork with version branches\" step 2 (a red "
                "branch: RESIDUE.md, fork-port.py --from-stage measure with a budget) and step 3 (the 1.21.x -> 26.x "
-               "boundary: resolve by hand inside the cascade's worktree, remake, cutout-check --fix, commit).",
+               "boundary: resolve by hand inside the cascade's worktree, remake, cutout-check --fix, commit). Open "
+               "REMERGE.json entries the excerpt names keep the version red even when it builds: apply each one's "
+               "authors' diff (in .port/<v>/REMERGE.json) through this version's rows and remove its entry, or clear it "
+               "with a logged decision (keep, content) when the version's own code already carries the change.",
     "resync": "Bringing the version below up again (its merge since this version cascaded) left this version red or in "
               "conflict: as for a merge-up -- resolve inside the cascade's worktree through this version's rows, or fix "
               "RESIDUE.md's errors with fork-port.py --from-stage measure and a budget -- then commit.",
@@ -1841,8 +1844,34 @@ def t_mergeup(st, it, log):
             sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d, f"{frm}..{v}", "--port-ref", r,
                         "--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
         return f"{', '.join(refs)} carried into neoforge-{v} (--port-ref), A/B green", {}
-    sh(st, it, cmd + ["--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
+    try:
+        sh(st, it, cmd + ["--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
+    except StepError as e:
+        open_ = open_remerges(d, v)
+        if open_:            # what keeps the version red once it builds: said, so the fixer works on it (measured,
+            raise StepError(f"{e} -- {len(open_)} open REMERGE.json entr{'y' if len(open_) == 1 else 'ies'} at {v}: "
+                            + "; ".join(open_[:6]))      # weekly round 2026-10-30: two fixers fixed the build only)
+        raise
     return f"{frm} merged into neoforge-{v}, A/B green", {}
+
+
+def open_remerges(d, v):
+    """The files whose authors' change has not reached version v (its fork-port.json `not_done` REMERGE.json lines,
+    read from the version's worktree) -> short lines, [] when none or unreadable."""
+    nd = []
+    for w in (pathlib.Path(d) / "build" / "fork-branches" / v, pathlib.Path(d)):    # the cascade's worktree, the clone
+        fp = w / "build" / f"mc{v}" / "fork-port" / "fork-port.json"
+        try:
+            nd = json.loads(fp.read_text(encoding="utf-8")).get("not_done") or []
+            break
+        except (OSError, ValueError, AttributeError):
+            continue
+    out = []
+    for ln in nd:
+        m = re.match(r"the authors' change did not merge into (\S+) \(([^)]*)", str(ln))
+        if m and "REMERGE.json" in str(ln):
+            out.append(f"{m.group(1)} ({m.group(2)[:90]})")
+    return out
 
 
 def t_resync(st, it, log):
@@ -4715,6 +4744,16 @@ def self_check():
                    and st.item("examplelib@1.21.1:ledger")["status"] == "ok"
                    and st.item("examplemod@1.21.1:ledger")["status"] == "ok" and "examplemod@1.21.1:ledger" in calls,
                    "a blocked item stops its dependents only; each fork's ledger runs for what merged")
+            orr = pathlib.Path(state).parent / "orr"
+            fpj = orr / "build/fork-branches/1.21.8/build/mc1.21.8/fork-port/fork-port.json"
+            fpj.parent.mkdir(parents=True, exist_ok=True)
+            fpj.write_text(json.dumps({"not_done": [
+                "GATES.md 16 file(s) changed since eb79ae8",
+                "the authors' change did not merge into src/A.java (the authors' change is not in 1.21.8's file, x..y; "
+                ".port/1.21.8/REMERGE.json): apply it"]}), encoding="utf-8")
+            orm = open_remerges(orr, "1.21.8")
+            expect(len(orm) == 1 and orm[0].startswith("src/A.java (") and open_remerges(orr, "1.21.9") == [],
+                   f"a red merge-up names its open REMERGE.json entries for the fixer: {orm}")
             pw_ = [parse_summary(t_).get("why") for t_ in (
                 "RESULT: blocked\nThe library's release asset is missing at 1.21.1: ask the owner\n",
                 "RESULT: blocked\nnot_ok: 0\nblocking: the pinned jar is not on the release\n",

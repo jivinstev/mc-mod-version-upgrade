@@ -448,7 +448,8 @@ it small, so the orchestration is a tool, which replaces the four rules above:
 - **`round.py drive --follow`** (run in the background, its output watched by one Monitor) runs every mechanical step
   itself, prints each agent job the moment it is dispatched (`round: AGENT JOB {...}`), records each job itself when its
   summary file appears, and keeps going until nothing runs or waits (exit 0 with `ROUND DONE`, or exit 3 with its
-  BLOCKED lines). **Versions are pipelined** (#206): a version's work starts once the version below has cascaded into it
+  BLOCKED lines); when it ends any other way (a tool's background time limit, a session restart), `round.py resume`
+  and start it again. **Versions are pipelined** (#206): a version's work starts once the version below has cascaded into it
   (its merge-up), not once that one has released; each item locks its version (`<fork>#<v>`), the steps that fetch or
   push also lock the fork's git, at most two local builds and three agent jobs run at once, and the version below's
   merge comes up again (`resync`, one cascade hop) before anything of the version is pushed -- its PR then sends it back
