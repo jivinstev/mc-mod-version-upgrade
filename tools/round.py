@@ -1162,7 +1162,10 @@ FIX_HINT = {
             "copy (fork-versions \"The shared library moved\").",
     "mergeup": "A conflict or a red branch in the cascade: keep-current \"A fork with version branches\" step 2 (a red "
                "branch: RESIDUE.md, fork-port.py --from-stage measure with a budget) and step 3 (the 1.21.x -> 26.x "
-               "boundary: resolve by hand inside the cascade's worktree, remake, cutout-check --fix, commit).",
+               "boundary: resolve by hand inside the cascade's worktree, remake, cutout-check --fix, commit). Open "
+               "REMERGE.json entries the excerpt names keep the version red even when it builds: apply each one's "
+               "authors' diff (in .port/<v>/REMERGE.json) through this version's rows and remove its entry, or clear it "
+               "with a logged decision (keep, content) when the version's own code already carries the change.",
     "resync": "Bringing the version below up again (its merge since this version cascaded) left this version red or in "
               "conflict: as for a merge-up -- resolve inside the cascade's worktree through this version's rows, or fix "
               "RESIDUE.md's errors with fork-port.py --from-stage measure and a budget -- then commit.",
@@ -1841,8 +1844,34 @@ def t_mergeup(st, it, log):
             sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d, f"{frm}..{v}", "--port-ref", r,
                         "--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
         return f"{', '.join(refs)} carried into neoforge-{v} (--port-ref), A/B green", {}
-    sh(st, it, cmd + ["--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
+    try:
+        sh(st, it, cmd + ["--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
+    except StepError as e:
+        open_ = open_remerges(d, v)
+        if open_:            # what keeps the version red once it builds: said, so the fixer works on it (measured,
+            raise StepError(f"{e} -- {len(open_)} open REMERGE.json entr{'y' if len(open_) == 1 else 'ies'} at {v}: "
+                            + "; ".join(open_[:6]))      # weekly round 2026-10-30: two fixers fixed the build only)
+        raise
     return f"{frm} merged into neoforge-{v}, A/B green", {}
+
+
+def open_remerges(d, v):
+    """The files whose authors' change has not reached version v (its fork-port.json `not_done` REMERGE.json lines,
+    read from the version's worktree) -> short lines, [] when none or unreadable."""
+    nd = []
+    for w in (pathlib.Path(d) / "build" / "fork-branches" / v, pathlib.Path(d)):    # the cascade's worktree, the clone
+        fp = w / "build" / f"mc{v}" / "fork-port" / "fork-port.json"
+        try:
+            nd = json.loads(fp.read_text(encoding="utf-8")).get("not_done") or []
+            break
+        except (OSError, ValueError, AttributeError):
+            continue
+    out = []
+    for ln in nd:
+        m = re.match(r"the authors' change did not merge into (\S+) \(([^)]*)", str(ln))
+        if m and "REMERGE.json" in str(ln):
+            out.append(f"{m.group(1)} ({m.group(2)[:90]})")
+    return out
 
 
 def t_resync(st, it, log):
@@ -3170,6 +3199,22 @@ def cmd_drive(a, out=print):
         follow = bool(getattr(a, "follow", False))
         deadline = time.monotonic() + a.max_hours * 3600
         beat = time.monotonic()
+        if follow:
+            # jobs still out from before this drive (a restart killed their workers, or the last drive ended while they
+            # ran) and with no summary yet: their AGENT JOB line again, so the one watch on this output starts them
+            # (measured, weekly round 2026-10-30: after a restart only WAITING lines came, and two jobs never ran)
+            with State.tx(a.state, write=False) as st:
+                for it in st.items:
+                    if it["status"] == "running" and is_agent_work(it):
+                        jid = job_id(it, bool(it.get("fixing")))
+                        sm = st.rdir / "round/summaries" / f"{jid}.md"
+                        if not sm.is_file():
+                            jf = st.rdir / "round/jobs" / f"{jid}.md"
+                            out("round: AGENT JOB " + json.dumps({
+                                "id": jid, "redispatch": True, "prompt": f"Read {jf} and do exactly what it says.",
+                                "summary": str(sm), "record": f"python3 {TOOLS / 'round.py'} record {jid} --summary "
+                                                              f"{sm} --state {a.state}"}))
+            sys.stdout.flush()
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             running = {}
             while True:
@@ -3456,7 +3501,9 @@ def cmd_resume(a, out=print):
         else:
             with State.tx(a.state, write=False) as st:
                 jf = st.rdir / "round/jobs" / f"{jid}.md"
-            out(json.dumps({"id": jid, "redispatch": True, "prompt": f"Read {jf} and do exactly what it says.",
+            # the same `round: AGENT JOB ` line drive --follow prints, so the session's one watch sees it (measured,
+            # weekly round 2026-10-30: after a container restart two killed jobs were never started again)
+            out("round: AGENT JOB " + json.dumps({"id": jid, "redispatch": True, "prompt": f"Read {jf} and do exactly what it says.",
                             "summary": str(s), "record": f"python3 {TOOLS / 'round.py'} record {jid} --summary {s} "
                                                          f"--state {a.state}"}))
     out(f"round: then `python3 {TOOLS / 'round.py'} drive --state {a.state}`")
@@ -4651,6 +4698,26 @@ def self_check():
             expect(rc == 0 and 0 <= ij < ir and [x["status"] for x in fin["items"]] == ["ok", "ok"]
                    and "ROUND DONE" in o,
                    f"drive --follow: the job line at once, recorded from its summary, the next step run, done: {o}")
+            # a job still out from before this drive (its worker killed by a restart): its AGENT JOB line again first
+            st2 = json.loads(fsp.read_text(encoding="utf-8"))
+            st2["items"][0].update(status="running", result={}, started=now())
+            st2["items"][1].update(status="pending", result={})
+            fsp.write_text(json.dumps(st2), encoding="utf-8")
+            for f_ in (fd / "round/summaries").glob("o@1_job*"):
+                f_.unlink()
+            G_["SLEEP"] = lambda n: None if sj.exists() else sj.write_text("RESULT: ok\n", encoding="utf-8")
+            TOOL_IMPL["after"] = lambda st_, it_, log_: ("after ran", {})
+            try:
+                rc, o = q(cmd_drive, argparse.Namespace(state=str(fsp), max_hours=1.0, follow=True))
+            finally:
+                G_.update(keep2)
+                if keep_after is None:
+                    TOOL_IMPL.pop("after", None)
+                else:
+                    TOOL_IMPL["after"] = keep_after
+            first = (o.splitlines() or [""])[0]
+            expect(first.startswith("round: AGENT JOB ") and '"redispatch": true' in first and "ROUND DONE" in o,
+                   f"drive --follow re-lists a job still out with no summary as its first line: {o[:600]}")
 
         def rec(i, text, st_path=state):
             p_ = pathlib.Path(st_path).parent / "summaries" / f"{i}.md"
@@ -4696,7 +4763,8 @@ def self_check():
             with State.tx(state, write=False) as st:
                 expect(rc == 2 and st.item(bad)["status"] == before, f"record refuses {bad} ({before}): {o}")
         rc, o = q(cmd_resume, argparse.Namespace(state=state))
-        expect("redispatch" in o and js and js[0]["id"] in o, f"resume re-lists a job that is out: {o}")
+        expect("redispatch" in o and js and js[0]["id"] in o and "round: AGENT JOB {" in o,
+               f"resume re-lists a job that is out, as an AGENT JOB line: {o}")
         n_gates = calls.count("examplelib@1.21.4:gates")
         rec(js[0]["id"], "RESULT: ok\ncommit: abcdef1 fix the shared render path\n")
         with State.tx(state, write=False) as st:
@@ -4715,6 +4783,16 @@ def self_check():
                    and st.item("examplelib@1.21.1:ledger")["status"] == "ok"
                    and st.item("examplemod@1.21.1:ledger")["status"] == "ok" and "examplemod@1.21.1:ledger" in calls,
                    "a blocked item stops its dependents only; each fork's ledger runs for what merged")
+            orr = pathlib.Path(state).parent / "orr"
+            fpj = orr / "build/fork-branches/1.21.8/build/mc1.21.8/fork-port/fork-port.json"
+            fpj.parent.mkdir(parents=True, exist_ok=True)
+            fpj.write_text(json.dumps({"not_done": [
+                "GATES.md 16 file(s) changed since eb79ae8",
+                "the authors' change did not merge into src/A.java (the authors' change is not in 1.21.8's file, x..y; "
+                ".port/1.21.8/REMERGE.json): apply it"]}), encoding="utf-8")
+            orm = open_remerges(orr, "1.21.8")
+            expect(len(orm) == 1 and orm[0].startswith("src/A.java (") and open_remerges(orr, "1.21.9") == [],
+                   f"a red merge-up names its open REMERGE.json entries for the fixer: {orm}")
             pw_ = [parse_summary(t_).get("why") for t_ in (
                 "RESULT: blocked\nThe library's release asset is missing at 1.21.1: ask the owner\n",
                 "RESULT: blocked\nnot_ok: 0\nblocking: the pinned jar is not on the release\n",

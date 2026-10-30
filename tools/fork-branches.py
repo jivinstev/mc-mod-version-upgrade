@@ -3470,13 +3470,18 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
                            for x in ds}) == 1
     used = set()
 
-    def answer_for(c):
-        """The answer for a REMERGE.json entry: by its id, else the one answer for its file -- an id is the file and
-        the authors' diff hashed, and the plan's preview hashes before the head's own merge, so the head merge moves
-        it (measured, weekly round 2026-10-30: 9 of 11 answers keyed by preview ids matched no entry)."""
+    def answer_for(c, t=None):
+        """The answer for a REMERGE.json entry at version t: by its id, else the one answer for its file -- an id is
+        the file and the authors' diff hashed, and the plan's preview hashes before the head's own merge, so the head
+        merge moves it (measured, weekly round 2026-10-30: 9 of 11 answers keyed by preview ids matched no entry).
+        A file with several answers (one per group of versions) takes the one that names t: in its `versions`, or a
+        key of its per-version `patch` (measured, same round: at 1.21.8 six files had two answers and none applied)."""
         a_ = answers.get(c.get("id"))
         if a_ is None:
             ds = [x for x in per_file.get(c.get("overlay"), []) if c.get("overlay")]
+            if ds and not same(ds) and t:
+                ds = [x for x in ds if t in (x.get("versions") or [])
+                      or (isinstance(x.get("patch"), dict) and t in x["patch"])]
             a_ = ds[0] if ds and same(ds) else None
             if a_ is not None:
                 say(f"fork-branches: --apply-decisions: {c.get('id')} ({c.get('overlay')}) answered by {a_['id']}, "
@@ -3516,7 +3521,7 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     for t in hops:
         tref = resolve_branch(repo, branch_name(t))
         ents = remerge_entries(blob_at(repo, tref, f"{REC}/{t}/REMERGE.json"))
-        mine = [c for c in ents if answer_for(c) is not None]
+        mine = [c for c in ents if answer_for(c, t) is not None]
         if not mine:
             continue
         work, why = worktree_for(repo, t)
@@ -3526,7 +3531,7 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
         pr = port_ref_of(repo, work, t, git(work, "rev-parse", "HEAD", check=True).stdout.strip())
         logged, cleared, deferred_ = [], [], {}
         for c in mine:
-            a, f = answer_for(c), c["overlay"]
+            a, f = answer_for(c, t), c["overlay"]
             choice = a["choice"]
             if choice.startswith(DEFERRED):
                 # keep ours, deferred on a dependency this version drops: the entry stays, marked deferred (not counted
@@ -6075,12 +6080,16 @@ def _check_untaken_head(expect):
         rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", mode="plan", out_dir=pdir)
         for answers_, want_late in (([{"id": "0" * 12, "file": em, "choice": "take", "by": "plan", "reason": "theirs"},
                                       {"id": "1" * 12, "file": em, "choice": "keep", "by": "plan", "reason": "ours"}], False),
-                                     ([{"id": "0" * 12, "file": em, "choice": "take", "by": "plan", "reason": "theirs"}], True)):
+                                     # one answer per group of versions: the one naming 1.21.4 applies there
+                                     ([{"id": "0" * 12, "file": em, "choice": "take", "by": "plan", "reason": "theirs",
+                                        "versions": ["1.21.4"]},
+                                       {"id": "1" * 12, "file": em, "choice": "keep", "by": "plan", "reason": "ours",
+                                        "versions": ["1.21.5"]}], True)):
             dec.write_text(json.dumps({"range": "neoforge-1.21.1..1.21.5", "decisions": answers_}), encoding="utf-8")
             rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir)
             f4 = ref_files(r, resolve_branch(r, "neoforge-1.21.4"))
             expect((b"LATE" in f4[em]) == want_late and (("answered by " + "0" * 12) in out) == want_late,
-                   f"a stale-id answer: applied by its file when it is the only one ({want_late}): {out[-500:]}")
+                   f"a stale-id answer: applied by its file when it is the one for that version ({want_late}): {out[-500:]}")
         rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir, to="1.21.9")
         expect(rc == 2 and "not a version of the block's range" in out, f"--to a version off the range: refused: {out[-200:]}")
     # a single-version fork: no version branches, nothing untaken to name
