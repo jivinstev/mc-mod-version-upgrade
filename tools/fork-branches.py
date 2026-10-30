@@ -1208,7 +1208,8 @@ def release_gate_record(repo, root, t, ref, work, files, read=None):
         commits, bad = set(), None
         for a in sorted(assets, key=lambda a: a["name"]):
             try:
-                text = read(a["browser_download_url"], "application/octet-stream").decode("utf-8", "replace")
+                # the API asset URL carries the token (a private fork's release too); the download link otherwise
+                text = read(a.get("url") or a["browser_download_url"], "application/octet-stream").decode("utf-8", "replace")
             except OSError as e:
                 bad = f"{r['tag_name']}: {a['name']} could not be read ({str(e)[:80]})"
                 break

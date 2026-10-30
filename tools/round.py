@@ -302,6 +302,9 @@ def gate_lock_path():
     return pathlib.Path(os.environ.get(LOCK_ENV) or (pathlib.Path.home() / ".mmvu/locks/full-gates.lock"))
 
 
+GATE_LOCK_WAIT = 4 * 3600      # a full gate run takes about an hour; this long is a hung holder
+
+
 @contextlib.contextmanager
 def full_gate_lock(who, say=print):
     """At most one full gate run (Gate C client, its builds) on the machine: the 2026-10-21 round's third container
@@ -313,7 +316,14 @@ def full_gate_lock(who, say=print):
             holder = (p.with_suffix(".holder").read_text(encoding="utf-8").strip()
                       if p.with_suffix(".holder").is_file() else "?")
             say(f"round: waiting for the machine's full-gate lock ({p}, held by {holder})")
-            _flock(fh)
+            t0 = time.monotonic()
+            while not _flock(fh, block=False):
+                # never forever: a hung Gate C client, or an orphan of a killed drive, stalls the whole round silently
+                # (review 2026-10-30) -- the step fails, naming the holder, and its BLOCKED line says so
+                if time.monotonic() - t0 > GATE_LOCK_WAIT:
+                    raise StepError(f"the machine's full-gate lock is still held after {GATE_LOCK_WAIT / 3600:g} h, "
+                                    f"by {holder}: a hung gate run? end that process, then retry this step")
+                time.sleep(min(30, GATE_LOCK_WAIT / 10))
         p.with_suffix(".holder").write_text(f"{who} pid {os.getpid()} since {now()}\n", encoding="utf-8")
         if os.name == "nt":
             try:
@@ -1062,12 +1072,68 @@ def run_alive(it):
     return not it.get("pstart") or proc_start(it["pid"]) == it["pstart"]
 
 
+def child_file(rdir, it):
+    return pathlib.Path(rdir) / "round/children" / f"{job_id(it)}.json"
+
+
+def mark_child(st, it, pid):
+    """The step's running command (its own process group) recorded beside the state (round/children/<job>.json, no
+    state lock: a step can run while its caller holds it), so that reap can end it once the drive that started it is
+    gone; None clears it. Nothing where the state has no directory (self-checks' stand-ins)."""
+    rdir = getattr(st, "rdir", None)
+    if not rdir or not (it or {}).get("id") or os.name == "nt":     # compat-ok: process groups are POSIX
+        return
+    f = child_file(rdir, it)
+    with contextlib.suppress(OSError):
+        if pid:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps({"pid": pid, "pstart": proc_start(pid), "host": host()}), encoding="utf-8")
+        else:
+            f.unlink()
+
+
+def end_child(st, it):
+    """A dead drive's step command still running (the 2-hour kill hit only the drive): its process group ended, so the
+    re-run never shares a worktree with it (review 2026-10-30: two merges or Gradle builds in one checkout)."""
+    rdir = getattr(st, "rdir", None)
+    if not rdir or os.name == "nt":                                 # compat-ok: process groups are POSIX
+        return
+    f = child_file(rdir, it)
+    try:
+        c = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    with contextlib.suppress(OSError):
+        f.unlink()
+    if c.get("host") not in (None, host()):
+        return
+    if pid_alive(c.get("pid")) and (not c.get("pstart") or proc_start(c["pid"]) == c["pstart"]):
+        import signal
+        with contextlib.suppress(OSError):
+            os.killpg(c["pid"], signal.SIGTERM)      # compat-ok: inside the os.name check above
+        for _ in range(50):
+            if not pid_alive(c["pid"]) or proc_state(c["pid"]) == "Z":
+                break
+            time.sleep(0.1)
+        with contextlib.suppress(OSError):
+            os.killpg(c["pid"], signal.SIGKILL)      # compat-ok: inside the os.name check above
+
+
+def proc_state(pid):
+    try:
+        return pathlib.Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0]
+    except (OSError, ValueError, IndexError):
+        return ""
+
+
 def reap(st):
     """Tool steps left `running` by a process that is gone (a container restart) go back to pending: every step is
-    safe to run again (each checks what is already done first)."""
+    safe to run again (each checks what is already done first). Its command, if it outlived the drive, is ended
+    first."""
     n = 0
     for it in st.items:
         if it["status"] == "running" and it["kind"] == "tool" and not it.get("fixing") and not run_alive(it):
+            end_child(st, it)
             it["status"] = "pending"
             it["note"] = f"re-queued: its run (pid {it.get('pid')}) ended without a result"
             it.pop("pid", None)
@@ -1268,6 +1334,10 @@ def job_task(st, it):
                 "Close the issue (state completed) only when every item in status is ok, skipped or a blocked item "
                 "that waits on the owner and is named in the comment; a round that stopped leaves it open (step 5).",
                 *trial_lines(st),
+                f"Just before you post, check that you are still the round's close: `python3 {T / 'round.py'} status "
+                f"--json --state {st.path}` must list round:close as running with dispatched {it.get('dispatched')}. "
+                "Otherwise (a retry re-queued the close, or a newer close job was handed out) post nothing and close "
+                "nothing: write RESULT: failed, `superseded`.",
                 "Acceptance: one closing comment posted; the issue closed or left open by that rule."]
     F = st.fork(it["fork"])
     w, br = where(st, it)
@@ -1465,8 +1535,16 @@ def sh(st, it, cmd, log, cwd=None, ok=(0,), hold=None, env=None):
         fh.write(f"$ {' '.join(shlex.quote(str(c)) for c in cmd)}\n")
         fh.flush()
         extra = {"pass_fds": (hold.fileno(),)} if hold is not None and os.name != "nt" else {}
-        r = subprocess.run([str(c) for c in cmd], cwd=str(cwd or st.rdir), stdout=fh, stderr=subprocess.STDOUT,
-                           text=True, encoding="utf-8", errors="replace", env=env, **extra)
+        if os.name != "nt":
+            extra["start_new_session"] = True     # its own process group: reap ends it when this drive is killed
+        p_ = subprocess.Popen([str(c) for c in cmd], cwd=str(cwd or st.rdir), stdout=fh, stderr=subprocess.STDOUT,
+                              text=True, encoding="utf-8", errors="replace", env=env, **extra)
+        mark_child(st, it, p_.pid)
+        try:
+            p_.wait()
+        finally:
+            mark_child(st, it, None)
+        r = subprocess.CompletedProcess(p_.args, p_.returncode, "", "")
     if r.returncode not in ok:
         raise StepError(f"{pathlib.Path(str(cmd[1])).name if len(cmd) > 1 else cmd[0]} exit {r.returncode}: "
                         + tail(log, 6))
@@ -3132,6 +3210,29 @@ def no_agent_work(st, it):
     return None
 
 
+def skip_idle_head(st, it):
+    """After a head's re-pin was skipped: when the head's work branch holds nothing beyond origin's head (no authors'
+    code, fix or bump this round), its gates, review, PR, release and records are skipped too -- one full gate run and
+    the review jobs on an unchanged branch otherwise (review 2026-10-30). -> the ids skipped."""
+    F = st.fork(it["fork"])
+    try:
+        br = st.item(f"{F['name']}@{it['version']}:setup")["extra"]["branch"]
+    except (KeyError, TypeError):
+        return []
+    d = F["dir"]
+    git(d, "fetch", "-q", "origin", F["head"])
+    if git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/{br}").returncode:
+        return []
+    if git(d, "rev-list", f"origin/{F['head']}..refs/heads/{br}").stdout.strip():
+        return []                       # the head has work of its own: its full cycle runs
+    later = SKIP_ON_NOCHANGE + ("records", "done")
+    ids = [x["id"] for x in st.items if x["fork"] == it["fork"] and x["version"] == it["version"]
+           and x["status"] == "pending" and (x["step"] in later or x["step"].startswith("depgate:"))]
+    for x in ids:
+        finish(st, st.item(x), "skipped", f"{it['id']}: the head has nothing new this round", {"skipped": True, "tag": None})
+    return ids
+
+
 def dispatch_agent(st, it):
     """Claim an agent item (or a failed tool item's fixer) and write its job file. -> the job JSON."""
     fixing = it["kind"] == "tool"
@@ -3140,6 +3241,7 @@ def dispatch_agent(st, it):
     jobs.mkdir(parents=True, exist_ok=True)
     (st.rdir / "round/summaries").mkdir(parents=True, exist_ok=True)
     jf = jobs / f"{jid}.md"
+    it["dispatched"] = now()                 # this dispatch's stamp: a close job checks it is still the current one
     jf.write_text(job_text(st, it, fixing), encoding="utf-8")
     summary = st.rdir / "round/summaries" / f"{jid}.md"
     set_aside(summary)
@@ -3169,6 +3271,7 @@ def cmd_next(a, out=print):
                 continue
             if no_agent_work(st, it):
                 finish(st, it, "skipped", no_agent_work(st, it))
+                skip_idle_head(st, it)
                 continue
             if it["kind"] == "agent" or it["status"] == "failed":
                 jobs.append(dispatch_agent(st, it))
@@ -3260,6 +3363,7 @@ def cmd_drive(a, out=print):
                             ask_owner(st, it, need)
                         elif no_agent_work(st, it):
                             finish(st, it, "skipped", no_agent_work(st, it))
+                            skip_idle_head(st, it)
                         elif it["kind"] == "agent" or it["status"] == "failed":
                             j = dispatch_agent(st, it)
                             jobs.append(j)
@@ -3487,7 +3591,8 @@ SYM = {"ok": "+", "skipped": "-", "pending": ".", "running": ">", "failed": "x",
 def cmd_status(a, out=print):
     with State.tx(a.state, write=False) as st:
         if a.json:
-            out(json.dumps([{k: it.get(k) for k in ("id", "status", "note", "result")} for it in st.items], indent=1))
+            out(json.dumps([{k: it.get(k) for k in ("id", "status", "note", "result", "dispatched")} for it in st.items],
+                           indent=1))
             return 0
         rows = {}
         for it in st.items:
@@ -3555,12 +3660,20 @@ def cmd_retry(a, out=print):
             return 2
         it.update(status="pending", fixes=0, attempts=0, note=f"retried at {now()}: {a.why or 'by the session'}")
         st.data.pop("close_anyway", None)
+        affected, grew = {it["fork"]}, True          # the fork and every fork that depends on it, transitively
+        while grew:
+            grew = False
+            for cf in st.data.get("config", {}).get("forks", []):
+                if cf["repo"] not in affected and set(cf.get("depends_on") or []) & affected:
+                    affected.add(cf["repo"])
+                    grew = True
         for c in st.items:                  # a close handed out over this item is stale: the round goes on
             if c.get("close") and c["status"] == "running":
                 c.update(status="pending", note=f"re-queued: {a.id} was retried after the close was handed out")
-            # the fork's ledger, already run while this item was blocked, runs again once the rest of the fork is done
-            # (measured, trial round 2026-10-29: it had written "no version merged" before the retried review)
-            if c.get("final") and c["fork"] == it["fork"] and c["status"] in ("ok", "skipped"):
+            # the fork's ledger, and every dependent fork's, already run while this item was blocked, runs again once
+            # the rest of that fork is done (measured, trial round 2026-10-29: "no version merged" before the retried
+            # review; weekly round 2026-10-30: the dependent's ledger missed every version merged after the retry)
+            if c.get("final") and c["fork"] in affected and c["status"] in ("ok", "skipped"):
                 c.update(status="pending", result={}, note=f"re-queued: {a.id} was retried after the ledger ran")
         # its last outcome goes (a stale `blocking` would block the merge again); a release keeps its dispatch marks,
         # so a retried release waits for a run it already started instead of dispatching a second one
@@ -3828,6 +3941,10 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         with State.tx(sd_, write=False) as st_:
             hr = list(st_.data.get("hand_repins") or [])
             cl = "\n".join(job_task(st_, st_.item("round:close")))
+            cli_ = dict(st_.item("round:close"), dispatched="2026-10-30T20:00:00Z")
+            cl2 = "\n".join(job_task(st_, cli_))
+        want("dispatched 2026-10-30T20:00:00Z" in cl2 and "superseded" in cl2,
+             f"the close job checks it is still the current close before it posts: {cl2[-400:]}")
         want(rc == 0 and "examplesvlib4@1.21.4:release" in {x["id"] for x in items}
              and not any(x["fork"] == VD for x in items if not x.get("final"))
              and len(hr) == 1 and "pins no release of it" in hr[0] and hr[0] in cl and "by hand" in cl,
@@ -4499,6 +4616,57 @@ def self_check():
                 return {"name": s_.split("/")[1]}
             def item(self, _i):
                 return {"result": self.rel}
+        if os.name != "nt":      # compat-ok: process groups are POSIX
+            # a drive killed while its step's command runs: reap ends that command's process group, then re-queues
+            orphan = subprocess.Popen(["sleep", "30"], start_new_session=True)
+            ri_ = {"id": "o@1:x", "status": "running", "kind": "tool", "pid": 2 ** 22 + 7, "host": host()}
+
+            class _StO:
+                items = [ri_]
+                rdir = pathlib.Path(state).parent / "orphan"
+            mark_child(_StO(), ri_, orphan.pid)
+            n_ = reap(_StO())
+            try:
+                gone = orphan.wait(timeout=10) is not None
+            except subprocess.TimeoutExpired:
+                gone = False
+                orphan.kill()                       # the test's own child: never left behind
+                orphan.wait()
+            expect(n_ == 1 and gone and ri_["status"] == "pending" and not child_file(_StO.rdir, ri_).exists(),
+                   f"reap ends a dead drive's orphaned step command before the re-run: {n_} {ri_}")
+        # a head with nothing new once its re-pin was skipped: its gates, review, PR and release skipped too
+        ih = pathlib.Path(state).parent / "idlehead"
+        (ih / "w").mkdir(parents=True, exist_ok=True)
+        git(ih / "w", "init", "-q", "-b", "neoforge-1.21.1", check=True)
+        for k_, v_ in (("user.email", "t@example.com"), ("user.name", "t"), ("core.autocrlf", "false")):
+            git(ih / "w", "config", k_, v_)
+        (ih / "w/a.txt").write_text("a\n", encoding="utf-8")
+        git(ih / "w", "add", "a.txt", check=True)
+        git(ih / "w", "commit", "-qm", "a", check=True)
+        subprocess.run(["git", "clone", "-q", "--bare", str(ih / "w"), str(ih / "o.git")], check=True, capture_output=True)
+        git(ih / "w", "remote", "add", "origin", str(ih / "o.git"))
+        git(ih / "w", "branch", "keep-current/2026-10-30", check=True)
+
+        class _StH:
+            items = [{"id": f"idle@1.21.1:{s_}", "fork": "o/idle", "version": "1.21.1", "step": s_, "status": "pending",
+                      "extra": {"branch": "keep-current/2026-10-30"} if s_ == "setup" else {}, "result": {}}
+                     for s_ in ("setup", "repin-head", "gates", "review", "pr", "release")]
+            def fork(self, _):
+                return {"dir": str(ih / "w"), "head": "neoforge-1.21.1", "name": "idle"}
+            def item(self, i_):
+                return next(x for x in self.items if x["id"] == i_)
+        sh_ = _StH()
+        skipped_ = skip_idle_head(sh_, sh_.item("idle@1.21.1:repin-head"))
+        expect(sorted(skipped_) == ["idle@1.21.1:gates", "idle@1.21.1:pr", "idle@1.21.1:release", "idle@1.21.1:review"]
+               and sh_.item("idle@1.21.1:release")["result"].get("skipped"),
+               f"a head with nothing new: its gates, review, PR and release skipped: {skipped_}")
+        for x in sh_.items:
+            x["status"] = "pending"
+        git(ih / "w", "checkout", "-q", "keep-current/2026-10-30", check=True)
+        (ih / "w/a.txt").write_text("b\n", encoding="utf-8")
+        git(ih / "w", "commit", "-qam", "work", check=True)
+        expect(skip_idle_head(sh_, sh_.item("idle@1.21.1:repin-head")) == [],
+               "a head with work of its own keeps its full cycle")
         rp_ = {"step": "repin-head", "status": "pending", "version": "1.21.1", "extra": {"libraries": [LIB]}}
         expect(no_agent_work(_StR({"skipped": True, "tag": None}), rp_)
                and no_agent_work(_StR({"tag": "lib-1.0-mc1.21.1"}), rp_) is None,
@@ -4873,6 +5041,19 @@ def self_check():
                    "retry re-queues a close handed out over the item and withdraws close-anyway")
             expect(st.item(fin_["id"])["status"] == "pending", "retry re-queues the fork's ledger that already ran")
             st.item(fin_["id"]).update(fin_saved)
+            # a library item retried: the dependent's ledger, which ran while it waited, runs again too
+            lib_it = next(x for x in st.items if x["fork"] != fin_["fork"] and x["fork"] and not x.get("final")
+                          and fin_["fork"] in [d_ for cf in st.data["config"]["forks"] if cf["repo"] == fin_["fork"]
+                                                for d_ in [cf["repo"]] if x["fork"] in (cf.get("depends_on") or [])])
+            lib_saved = {k: lib_it.get(k) for k in ("status", "result", "note")}
+            lib_it["status"] = "blocked"
+            st.item(fin_["id"])["status"] = "ok"            # the dependent's ledger ran while the library waited
+        rc, o = q(cmd_retry, argparse.Namespace(id=lib_it["id"], why="owner: retry", allow=False, state=state))
+        with State.tx(state) as st:
+            expect(lib_it["fork"] != fin_["fork"] and st.item(fin_["id"])["status"] == "pending",
+                   f"retrying a library item re-queues its dependent's ledger too: {lib_it['id']} {o}")
+            st.item(fin_["id"]).update(fin_saved)
+            st.item(lib_it["id"]).update(lib_saved)
             summ = st.rdir / "round/summaries" / "examplemod@1.21.4_review.md"
             summ.parent.mkdir(parents=True, exist_ok=True)
             summ.write_text("RESULT: failed\nan earlier attempt\n", encoding="utf-8")
@@ -5160,6 +5341,15 @@ def self_check():
             # there passes no lock either, see the pass_fds guards above)
             child = (subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"], pass_fds=(lk.fileno(),))  # compat-ok: os.name guard below
                      if os.name != "nt" else None)
+            keep_w = GATE_LOCK_WAIT
+            globals()["GATE_LOCK_WAIT"] = 0.3
+            try:
+                with full_gate_lock("second", lambda *x: None):
+                    expect(False, "a second full gate run got the held lock")
+            except StepError as e:
+                expect("still held" in str(e) and "first" in str(e), f"a lock held too long: the step fails, naming the holder: {e}")
+            finally:
+                globals()["GATE_LOCK_WAIT"] = keep_w
         if child is not None:
             with open(gate_lock_path(), "a+", encoding="utf-8") as fh:
                 expect(not _flock(fh, block=False), "the gate run's process still holds the lock after the driver let go")
