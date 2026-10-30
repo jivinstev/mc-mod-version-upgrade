@@ -2608,11 +2608,15 @@ def t_pr(st, it, log):
     work = f"keep-current/{st.data['date']}-{v}" if is_vb(st, it) else f"keep-current/{st.data['date']}"
     owner = slug.split("/")[0]
     have = gh(f"repos/{slug}/pulls?state=all&head={owner}:{work}&base={base}")
-    open_ = [p for p in have if p.get("state") == "open" or p.get("merged_at")]
+    sha = git(d, "rev-parse", local).stdout.strip()
+    # an open PR from the work branch, or this very commit's PR already merged (a resume after the merge) -- never an
+    # older round's merged PR from a work branch of the same name (measured, trial round 2026-10-29: a second round on
+    # the same date took the first round's merged #114 as its own)
+    open_ = [p for p in have if p.get("state") == "open"
+             or (p.get("merged_at") and (p.get("head") or {}).get("sha") == sha)]
     r = git(d, "push", "-q", "origin", f"{local}:refs/heads/{work}")
     if r.returncode:
         raise StepError(f"push {local} -> {work}: {(r.stderr or r.stdout).strip()[-300:]}")
-    sha = git(d, "rev-parse", local).stdout.strip()
     if open_:
         n = open_[0]["number"]
     else:
@@ -3736,7 +3740,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         def fake_gh(path, method="GET", data=None):
             api.append((method, path.split("?")[0], (path.split("?") + [""])[1]))
             if "/pulls?" in path:
-                return []
+                return list(prs.get("listed", []))
             if path.endswith("/pulls") and method == "POST":
                 return {"number": 9}
             if "/actions/runs?" in path:
@@ -3959,9 +3963,15 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         prs["sha"] = None
         c_ = (sl / ".port").mkdir(exist_ok=True) or (sl / ".port/NOTES.md").write_text("n\n", encoding="utf-8")
         commit_paths(sl, [".port"], "records")
+        prs["listed"] = [{"number": 4, "state": "closed", "merged_at": "2026-10-20T00:00:00Z", "head": {"sha": "0" * 40}}]
         note, r_ = step(sa2, "examplesvlib@1.21.1:pr")
         want(r_.get("pr") == 9 and git(tmp / "examplesvlib.git", "rev-parse", "keep-current/2026-10-21").stdout.strip()
-             == head(sl), f"records after the gated commit: the work branch goes out as its PR: {note} {r_}")
+             == head(sl), f"records after the gated commit: the work branch goes out as its PR, never an older round's "
+             f"merged PR from a branch of the same name: {note} {r_}")
+        prs["listed"] = [{"number": 4, "state": "closed", "merged_at": "2026-10-20T00:00:00Z", "head": {"sha": head(sl)}}]
+        note, r_ = step(sa2, "examplesvlib@1.21.1:pr")
+        want(r_.get("pr") == 4, f"this very commit's PR already merged (a resume): taken, not opened again: {note} {r_}")
+        prs["listed"] = []
         (sl / "Main.java").write_text("class Main { int late; }\n", encoding="utf-8")
         commit_paths(sl, ["Main.java"], "code after the gates")
         try:
