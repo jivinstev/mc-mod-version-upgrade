@@ -1175,7 +1175,7 @@ def gh_read(url, accept="application/vnd.github+json"):
     req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "mmvu-fork-branches"})
     tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if tok and url.startswith("https://api.github.com/"):
-        req.add_header("Authorization", f"Bearer {tok}")
+        req.add_unredirected_header("Authorization", f"Bearer {tok}")   # never sent on to a signed asset redirect
     with urllib.request.urlopen(req, timeout=30) as r:
         return r.read()
 
@@ -1208,8 +1208,13 @@ def release_gate_record(repo, root, t, ref, work, files, read=None):
         commits, bad = set(), None
         for a in sorted(assets, key=lambda a: a["name"]):
             try:
-                # the API asset URL carries the token (a private fork's release too); the download link otherwise
-                text = read(a.get("url") or a["browser_download_url"], "application/octet-stream").decode("utf-8", "replace")
+                # the API asset URL carries the token (a private fork's release too); the download link if that fails
+                try:
+                    raw = read(a["url"], "application/octet-stream") if a.get("url") else None
+                except OSError:
+                    raw = None
+                text = (raw if raw is not None else read(a["browser_download_url"], "application/octet-stream")
+                        ).decode("utf-8", "replace")
             except OSError as e:
                 bad = f"{r['tag_name']}: {a['name']} could not be read ({str(e)[:80]})"
                 break
@@ -6523,7 +6528,10 @@ def _check_release_gate_record(expect):
             return {"tag_name": tag, "published_at": "2026-10-28T00:00:00Z",
                     "assets": [{"name": n, "browser_download_url": f"https://example.invalid/{tag}/{n}"} for n in names]}
         keep = gh_read
-        gh_read = lambda url, accept=None: files_[url].encode("utf-8")
+        def gh_read(url, accept=None):
+            if url not in files_:
+                raise OSError(f"HTTP Error 400 for {url}")
+            return files_[url].encode("utf-8")
         try:
             def setup(rels, contents):
                 RELEASES.clear()
@@ -6538,6 +6546,13 @@ def _check_release_gate_record(expect):
                   {u("gates-full.md"): summary(h, "full"), u("gates-minimal.md"): summary(h, "minimal")})
             why = gates_why()
             expect(not why, f"a green, current release record stands for GATES.md: {why}")
+            # the API asset URL refused (a signed redirect, a proxy): the download link is read instead
+            rel_api = rel(tag, ["gates-full.md", "gates-minimal.md"])
+            for a_ in rel_api["assets"]:
+                a_["url"] = "https://api.invalid/assets/" + a_["name"]
+            setup([rel_api], {u("gates-full.md"): summary(h, "full"), u("gates-minimal.md"): summary(h, "minimal")})
+            why = gates_why()
+            expect(not why, f"an API asset read that fails falls back to the download link: {why}")
             setup([rel(tag, ["gates-full.md", "gates-minimal.md"])],
                   {u("gates-full.md"): summary(h, "full"), u("gates-minimal.md"): summary(h, "minimal", "FAIL")})
             why = gates_why()

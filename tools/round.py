@@ -316,13 +316,17 @@ def full_gate_lock(who, say=print):
             holder = (p.with_suffix(".holder").read_text(encoding="utf-8").strip()
                       if p.with_suffix(".holder").is_file() else "?")
             say(f"round: waiting for the machine's full-gate lock ({p}, held by {holder})")
-            t0 = time.monotonic()
+            t0, seen = time.monotonic(), holder
             while not _flock(fh, block=False):
                 # never forever: a hung Gate C client, or an orphan of a killed drive, stalls the whole round silently
-                # (review 2026-10-30) -- the step fails, naming the holder, and its BLOCKED line says so
+                # (review 2026-10-30) -- the step fails when ONE holder has kept the lock this long, naming it
+                now_h = (p.with_suffix(".holder").read_text(encoding="utf-8").strip()
+                         if p.with_suffix(".holder").is_file() else "?")
+                if now_h != seen:
+                    t0, seen = time.monotonic(), now_h        # another run took it: a queue, not a hang
                 if time.monotonic() - t0 > GATE_LOCK_WAIT:
-                    raise StepError(f"the machine's full-gate lock is still held after {GATE_LOCK_WAIT / 3600:g} h, "
-                                    f"by {holder}: a hung gate run? end that process, then retry this step")
+                    raise StepError(f"the machine's full-gate lock has been held by {seen} for over "
+                                    f"{GATE_LOCK_WAIT / 3600:g} h: a hung gate run? end that process, then retry this step")
                 time.sleep(min(30, GATE_LOCK_WAIT / 10))
         p.with_suffix(".holder").write_text(f"{who} pid {os.getpid()} since {now()}\n", encoding="utf-8")
         if os.name == "nt":
@@ -1105,18 +1109,26 @@ def end_child(st, it):
         return
     with contextlib.suppress(OSError):
         f.unlink()
-    if c.get("host") not in (None, host()):
-        return
-    if pid_alive(c.get("pid")) and (not c.get("pstart") or proc_start(c["pid"]) == c["pstart"]):
-        import signal
-        with contextlib.suppress(OSError):
-            os.killpg(c["pid"], signal.SIGTERM)      # compat-ok: inside the os.name check above
-        for _ in range(50):
-            if not pid_alive(c["pid"]) or proc_state(c["pid"]) == "Z":
-                break
-            time.sleep(0.1)
-        with contextlib.suppress(OSError):
-            os.killpg(c["pid"], signal.SIGKILL)      # compat-ok: inside the os.name check above
+    if c.get("host") not in (None, host()) or not c.get("pstart"):
+        return                          # another machine, or no /proc (macOS): never risk an unrelated process group
+    alive = pid_alive(c.get("pid"))
+    if alive and proc_start(c["pid"]) != c["pstart"]:
+        return                          # the pid was reused by another process: not ours
+    # a dead leader still leaves its group while a member runs (a gate wrapper gone, its Gradle or client not), and no
+    # pid is reused while a group of that id exists: the group is ended either way
+    import signal
+    with contextlib.suppress(OSError):
+        os.killpg(c["pid"], signal.SIGTERM)          # compat-ok: inside the os.name check above
+    for _ in range(50):                              # up to 5 s for the group to go
+        try:
+            os.killpg(c["pid"], 0)                   # compat-ok: inside the os.name check above
+        except OSError:
+            return
+        if proc_state(c["pid"]) == "Z" and alive:
+            break
+        time.sleep(0.1)
+    with contextlib.suppress(OSError):
+        os.killpg(c["pid"], signal.SIGKILL)          # compat-ok: inside the os.name check above
 
 
 def proc_state(pid):
@@ -1542,8 +1554,17 @@ def sh(st, it, cmd, log, cwd=None, ok=(0,), hold=None, env=None):
         mark_child(st, it, p_.pid)
         try:
             p_.wait()
-        finally:
-            mark_child(st, it, None)
+        except BaseException:              # Ctrl-C (or any error here): its own session never sees the signal
+            if os.name != "nt":            # compat-ok: process groups are POSIX
+                import signal
+                with contextlib.suppress(OSError):
+                    os.killpg(p_.pid, signal.SIGTERM)      # compat-ok: inside the os.name check
+            else:
+                p_.kill()
+            with contextlib.suppress(Exception):
+                p_.wait(timeout=30)
+            raise
+        mark_child(st, it, None)
         r = subprocess.CompletedProcess(p_.args, p_.returncode, "", "")
     if r.returncode not in ok:
         raise StepError(f"{pathlib.Path(str(cmd[1])).name if len(cmd) > 1 else cmd[0]} exit {r.returncode}: "
@@ -2979,7 +3000,7 @@ def t_ledger(st, it, log):
     merged |= {x["version"] for x in st.items if x["fork"] == it["fork"] and x["step"] == "nochange"
                and x["status"] == "ok" and x["result"].get("pushed")}
     unmerged = [x["version"] for x in st.items if x["fork"] == it["fork"] and x["step"] == "merge"
-                and x["status"] != "ok" and x["version"] not in merged]
+                and x["status"] not in ("ok", "skipped") and x["version"] not in merged]
     d = checkout(d, F["head"])
     ff_local(d, F["head"])
     sets, refused, found_new = 0, [], []
@@ -3220,11 +3241,17 @@ def skip_idle_head(st, it):
     except (KeyError, TypeError):
         return []
     d = F["dir"]
-    git(d, "fetch", "-q", "origin", F["head"])
-    if git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/{br}").returncode:
-        return []
-    if git(d, "rev-list", f"origin/{F['head']}..refs/heads/{br}").stdout.strip():
-        return []                       # the head has work of its own: its full cycle runs
+    own = ("backlog", "reconcile", "adopt", "sync", "authors", "upstream", "grades")
+    if any(x["fork"] == it["fork"] and x["version"] == it["version"] and x["step"] in own
+           and x["status"] not in ("skipped",) and x["status"] != "ok" for x in st.items):
+        return []                       # its own work still to come (a backlog fix after the re-pin): the full cycle
+    # origin's head as setup fetched it: no network under the drive's state lock
+    if git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/{br}").returncode or git(
+            d, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{F['head']}").returncode:
+        return []                       # nothing to compare with: never skip on a guess
+    ahead = git(d, "rev-list", f"origin/{F['head']}..refs/heads/{br}")
+    if ahead.returncode or ahead.stdout.strip():
+        return []                       # the head has work of its own (or the comparison failed): its full cycle runs
     later = SKIP_ON_NOCHANGE + ("records", "done")
     ids = [x["id"] for x in st.items if x["fork"] == it["fork"] and x["version"] == it["version"]
            and x["status"] == "pending" and (x["step"] in later or x["step"].startswith("depgate:"))]
@@ -4632,6 +4659,46 @@ def self_check():
                 gone = False
                 orphan.kill()                       # the test's own child: never left behind
                 orphan.wait()
+            # a group whose leader exited while a member runs (a wrapper gone, its build not)
+            pidf = _StO.rdir / "member.pid"
+            lead = subprocess.Popen(["sh", "-c", f"sleep 30 & echo $! > {shlex.quote(str(pidf))}; sleep 0.5"],
+                                    start_new_session=True)
+            ri2 = {"id": "o@1:y", "status": "running", "kind": "tool", "pid": 2 ** 22 + 9, "host": host()}
+            _StO.items = [ri2]
+            mark_child(_StO(), ri2, lead.pid)
+            lead.wait()
+            member = int(pidf.read_text(encoding="utf-8").strip())
+            reap(_StO())
+            for _ in range(50):
+                if not pid_alive(member) or proc_state(member) == "Z":
+                    break
+                time.sleep(0.1)
+            m_gone = not pid_alive(member) or proc_state(member) == "Z"
+            if not m_gone:
+                os.kill(member, 9)                  # compat-ok: inside the os.name check; the test's own process
+            expect(m_gone, "a dead leader's group member is ended too")
+            # Ctrl-C while a step's command runs: the command's group ends, not left holding the worktree
+            import signal
+            class _Int(Exception):
+                pass
+            def _alarm(*_a):
+                raise _Int()
+            old_h = signal.signal(signal.SIGALRM, _alarm)
+            ri3 = {"id": "o@1:z", "status": "running", "kind": "tool"}
+            sidf = _StO.rdir / "int.pid"
+            try:
+                signal.setitimer(signal.ITIMER_REAL, 0.7)
+                sh(_StO(), ri3, ["sh", "-c", f"echo $$ > {shlex.quote(str(sidf))}; exec sleep 30"],
+                   str(_StO.rdir / "int.log"))
+                expect(False, "the interrupted command ran to its end")
+            except _Int:
+                pass
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, old_h)
+            ipid = int(sidf.read_text(encoding="utf-8").strip())
+            i_gone = not pid_alive(ipid) or proc_state(ipid) == "Z"
+            expect(i_gone, "an interrupt while a step's command runs ends that command")
             expect(n_ == 1 and gone and ri_["status"] == "pending" and not child_file(_StO.rdir, ri_).exists(),
                    f"reap ends a dead drive's orphaned step command before the re-run: {n_} {ri_}")
         # a head with nothing new once its re-pin was skipped: its gates, review, PR and release skipped too
@@ -4645,6 +4712,7 @@ def self_check():
         git(ih / "w", "commit", "-qm", "a", check=True)
         subprocess.run(["git", "clone", "-q", "--bare", str(ih / "w"), str(ih / "o.git")], check=True, capture_output=True)
         git(ih / "w", "remote", "add", "origin", str(ih / "o.git"))
+        git(ih / "w", "fetch", "-q", "origin", check=True)
         git(ih / "w", "branch", "keep-current/2026-10-30", check=True)
 
         class _StH:
@@ -4667,6 +4735,11 @@ def self_check():
         git(ih / "w", "commit", "-qam", "work", check=True)
         expect(skip_idle_head(sh_, sh_.item("idle@1.21.1:repin-head")) == [],
                "a head with work of its own keeps its full cycle")
+        git(ih / "w", "reset", "-q", "--hard", "neoforge-1.21.1", check=True)     # empty again, but a backlog fix to come
+        sh_.items.append({"id": "idle@1.21.1:backlog", "fork": "o/idle", "version": "1.21.1", "step": "backlog",
+                          "status": "pending", "extra": {}, "result": {}})
+        expect(skip_idle_head(sh_, sh_.item("idle@1.21.1:repin-head")) == [],
+               "a head whose backlog fix is still to come keeps its full cycle (gated, reviewed, released)")
         rp_ = {"step": "repin-head", "status": "pending", "version": "1.21.1", "extra": {"libraries": [LIB]}}
         expect(no_agent_work(_StR({"skipped": True, "tag": None}), rp_)
                and no_agent_work(_StR({"tag": "lib-1.0-mc1.21.1"}), rp_) is None,
@@ -5347,7 +5420,7 @@ def self_check():
                 with full_gate_lock("second", lambda *x: None):
                     expect(False, "a second full gate run got the held lock")
             except StepError as e:
-                expect("still held" in str(e) and "first" in str(e), f"a lock held too long: the step fails, naming the holder: {e}")
+                expect("held by first" in str(e), f"a lock held too long: the step fails, naming the holder: {e}")
             finally:
                 globals()["GATE_LOCK_WAIT"] = keep_w
         if child is not None:
