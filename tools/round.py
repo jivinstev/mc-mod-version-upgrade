@@ -3050,6 +3050,19 @@ def set_aside(summary):
     return summary.rename(summary.with_name(f"{summary.stem}.prev{n}.md"))
 
 
+def no_agent_work(st, it):
+    """An agent item with nothing to do, skipped instead of dispatched -> why, or None. A head's re-pin when no library
+    it waits on cut a release this round (each one's version merged nothing new, its release skipped): the pin stays,
+    as the version-branch re-pin (t_repin) already does (measured, weekly round 2026-10-30: the job was asked to pin
+    `<library>@None` and blocked)."""
+    if it["step"] == "repin-head" and it["status"] == "pending":
+        rels = [st.item(f"{st.fork(lb)['name']}@{it['version']}:release").get("result", {})
+                for lb in it["extra"].get("libraries", [])]
+        if rels and all(r_.get("skipped") or not r_.get("tag") for r_ in rels):
+            return "no library cut a release this round (nothing new merged): the pin stays"
+    return None
+
+
 def dispatch_agent(st, it):
     """Claim an agent item (or a failed tool item's fixer) and write its job file. -> the job JSON."""
     fixing = it["kind"] == "tool"
@@ -3084,6 +3097,9 @@ def cmd_next(a, out=print):
             if need:
                 finish(st, it, "blocked", f"needs the owner: {need}")
                 ask_owner(st, it, need)
+                continue
+            if no_agent_work(st, it):
+                finish(st, it, "skipped", no_agent_work(st, it))
                 continue
             if it["kind"] == "agent" or it["status"] == "failed":
                 jobs.append(dispatch_agent(st, it))
@@ -3166,6 +3182,8 @@ def cmd_drive(a, out=print):
                         if need:
                             finish(st, it, "blocked", f"needs the owner: {need}")
                             ask_owner(st, it, need)
+                        elif no_agent_work(st, it):
+                            finish(st, it, "skipped", no_agent_work(st, it))
                         elif it["kind"] == "agent" or it["status"] == "failed":
                             j = dispatch_agent(st, it)
                             jobs.append(j)
@@ -3235,6 +3253,12 @@ def parse_summary(text):
     res = {"status": m.group(1).lower() if m else None, "blocking": [], "fixed": [], "commits": [], "lowest": []}
     for ln in lines[1:]:
         ln = ln.strip()
+        if (ln and not res.get("why") and not re.match(r"^(not_ok|fixed|commit|lowest|finding):", ln)
+                and not re.match(r"^blocking:\s*\S+\s+S[12]\b", ln)):
+            # the first line that says why (a `blocking:` line not in the <ID> <S1|S2> form included): the note of a
+            # blocked or failed job, so its BLOCKED line says what (measured, weekly round 2026-10-30: a re-pin job
+            # blocked with a free-form reason, and the BLOCKED line said only "blocked")
+            res["why"] = re.sub(r"\s+", " ", ln)[:240]
         if (k := re.match(r"^not_ok:\s*(\d+)", ln)):
             res["not_ok"] = int(k.group(1))
         elif (k := re.match(r"^blocking:\s*(\S+)\s+(S[12])\b\s*(.*)", ln)):
@@ -3339,7 +3363,7 @@ def cmd_record(a, out=print):
                             x["note"] = f"runs again: {a.id} may have changed the code it gated"
             else:
                 finish(st, it, "blocked" if status == "blocked" or it["fixes"] >= MAX_FIX else "failed",
-                       f"{a.id}: {status}")
+                       f"{a.id}: {status}" + (f": {parsed['why']}" if parsed.get("why") else ""))
         elif it["step"] == "lowest":
             # fail soft: a check that could not finish leaves the fixes where the plan put them; nothing waits on it
             moved = record_lowest(st, it, parsed["lowest"]) if status == "ok" else []
@@ -3353,7 +3377,8 @@ def cmd_record(a, out=print):
         else:
             if status == "ok" and parsed["blocking"]:
                 status = "blocked"
-            finish(st, it, status, f"{status}" + (f"; blocking: {'; '.join(parsed['blocking'])}" if parsed["blocking"] else ""))
+            finish(st, it, status, f"{status}" + (f"; blocking: {'; '.join(parsed['blocking'])}" if parsed["blocking"]
+                                                  else f": {parsed['why']}" if status != "ok" and parsed.get("why") else ""))
             it["result"] = res
             if status == "failed":
                 it["attempts"] = it.get("attempts", 0) + 1
@@ -4387,6 +4412,18 @@ def self_check():
         rc, o, _ = init(fz(), cfg, both, state)
         with State.tx(state, write=False) as st_:
             expect(trial_lines(st_) == [], "a round without --through: the close rule as before")
+
+        class _StR:
+            def __init__(self, rel):
+                self.rel = rel
+            def fork(self, s_):
+                return {"name": s_.split("/")[1]}
+            def item(self, _i):
+                return {"result": self.rel}
+        rp_ = {"step": "repin-head", "status": "pending", "version": "1.21.1", "extra": {"libraries": [LIB]}}
+        expect(no_agent_work(_StR({"skipped": True, "tag": None}), rp_)
+               and no_agent_work(_StR({"tag": "lib-1.0-mc1.21.1"}), rp_) is None,
+               "a head's re-pin when the library cut no release this round: skipped, not an agent job")
         rc, o, items = init(fz(), cfg, both, state)
         expect(rc == 0 and "owner/examplelib: branches 1.21.1..1.21.8" in o, f"init: {rc} {o}")
         ids = [it["id"] for it in items]
@@ -4678,6 +4715,12 @@ def self_check():
                    and st.item("examplelib@1.21.1:ledger")["status"] == "ok"
                    and st.item("examplemod@1.21.1:ledger")["status"] == "ok" and "examplemod@1.21.1:ledger" in calls,
                    "a blocked item stops its dependents only; each fork's ledger runs for what merged")
+            pw_ = [parse_summary(t_).get("why") for t_ in (
+                "RESULT: blocked\nThe library's release asset is missing at 1.21.1: ask the owner\n",
+                "RESULT: blocked\nnot_ok: 0\nblocking: the pinned jar is not on the release\n",
+                "RESULT: ok\nnot_ok: 0\ncommit: abc1234\n")]
+            expect(pw_[0].startswith("The library's release asset") and pw_[1].startswith("blocking: the pinned jar")
+                   and pw_[2] is None, f"a blocked job's first reason line reaches its note and BLOCKED line: {pw_}")
             expect(blocked_by(st, st.item("examplemod@1.21.5:merge")) == "examplemod@1.21.4:review", "blocked_by")
         expect([x["id"] for x in js] == ["round_close"], f"the close comes once nothing else can run: {js}")
         cjob = job_file(js[0]) if js else ""

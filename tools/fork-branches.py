@@ -3463,6 +3463,27 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     except ValueError as e:
         say(f"fork-branches: --apply-decisions: {e}"); return 2
     answers = {d["id"]: d for d in data.get("decisions", []) if d.get("id") and d.get("choice")}
+    per_file = {}
+    for d in answers.values():
+        per_file.setdefault(d.get("file"), []).append(d)
+    same = lambda ds: len({json.dumps({k: x.get(k) for k in ("choice", "patch", "content")}, sort_keys=True)
+                           for x in ds}) == 1
+    used = set()
+
+    def answer_for(c):
+        """The answer for a REMERGE.json entry: by its id, else the one answer for its file -- an id is the file and
+        the authors' diff hashed, and the plan's preview hashes before the head's own merge, so the head merge moves
+        it (measured, weekly round 2026-10-30: 9 of 11 answers keyed by preview ids matched no entry)."""
+        a_ = answers.get(c.get("id"))
+        if a_ is None:
+            ds = [x for x in per_file.get(c.get("overlay"), []) if c.get("overlay")]
+            a_ = ds[0] if ds and same(ds) else None
+            if a_ is not None:
+                say(f"fork-branches: --apply-decisions: {c.get('id')} ({c.get('overlay')}) answered by {a_['id']}, "
+                    "the one answer for that file")
+        if a_ is not None:
+            used.add(a_["id"])
+        return a_
     bad = [i for i, d in answers.items() if d["choice"] not in ("take", "keep", "patch", "content")
            and not (d["choice"].startswith(DEFERRED) and len(d["choice"]) > len(DEFERRED))]
     if bad:
@@ -3475,11 +3496,15 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     def held():
         return {c.get("id") for t in hops for c in remerge_entries(
             blob_at(repo, resolve_branch(repo, branch_name(t)) or "HEAD", f"{REC}/{t}/REMERGE.json"))}
+
+    def held_files():
+        return {c.get("overlay") for t in hops for c in remerge_entries(
+            blob_at(repo, resolve_branch(repo, branch_name(t)) or "HEAD", f"{REC}/{t}/REMERGE.json"))}
     if to:                                  # one hop: its --apply first only while the hop is not merged yet
         lo, hi = resolve_branch(repo, branch_name(below) if below else port), resolve_branch(repo, branch_name(to))
         first = not (lo and hi and git(repo, "merge-base", "--is-ancestor", lo, hi).returncode == 0)
     else:
-        first = bool(set(answers) - held())
+        first = bool(set(answers) - held() - {d["id"] for f_, ds in per_file.items() if f_ in held_files() for d in ds})
     if first:
         say(f"fork-branches: --apply-decisions: {len(set(answers) - held())} answer(s) with no REMERGE.json entry yet "
             "(no earlier --apply): running cascade --apply first")
@@ -3491,7 +3516,7 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     for t in hops:
         tref = resolve_branch(repo, branch_name(t))
         ents = remerge_entries(blob_at(repo, tref, f"{REC}/{t}/REMERGE.json"))
-        mine = [c for c in ents if c.get("id") in answers]
+        mine = [c for c in ents if answer_for(c) is not None]
         if not mine:
             continue
         work, why = worktree_for(repo, t)
@@ -3501,7 +3526,7 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
         pr = port_ref_of(repo, work, t, git(work, "rev-parse", "HEAD", check=True).stdout.strip())
         logged, cleared, deferred_ = [], [], {}
         for c in mine:
-            a, f = answers[c["id"]], c["overlay"]
+            a, f = answer_for(c), c["overlay"]
             choice = a["choice"]
             if choice.startswith(DEFERRED):
                 # keep ours, deferred on a dependency this version drops: the entry stays, marked deferred (not counted
@@ -3569,7 +3594,7 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
         say(f"fork-branches: --apply-decisions: left open, `patch` with no diff (the default's patch is the fixer's to "
             f"write: the authors' diff is in the entry and CASCADE-PLAN.md): {', '.join(waiting)}. Answer each with its "
             "`patch` (or take/keep/content) and run --apply-decisions again; until then that version is not done")
-    missing = sorted(set(answers) - done_ids) if not to else []   # one hop: the other versions' answers are theirs
+    missing = sorted(set(answers) - done_ids - used) if not to else []   # one hop: the other versions' answers are theirs
     if missing:
         say(f"fork-branches: --apply-decisions: no open entry holds {', '.join(missing)} (answered already, or a stale block)")
     say("fork-branches: --apply-decisions: merging the decisions up and re-planning (cascade --apply)")
@@ -6042,6 +6067,20 @@ def _check_untaken_head(expect):
             f4 = ref_files(r, resolve_branch(r, "neoforge-1.21.4"))
             expect(rc == 0 and b"MID" in f4[em] and "1.21.4: 1 decision(s) applied" in out,
                    f"--apply-decisions over the range applies a middle version's answer: {out[-500:]}")
+        # an answer keyed by a stale id (the plan's preview hashed the diff before the head's own merge): the one
+        # answer for that file applies; two answers that disagree for one file never do
+        _authors(r, g, {em: ("int MID;", "int MID; int LATE;")}, "authors 3")
+        w4_, _w = worktree_for(r, "1.21.4")
+        _hand(w4_, {em: ("Thing t;", "Thing t; int h4c;")}, "1.21.4 hand change 2")
+        rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", mode="plan", out_dir=pdir)
+        for answers_, want_late in (([{"id": "0" * 12, "file": em, "choice": "take", "by": "plan", "reason": "theirs"},
+                                      {"id": "1" * 12, "file": em, "choice": "keep", "by": "plan", "reason": "ours"}], False),
+                                     ([{"id": "0" * 12, "file": em, "choice": "take", "by": "plan", "reason": "theirs"}], True)):
+            dec.write_text(json.dumps({"range": "neoforge-1.21.1..1.21.5", "decisions": answers_}), encoding="utf-8")
+            rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir)
+            f4 = ref_files(r, resolve_branch(r, "neoforge-1.21.4"))
+            expect((b"LATE" in f4[em]) == want_late and (("answered by " + "0" * 12) in out) == want_late,
+                   f"a stale-id answer: applied by its file when it is the only one ({want_late}): {out[-500:]}")
         rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir, to="1.21.9")
         expect(rc == 2 and "not a version of the block's range" in out, f"--to a version off the range: refused: {out[-200:]}")
     # a single-version fork: no version branches, nothing untaken to name
