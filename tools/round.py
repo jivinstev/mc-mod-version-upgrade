@@ -1234,6 +1234,20 @@ def record_step(F, br):
             "version, the decision, evidence and any A/B in its notes), committed on the head branch with the work.")
 
 
+def trial_lines(st):
+    """A trial round (init --through): the versions above it and the forks left out are the plan's work too, never
+    done this round, so the plan stays open whatever status says (measured, trial round 2026-10-29: the close closed
+    the plan over the dependent left out and the versions above the cap)."""
+    cut = [f"{s_} above {F['through']}" for s_, F in st.data["forks"].items()
+           if F.get("through") and F.get("ladder") and F["ladder"][-1] != F["through"]]
+    out_ = [cf["repo"] for cf in st.data.get("config", {}).get("forks", []) if cf["repo"] not in st.data["forks"]]
+    if not (cut or out_):
+        return []
+    return [f"This was a trial round (round.py init --through): {', '.join(cut + [f'{x} (left out)' for x in out_])} "
+            "were not in it. Leave the issue OPEN whatever the rule above says, and name them in the comment as "
+            "carried to the next round."]
+
+
 def job_task(st, it):
     T, s, v = TOOLS, it["step"], it["version"]
     if s == "close":
@@ -1250,6 +1264,7 @@ def job_task(st, it):
                 *harvest_lines(st), *hand_repin_lines(st),
                 "Close the issue (state completed) only when every item in status is ok, skipped or a blocked item "
                 "that waits on the owner and is named in the comment; a round that stopped leaves it open (step 5).",
+                *trial_lines(st),
                 "Acceptance: one closing comment posted; the issue closed or left open by that rule."]
     F = st.fork(it["fork"])
     w, br = where(st, it)
@@ -4364,6 +4379,14 @@ def self_check():
         F_t = json.loads(pathlib.Path(state).read_text(encoding="utf-8"))["forks"][LIB]
         expect(rc == 0 and F_t["versions"] == ["1.21.4"] and F_t["ladder"][-1] == "1.21.8",
                f"--through keeps the whole ladder for ci-check's regeneration pushes: {F_t.get('versions')} {F_t.get('ladder')}")
+        rc, o, _ = init(fz(), cfg, both, state, through=[f"{LIB}=1.21.4", f"{DEP}=none"])
+        with State.tx(state, write=False) as st_:
+            tl_, ct_ = trial_lines(st_), " ".join(job_task(st_, st_.item("round:close")))
+        expect(rc == 0 and "Leave the issue OPEN" in ct_ and f"{LIB} above 1.21.4" in tl_[0] and f"{DEP} (left out)" in tl_[0],
+               f"a trial round's close leaves the plan open, naming what it left out: {tl_}")
+        rc, o, _ = init(fz(), cfg, both, state)
+        with State.tx(state, write=False) as st_:
+            expect(trial_lines(st_) == [], "a round without --through: the close rule as before")
         rc, o, items = init(fz(), cfg, both, state)
         expect(rc == 0 and "owner/examplelib: branches 1.21.1..1.21.8" in o, f"init: {rc} {o}")
         ids = [it["id"] for it in items]
