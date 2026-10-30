@@ -465,7 +465,7 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   against origin opens no PR and cuts no release. The ledger runs for what merged and names what did not.
   **Waits are one blocking loop inside the driver**, never a model polling turn by turn: each idle gap longer
   than 5 minutes re-writes the session's whole cached context.
-- **Model work is a job:** for each AGENT JOB `drive` prints, start a **fresh background subagent** whose whole prompt
+- **Model work is a job:** for each AGENT JOB `drive` prints, start, in the background, a **fresh subagent** whose whole prompt
   is the job's `prompt` line (it names a job file: the task, the commands, the acceptance check, the rules); the worker
   writes a summary of at most ~40 lines starting `RESULT: ok|blocked|failed` (with `not_ok:`, `blocking:` and `fixed:`
   lines the driver reads) and replies only its path. `drive --follow` records it from that file; only when a worker
