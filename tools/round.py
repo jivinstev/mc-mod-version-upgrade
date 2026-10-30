@@ -4704,7 +4704,7 @@ def self_check():
                 orphan.wait()
             # a group whose leader exited while a member runs (a wrapper gone, its build not)
             pidf = _StO.rdir / "member.pid"
-            lead = subprocess.Popen(["sh", "-c", f"sleep 30 & echo $! > {shlex.quote(str(pidf))}; sleep 0.5"],
+            lead = subprocess.Popen(["sh", "-c", f"sleep 30 & echo $! > {shlex.quote(str(pidf))}; sleep 0.5"],  # exec-ok: POSIX-only test (inside the os.name check)
                                     start_new_session=True)
             ri2 = {"id": "o@1:y", "status": "running", "kind": "tool", "pid": 2 ** 22 + 9, "host": host()}
             _StO.items = [ri2]
@@ -4731,7 +4731,7 @@ def self_check():
             sidf = _StO.rdir / "int.pid"
             try:
                 signal.setitimer(signal.ITIMER_REAL, 0.7)
-                sh(_StO(), ri3, ["sh", "-c", f"echo $$ > {shlex.quote(str(sidf))}; exec sleep 30"],
+                sh(_StO(), ri3, ["sh", "-c", f"echo $$ > {shlex.quote(str(sidf))}; exec sleep 30"],  # exec-ok: POSIX-only test (inside the os.name check)
                    str(_StO.rdir / "int.log"))
                 expect(False, "the interrupted command ran to its end")
             except _Int:
