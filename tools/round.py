@@ -3363,7 +3363,50 @@ def auto_record(state, out=print):
     return len(due)
 
 
+def end_children(rdir):
+    """Every step command a drive in this round directory started that is still running (round/children/): its
+    process group ended. A command in its own session never sees the terminal's Ctrl-C, and the drive's worker threads
+    wait on them, so an interrupted drive ends them itself (review 2026-10-30). -> how many groups were signalled."""
+    if os.name == "nt":                                  # compat-ok: process groups are POSIX
+        return 0
+    import signal
+    n = 0
+    for f in sorted((pathlib.Path(rdir) / "round/children").glob("*.json")):
+        try:
+            c = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if c.get("host") not in (None, host()) or not c.get("pstart") or proc_start(c.get("pid")) != c["pstart"]:
+            continue                                     # not ours to signal: another host, or its pid reused
+        with contextlib.suppress(OSError):
+            os.killpg(c["pid"], signal.SIGTERM)          # compat-ok: inside the os.name check above
+            n += 1
+    return n
+
+
 def cmd_drive(a, out=print):
+    """drive, with Ctrl-C ending the step commands it started (they run in their own sessions)."""
+    import signal
+    try:
+        with State.tx(a.state, write=False) as st_:
+            rdir = st_.rdir
+    except Exception:                                    # noqa: BLE001 -- never let the handler stop a drive
+        rdir = pathlib.Path(a.state).resolve().parent.parent
+
+    def on_int(signum, frame):
+        end_children(rdir)
+        raise KeyboardInterrupt
+    old = None
+    if threading.current_thread() is threading.main_thread():
+        old = signal.signal(signal.SIGINT, on_int)
+    try:
+        return _cmd_drive(a, out)
+    finally:
+        if old is not None:
+            signal.signal(signal.SIGINT, old)
+
+
+def _cmd_drive(a, out=print):
     """Run every runnable tool step (forks in parallel, one per clone, one full gate run at a time) until none is
     running or runnable; the agent jobs that came up are printed for the orchestrator. -> 0, or 3 when stuck."""
     lockp = pathlib.Path(a.state).with_suffix(".drive.lock")
@@ -4643,7 +4686,7 @@ def self_check():
                 return {"name": s_.split("/")[1]}
             def item(self, _i):
                 return {"result": self.rel}
-        if os.name != "nt":      # compat-ok: process groups are POSIX
+        if os.name != "nt" and proc_start(os.getpid()):      # compat-ok: process groups are POSIX; start times need /proc
             # a drive killed while its step's command runs: reap ends that command's process group, then re-queues
             orphan = subprocess.Popen(["sleep", "30"], start_new_session=True)
             ri_ = {"id": "o@1:x", "status": "running", "kind": "tool", "pid": 2 ** 22 + 7, "host": host()}
@@ -4699,6 +4742,18 @@ def self_check():
             ipid = int(sidf.read_text(encoding="utf-8").strip())
             i_gone = not pid_alive(ipid) or proc_state(ipid) == "Z"
             expect(i_gone, "an interrupt while a step's command runs ends that command")
+            # Ctrl-C of a drive: its worker threads' commands (their own sessions) are ended from round/children/
+            cg = subprocess.Popen(["sleep", "30"], start_new_session=True)
+            ri4 = {"id": "o@1:w", "status": "running", "kind": "tool"}
+            mark_child(_StO(), ri4, cg.pid)
+            n4 = end_children(_StO.rdir)
+            try:
+                cg_gone = cg.wait(timeout=10) is not None
+            except subprocess.TimeoutExpired:
+                cg_gone = False
+                cg.kill()
+                cg.wait()
+            expect(n4 >= 1 and cg_gone, f"an interrupted drive ends the step commands it started: {n4}")
             expect(n_ == 1 and gone and ri_["status"] == "pending" and not child_file(_StO.rdir, ri_).exists(),
                    f"reap ends a dead drive's orphaned step command before the re-run: {n_} {ri_}")
         # a head with nothing new once its re-pin was skipped: its gates, review, PR and release skipped too
