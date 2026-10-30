@@ -5,7 +5,7 @@
     python3 tools/fork-branches.py cascade     --repo DIR FROM..TO [--gates none|compile|ab|full] [--dry-run]
     python3 tools/fork-branches.py cascade     --repo DIR FROM..TO --plan|--apply [--budget-lines N] [--out DIR]
     python3 tools/fork-branches.py cascade     --repo DIR PORT..TO --plan --head-merge REF [...]   # the head merge previewed
-    python3 tools/fork-branches.py cascade     --repo DIR --apply-decisions FILE [--gates ...] [--out DIR]
+    python3 tools/fork-branches.py cascade     --repo DIR --apply-decisions FILE [--to V] [--gates ...] [--out DIR]
     python3 tools/fork-branches.py cascade     --repo DIR PORT..TO --port-ref REF [--upstream REMOTE/BRANCH] [...]
     python3 tools/fork-branches.py untaken     --repo DIR --upstream REF [--head B] [--json]
     python3 tools/fork-branches.py review-authors --repo DIR --range A..B --reviewer WHO [--note N] [--verdict ok|not-ok]
@@ -3427,7 +3427,7 @@ def read_decisions(path):
 
 
 def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LINES, out_dir=None, runner=None,
-                    untaken_ok=None):
+                    untaken_ok=None, to=None):
     """cascade --apply-decisions FILE: each answer (by decision id) applied at every version whose REMERGE.json holds
     that decision, oldest first -- take (the authors' file through the version's rows), keep, patch (a diff in the port
     branch's names, through the version's rows) or content -- its entry cleared, the choice logged in that branch's
@@ -3436,15 +3436,30 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     Run straight after read-plan (no earlier --apply): an answer no REMERGE.json entry holds yet makes it run the
     cascade --apply first, so every decision has its entry. A `patch` with no diff (read-plan's default for a decision
     the fixer has not written yet) is what --apply itself does with it: the file stays merged without the authors'
-    change, its entry open, the version not done, until the fixer answers it with the diff (or take/keep/content)."""
+    change, its entry open, the version not done, until the fixer answers it with the diff (or take/keep/content).
+    to: ONE hop of the block's range, the version below `to` into `to`, and only the answers `to` holds (the round's
+    per-version cascade step: the versions below, merged and green by their own steps, are not touched -- their
+    reviews and fixers may be working in them meanwhile)."""
     repo = pathlib.Path(repo).resolve()
     try:
         data = read_decisions(path)
     except (OSError, ValueError) as e:
         say(f"fork-branches: --apply-decisions {path}: {e}"); return 2
     spec = data.get("range") or ""
+    if to:
+        try:
+            _p, full, _i, _t = cascade_nodes(repo, spec)
+        except ValueError as e:
+            say(f"fork-branches: --apply-decisions: {e}"); return 2
+        to = to[len("neoforge-"):] if to.startswith("neoforge-") else to
+        if to not in full[1:]:
+            say(f"fork-branches: --apply-decisions --to {to}: not a version of the block's range {spec}"); return 2
+        below = full[full.index(to) - 1]
+        spec = f"{below or spec.partition('..')[0]}..{to}"
+    else:
+        below = None
     try:
-        port, nodes, _i, to = cascade_nodes(repo, spec)
+        port, nodes, _i, _end = cascade_nodes(repo, spec)
     except ValueError as e:
         say(f"fork-branches: --apply-decisions: {e}"); return 2
     answers = {d["id"]: d for d in data.get("decisions", []) if d.get("id") and d.get("choice")}
@@ -3456,10 +3471,16 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     _o, why = origin_sync(repo, [port] + [branch_name(t) for t in nodes[1:]], say=say)
     if why:
         say(f"fork-branches: --apply-decisions REFUSED: {why}"); return 2
+    hops = [to] if to else nodes[1:]
     def held():
-        return {c.get("id") for t in nodes[1:] for c in remerge_entries(
+        return {c.get("id") for t in hops for c in remerge_entries(
             blob_at(repo, resolve_branch(repo, branch_name(t)) or "HEAD", f"{REC}/{t}/REMERGE.json"))}
-    if set(answers) - held():
+    if to:                                  # one hop: its --apply first only while the hop is not merged yet
+        lo, hi = resolve_branch(repo, branch_name(below) if below else port), resolve_branch(repo, branch_name(to))
+        first = not (lo and hi and git(repo, "merge-base", "--is-ancestor", lo, hi).returncode == 0)
+    else:
+        first = bool(set(answers) - held())
+    if first:
         say(f"fork-branches: --apply-decisions: {len(set(answers) - held())} answer(s) with no REMERGE.json entry yet "
             "(no earlier --apply): running cascade --apply first")
         rc0 = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner,
@@ -3467,7 +3488,7 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
         if rc0:
             say("fork-branches: --apply-decisions: the cascade --apply stopped; no decision applied"); return rc0
     done_ids, failed, waiting = set(), [], []
-    for t in nodes[1:]:
+    for t in hops:
         tref = resolve_branch(repo, branch_name(t))
         ents = remerge_entries(blob_at(repo, tref, f"{REC}/{t}/REMERGE.json"))
         mine = [c for c in ents if c.get("id") in answers]
@@ -3548,7 +3569,7 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
         say(f"fork-branches: --apply-decisions: left open, `patch` with no diff (the default's patch is the fixer's to "
             f"write: the authors' diff is in the entry and CASCADE-PLAN.md): {', '.join(waiting)}. Answer each with its "
             "`patch` (or take/keep/content) and run --apply-decisions again; until then that version is not done")
-    missing = sorted(set(answers) - done_ids)
+    missing = sorted(set(answers) - done_ids) if not to else []   # one hop: the other versions' answers are theirs
     if missing:
         say(f"fork-branches: --apply-decisions: no open entry holds {', '.join(missing)} (answered already, or a stale block)")
     say("fork-branches: --apply-decisions: merging the decisions up and re-planning (cascade --apply)")
@@ -4885,6 +4906,8 @@ def main():
                     "versions above go on")
     km.add_argument("--apply-decisions", metavar="FILE", help="the answers (the issue's cascade-decisions block, or JSON) "
                     "applied at every version holding them, then --apply")
+    k.add_argument("--to", metavar="V", help="with --apply-decisions: stop at version V of the block's range (the "
+                   "round's per-version cascade step)")
     k.add_argument("--budget-lines", type=int, default=DEFAULT_BUDGET_LINES,
                    help=f"an authors' change larger than this (changed lines) is escalated, not a default (default {DEFAULT_BUDGET_LINES})")
     k.add_argument("--out", help="where the plan files go (default build/fork-branches/plan)")
@@ -4999,7 +5022,9 @@ def main():
             ap.error("--upstream is what --port-ref is checked against: pass --port-ref too")
         if a.apply_decisions:
             return apply_decisions(a.repo, a.apply_decisions, a.gates, budget=a.budget_lines, out_dir=a.out,
-                                   untaken_ok=a.untaken_ok)
+                                   untaken_ok=a.untaken_ok, to=a.to)
+        if a.to:
+            ap.error("--to goes with --apply-decisions (a FROM..TO range names its own end)")
         if not a.range:
             ap.error("cascade needs FROM..TO")
         return cascade(a.repo, a.range, a.gates, a.dry_run, mode="plan" if a.plan else "apply" if a.apply else None,
@@ -5986,6 +6011,39 @@ def _check_untaken_head(expect):
         expect(rc == 0 and "running cascade --apply first" not in out and b"AUTHORS_FIX" in f5[em]
                and not [c for c in remerge_entries(f5.get(".port/1.21.5/REMERGE.json", b"")) if c.get("overlay") == em],
                f"--apply-decisions again with the fixer's answer: applied, the entry cleared: {out[-400:]}")
+    # cascade --apply-decisions --to V, one version at a time (the round's per-version cascade step): each step merges
+    # up to V only, the versions above untouched; stepping to the top ends where one run over the range does
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        _authors(r, g, {pl: ("int v = 1;", "int v = 2;")}, "authors")
+        pdir = pathlib.Path(d) / "plan"
+        dec = pathlib.Path(d) / "o__lib.decisions.json"
+        dec.write_text(json.dumps({"range": "neoforge-1.21.1..1.21.5", "decisions": []}), encoding="utf-8")
+        has = lambda t: b"v = 2" in ref_files(r, resolve_branch(r, branch_name(t))).get(pl, b"")
+        seen = []
+        for t in ("1.21.3", "1.21.4", "1.21.5"):
+            rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir, to=t)
+            seen.append((t, rc, [has(x) for x in ("1.21.3", "1.21.4", "1.21.5")]))
+        expect(seen == [("1.21.3", 0, [True, False, False]), ("1.21.4", 0, [True, True, False]),
+                        ("1.21.5", 0, [True, True, True])],
+               f"--to V: each step carries the authors' change up to V only: {seen}")
+        # the full-range run (no --to) applies an answer a middle version holds (its `to` is no hop)
+        _authors(r, g, {em: ("Thing t;", "Thing t; int MID;")}, "authors 2")
+        w4_, _w = worktree_for(r, "1.21.4")
+        _hand(w4_, {em: ("Thing t;", "Thing t; int h4;")}, "1.21.4 hand change")
+        rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", mode="plan", out_dir=pdir)
+        plan2 = json.loads((pdir / "CASCADE-PLAN.json").read_text(encoding="utf-8"))
+        mid = [x for x in plan2["decisions"] if x["file"] == em and "1.21.4" in (x.get("versions") or [])]
+        expect(bool(mid), f"the plan has a decision a middle version holds: {plan2['decisions']}")
+        if mid:
+            dec.write_text(json.dumps({"range": "neoforge-1.21.1..1.21.5", "decisions": [
+                {"id": mid[0]["id"], "choice": "take", "by": "fixer agent", "reason": "theirs"}]}), encoding="utf-8")
+            rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir)
+            f4 = ref_files(r, resolve_branch(r, "neoforge-1.21.4"))
+            expect(rc == 0 and b"MID" in f4[em] and "1.21.4: 1 decision(s) applied" in out,
+                   f"--apply-decisions over the range applies a middle version's answer: {out[-500:]}")
+        rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir, to="1.21.9")
+        expect(rc == 2 and "not a version of the block's range" in out, f"--to a version off the range: refused: {out[-200:]}")
     # a single-version fork: no version branches, nothing untaken to name
     with tempfile.TemporaryDirectory() as d:
         sv = pathlib.Path(d)
