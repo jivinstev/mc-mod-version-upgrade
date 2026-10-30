@@ -1191,9 +1191,10 @@ def release_gate_record(repo, root, t, ref, work, files, read=None):
     if not slug:
         return None, "no GitHub origin to read releases from"
     try:
-        if slug not in RELEASES:
-            RELEASES[slug] = json.loads(read(f"https://api.github.com/repos/{slug}/releases?per_page=50").decode("utf-8"))
-        rels = RELEASES[slug]
+        rels = RELEASES.get(slug)           # one read: another thread may empty the cache in between (round.py)
+        if rels is None:
+            rels = json.loads(read(f"https://api.github.com/repos/{slug}/releases?per_page=50").decode("utf-8"))
+            RELEASES[slug] = rels
     except (OSError, ValueError) as e:
         return None, f"the releases of {slug} could not be read ({str(e)[:120]})"
     rx = re.compile(rf"-mc{re.escape(t)}(?:-r\d+)?$")

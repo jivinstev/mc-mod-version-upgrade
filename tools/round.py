@@ -1961,7 +1961,15 @@ def t_nochange(st, it, log):
     F, v, slug = st.fork(it["fork"]), it["version"], it["fork"]
     d, base = vco(st, slug, v), f"neoforge-{v}"
     git(d, "fetch", "-q", "origin", base, check=True)
-    changed = shipped_changes(d, f"origin/{base}", "HEAD", v)
+    # origin as it was before this step's first push: a re-run after that push (a restart, a retry after a red push
+    # run) still sees what the merge-up changed (review 2026-10-30: the diff against the fresh origin was empty)
+    pre = (it.get("result") or {}).get("pre_push")
+    if not pre:
+        pre = git(d, "rev-parse", f"origin/{base}").stdout.strip()
+        if getattr(st, "path", None):           # kept through a failure and a retry (finish updates, retry keeps it)
+            with State.tx(st.path) as s2:
+                s2.item(it["id"])["result"]["pre_push"] = pre
+    changed = shipped_changes(d, pre, "HEAD", v)
     if changed:
         return f"shipped code changed ({len(changed)} file(s): {', '.join(changed[:4])}): the full cycle", {}
     if "push-version-branches" not in st.data["allow"]:
@@ -1969,16 +1977,17 @@ def t_nochange(st, it, log):
     commit_records(d, v)
     if git(d, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         raise StepError(f"{d} has uncommitted changes after the merge-up: commit or discard them")
-    wf = any(f.startswith(".github/") for f in git(d, "diff", "--name-only", f"origin/{base}", "HEAD").stdout.splitlines())
+    wf = any(f.startswith(".github/") for f in git(d, "diff", "--name-only", pre, "HEAD").stdout.splitlines())
     sha = head(d)
     pushed = push_ahead(F["dir"], base)
     skip = [x["id"] for x in st.items if x["fork"] == slug and x["version"] == v and x["step"] in SKIP_ON_NOCHANGE]
-    if wf and pushed:
+    if wf:                  # pushed now, or by an earlier attempt a restart cut short: its push run decides either way
         ok, text = wait_runs(slug, sha, log, event="push", branch=base)
         if not ok:
             raise StepError(f"nothing shipped changed, but the workflow did: the push run on {base} is red ({text})")
     return (f"nothing shipped changed: {base} pushed at {sha[:12]}" + (", its push run green (the workflow changed)"
-            if wf and pushed else "") + f"; {len(skip)} step(s) skipped"), {"skip": skip, "pushed": sha, "workflow": wf}
+            if wf else "") + f"; {len(skip)} step(s) skipped"), {"skip": skip, "pushed": sha, "workflow": wf,
+                                                                                 "pre_push": pre}
 
 
 def t_repin(st, it, log):
@@ -2210,7 +2219,7 @@ def lib_undone(st, lb, v):
         d_ = next((x for x in st.items if x["fork"] == lb and x["version"] == v and x["step"] == "done"), None)
         return not d_ or d_["status"] != "ok" or bool((d_.get("result") or {}).get("report_only"))
     if v in L["versions"]:
-        return bool(mod("fb").target_done(vco(st, lb, v), v))
+        return bool(fresh_fb().target_done(vco(st, lb, v), v))
     return False
 
 
@@ -2258,7 +2267,7 @@ def t_done(st, it, log):
     the PR: it stops promotion and publishing."""
     F, v = st.fork(it["fork"]), it["version"]
     d = checkout(F["dir"], branch_of(st, it))
-    fb = mod("fb")
+    fb = fresh_fb()
     # a ci_record fork's Gate C comes from its PR's CI and the release built from it: not judged before the PR
     why = [w for w in fb.target_done(pathlib.Path(d), v, gates=not ci_record(d)) if w != fb.SV_PRERELEASE]
     # the first round: origin's head carries no done record yet (a REVIEW.md with its `- base:` line)
@@ -2271,6 +2280,14 @@ def t_done(st, it, log):
     return "done", {}
 
 
+def fresh_fb():
+    """fork-branches.py with its per-process release cache emptied: a long drive reads the releases this round cut
+    since (measured by review, 2026-10-30: a stale list marked a done library pre-release "not done")."""
+    fb = mod("fb")
+    fb.RELEASES.clear()
+    return fb
+
+
 def t_depgate(st, it, log):
     """The library pre-merge dependent gate: the dependent's version branch (origin's, on a throwaway worktree) gated
     in full against the library's candidate jar -- the jar the library's own full run built from the commit it gated,
@@ -2278,6 +2295,9 @@ def t_depgate(st, it, log):
     GATES.md in that worktree certifying its HEAD with every row green."""
     lib, dep = st.fork(it["fork"]), st.fork(it["extra"]["dependent"])
     v = it["version"]
+    pr_ = seg_item(st, it, "pr")
+    if pr_ and pr_.get("result", {}).get("skipped"):
+        return "no PR (nothing new against origin): no candidate jar to gate", {"skipped": True}
     lco = vco(st, it["fork"], v) if is_vb(st, it) else checkout(lib["dir"], branch_of(st, it))
     if ci_record(lco):
         r = depgate_ci(st, it, dep, v, log)
@@ -2469,15 +2489,26 @@ def depgate_ci(st, it, dep, v, log):
         if not jar:
             raise StepError(f"{lib_slug} run {run_id}'s jars: {why} (the asset {dep_slug} pins): which is the candidate?")
         entries.append(f"{lib_slug}#{run_id}/{art}/{jar.name}={ga}:{p['version']}@{digests[jar.name]}")
-    dsha = gh(f"repos/{dep_slug}/branches/{br}")["commit"]["sha"]
     since = it["result"].get("dispatched_at")
+    if since and it["result"].get("dispatched_for") not in (None, run_id):
+        # a new candidate (a fixer changed the library and its PR's CI ran again): gate that one, never the old run's
+        # verdict (measured by review, 2026-10-30: a red dependent run blocked every retry; a green one passed new code)
+        since = None
     if not since:
         since = now()
         with State.tx(st.path) as s2:       # written before the POST: a restart waits for this run, never dispatches twice
-            s2.item(it["id"])["result"]["dispatched_at"] = since
+            s2.item(it["id"])["result"].update(dispatched_at=since, dispatched_for=run_id)
         gh(f"repos/{dep_slug}/actions/workflows/port-ci.yml/dispatches", "POST",
            {"ref": br, "inputs": {"dep_override": " ".join(entries)}})
-    ok, text = wait_runs(dep_slug, dsha, log, event="workflow_dispatch", branch=br, since=since, first=True)
+    # by branch, event and time, not by the sha read before the POST: the dependent's branch can move in between (its
+    # own nochange push or merge in a pipelined round), and its run would never be found (review, 2026-10-30)
+    ok, text = wait_runs(dep_slug, None, log, event="workflow_dispatch", branch=br, since=since, first=True)
+    if not ok and not text.startswith("still running"):
+        # finished red (a fixer's or retry's next attempt re-runs it), or the POST never went out (a restart between
+        # the mark and the POST): the next attempt dispatches again -- never while a run is still going
+        with State.tx(st.path) as s2:
+            for k in ("dispatched_at", "dispatched_for"):
+                s2.item(it["id"])["result"].pop(k, None)
     if not ok:
         raise StepError(f"{dep_slug} {v}: its CI against {lib_slug}'s candidate jar (run {run_id}) is NOT green ({text}): "
                         "a blocking finding on the library version, which does not merge")
@@ -2605,7 +2636,7 @@ def t_reviewref(st, it, log):
     if any(seg_item(st, it, s) for s in ("backlog", "reconcile", "adopt", "sync")):
         return "the version has its own work this round: a fresh review", {}
     d = vco(st, it["fork"], v)
-    probs = [p for p in mod("fb").target_done(d, v)
+    probs = [p for p in fresh_fb().target_done(d, v)
              if p.startswith(("REVIEW.md", "no REVIEW.md", "no verdict", "reviewer says"))]
     if probs:
         return f"a fresh review: {probs[0][:300]}", {}
@@ -2678,7 +2709,8 @@ def wait_runs(slug, sha, log, event=None, branch=None, since=None, appear=900, l
     say = say_to(log)
     t0 = time.monotonic()
     while True:
-        runs = gh(f"repos/{slug}/actions/runs?head_sha={sha}&per_page=50").get("workflow_runs", [])
+        q_ = f"head_sha={sha}" if sha else f"branch={branch}&event={event}"   # no sha: the run the round dispatched
+        runs = gh(f"repos/{slug}/actions/runs?{q_}&per_page=50").get("workflow_runs", [])
         runs = [r for r in runs if (not event or r.get("event") == event) and (not branch or r.get("head_branch") == branch)
                 and (not since or (r.get("created_at") or "") >= since)]
         if first:
@@ -2690,7 +2722,7 @@ def wait_runs(slug, sha, log, event=None, branch=None, since=None, appear=900, l
             say(f"runs: {text}")
             return not bad, text
         if len(runs) < want and el > appear:
-            return False, f"no Actions run appeared for {sha[:12]} in {appear // 60} min ({event or 'any event'})"
+            return False, f"no Actions run appeared for {(sha or branch)[:24]} in {appear // 60} min ({event or 'any event'})"
         if el > limit:
             return False, f"still running after {limit // 3600} h: " + ", ".join(str(r.get("html_url")) for r in runs)
         SLEEP(POLL)
@@ -2814,6 +2846,11 @@ def t_release(st, it, log):
         with State.tx(st.path) as s2:
             s2.item(it["id"])["result"]["dispatched_at"] = since
     ok, text = wait_runs(slug, mg["merge_sha"], log, event="workflow_dispatch", branch=base, since=since, first=True)
+    if not ok and not text.startswith(("no Actions run appeared", "still running")):
+        # it finished red: a retry or fixer dispatches a new run (one still running is never dispatched twice)
+        with State.tx(st.path) as s2:
+            for k in ("dispatched_at", "dispatching_at"):
+                s2.item(it["id"])["result"].pop(k, None)
     if release_waits_push(st, it) and push_run_needed(st, it):   # the merge's push run, awaited with the release run
         ok2, text2 = wait_runs(slug, mg["merge_sha"], log, event="push", branch=base)
         if not ok2:
@@ -2860,8 +2897,11 @@ def t_ledger(st, it, log):
     order = [F["base"]] + F["versions"]
     merged = {x["version"] for x in st.items if x["fork"] == it["fork"] and x["step"] == "merge" and x["status"] == "ok"
               and not x["result"].get("skipped")}
+    # a version nochange pushed straight to its branch (its merge skipped) has this round's code there too
+    merged |= {x["version"] for x in st.items if x["fork"] == it["fork"] and x["step"] == "nochange"
+               and x["status"] == "ok" and x["result"].get("pushed")}
     unmerged = [x["version"] for x in st.items if x["fork"] == it["fork"] and x["step"] == "merge"
-                and x["status"] != "ok"]
+                and x["status"] != "ok" and x["version"] not in merged]
     d = checkout(d, F["head"])
     ff_local(d, F["head"])
     sets, refused, found_new = 0, [], []
@@ -3155,7 +3195,11 @@ def cmd_run(a, out=print):
     return 0 if status == "ok" else 1
 
 
-FOLLOW_POLL = 20       # seconds between `drive --follow`'s looks at the jobs out
+FOLLOW_POLL = 20            # seconds between `drive --follow`'s looks at the jobs out
+SUMMARY_SETTLE = 60         # seconds a summary stays unchanged before drive --follow records it
+FOLLOW_HOURS = 1.75         # drive --follow starts no new step after this and ends once the running ones end (a step in
+                            # a long CI wait can still outlast a 2-hour background limit; reap re-queues it), its jobs
+                            # still out left running (measured, weekly round 2026-10-30)
 FOLLOW_HEARTBEAT = 1800   # `drive --follow` names the jobs still out this often (a worker that ended without its summary)
 
 
@@ -3179,6 +3223,8 @@ def auto_record(state, out=print):
                 if _SEEN_SUMMARY.get(str(sp)) != stamp:
                     _SEEN_SUMMARY[str(sp)] = stamp      # first look, or it changed: look again next time
                     continue
+                if time.time() - sp.stat().st_mtime < SUMMARY_SETTLE:
+                    continue        # a worker that appends its blocking:/fixed: lines a little later is not cut short
                 if parse_summary(text)["status"]:
                     due.append((jid, sp))
     for jid, sp in due:
@@ -3197,24 +3243,9 @@ def cmd_drive(a, out=print):
             return 2
         jobs, ran = [], []
         follow = bool(getattr(a, "follow", False))
-        deadline = time.monotonic() + a.max_hours * 3600
+        hours = a.max_hours if a.max_hours is not None else (FOLLOW_HOURS if follow else 6.0)
+        deadline = time.monotonic() + hours * 3600
         beat = time.monotonic()
-        if follow:
-            # jobs still out from before this drive (a restart killed their workers, or the last drive ended while they
-            # ran) and with no summary yet: their AGENT JOB line again, so the one watch on this output starts them
-            # (measured, weekly round 2026-10-30: after a restart only WAITING lines came, and two jobs never ran)
-            with State.tx(a.state, write=False) as st:
-                for it in st.items:
-                    if it["status"] == "running" and is_agent_work(it):
-                        jid = job_id(it, bool(it.get("fixing")))
-                        sm = st.rdir / "round/summaries" / f"{jid}.md"
-                        if not sm.is_file():
-                            jf = st.rdir / "round/jobs" / f"{jid}.md"
-                            out("round: AGENT JOB " + json.dumps({
-                                "id": jid, "redispatch": True, "prompt": f"Read {jf} and do exactly what it says.",
-                                "summary": str(sm), "record": f"python3 {TOOLS / 'round.py'} record {jid} --summary "
-                                                              f"{sm} --state {a.state}"}))
-            sys.stdout.flush()
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             running = {}
             while True:
@@ -3533,7 +3564,8 @@ def cmd_retry(a, out=print):
                 c.update(status="pending", result={}, note=f"re-queued: {a.id} was retried after the ledger ran")
         # its last outcome goes (a stale `blocking` would block the merge again); a release keeps its dispatch marks,
         # so a retried release waits for a run it already started instead of dispatching a second one
-        it["result"] = {k: v for k, v in it.get("result", {}).items() if k in ("dispatching_at", "dispatched_at")}
+        it["result"] = {k: v for k, v in it.get("result", {}).items() if k in ("dispatching_at", "dispatched_at",
+                                                                                         "dispatched_for", "pre_push")}
         it.pop("fixing", None)
         if a.allow:
             it["allow_once"] = True
@@ -4471,6 +4503,9 @@ def self_check():
         expect(no_agent_work(_StR({"skipped": True, "tag": None}), rp_)
                and no_agent_work(_StR({"tag": "lib-1.0-mc1.21.1"}), rp_) is None,
                "a head's re-pin when the library cut no release this round: skipped, not an agent job")
+        dg_ = {"fork": LIB, "version": "1.21.4", "step": f"depgate:{DEP}", "extra": {"dependent": DEP}}
+        dn_, dr_ = t_depgate(_StR({"skipped": True}), dg_, None)
+        expect(dr_.get("skipped"), f"a library version with no PR (nothing new): its dependent gate is skipped: {dn_}")
         rc, o, items = init(fz(), cfg, both, state)
         expect(rc == 0 and "owner/examplelib: branches 1.21.1..1.21.8" in o, f"init: {rc} {o}")
         ids = [it["id"] for it in items]
@@ -4673,7 +4708,8 @@ def self_check():
                  "dirs": ["o#1"], "status": "pending", "fixes": 0, "extra": {}, "result": {}, "phase": "overhead",
                  "lock": False}]}), encoding="utf-8")
             G_ = globals()
-            keep2 = {k: G_[k] for k in ("dispatch_agent", "SLEEP")}
+            keep2 = {k: G_[k] for k in ("dispatch_agent", "SLEEP", "SUMMARY_SETTLE")}
+            G_["SUMMARY_SETTLE"] = 0
             keep_after = TOOL_IMPL.get("after")
 
             def disp(st_, it_):
@@ -4698,13 +4734,15 @@ def self_check():
             expect(rc == 0 and 0 <= ij < ir and [x["status"] for x in fin["items"]] == ["ok", "ok"]
                    and "ROUND DONE" in o,
                    f"drive --follow: the job line at once, recorded from its summary, the next step run, done: {o}")
-            # a job still out from before this drive (its worker killed by a restart): its AGENT JOB line again first
+            # a job still out from before this drive (a time limit stopped the last drive; its worker still runs):
+            # never listed again -- a second worker in the same worktree -- only recorded once its summary comes
             st2 = json.loads(fsp.read_text(encoding="utf-8"))
             st2["items"][0].update(status="running", result={}, started=now())
             st2["items"][1].update(status="pending", result={})
             fsp.write_text(json.dumps(st2), encoding="utf-8")
             for f_ in (fd / "round/summaries").glob("o@1_job*"):
                 f_.unlink()
+            G_["SUMMARY_SETTLE"] = 0
             G_["SLEEP"] = lambda n: None if sj.exists() else sj.write_text("RESULT: ok\n", encoding="utf-8")
             TOOL_IMPL["after"] = lambda st_, it_, log_: ("after ran", {})
             try:
@@ -4715,9 +4753,8 @@ def self_check():
                     TOOL_IMPL.pop("after", None)
                 else:
                     TOOL_IMPL["after"] = keep_after
-            first = (o.splitlines() or [""])[0]
-            expect(first.startswith("round: AGENT JOB ") and '"redispatch": true' in first and "ROUND DONE" in o,
-                   f"drive --follow re-lists a job still out with no summary as its first line: {o[:600]}")
+            expect('"redispatch"' not in o and "o@1_job recorded ok" in o and "ROUND DONE" in o,
+                   f"drive --follow never re-lists a job still out (its worker may run): it records it: {o[:600]}")
 
         def rec(i, text, st_path=state):
             p_ = pathlib.Path(st_path).parent / "summaries" / f"{i}.md"
@@ -5027,6 +5064,18 @@ def self_check():
         note, r_ = step("examplelib@1.21.4:release")
         expect(any(p_.endswith("/workflows/port-ci.yml/dispatches") and d_["inputs"] == {"release": "true"}
                    for m, p_, d_ in api), f"a fresh release is dispatched: {api}")
+        # a release run that finished red: the markers go, so a retry or a fixer's re-run dispatches a new one
+        runs["workflow_dispatch"] = "failure"
+        try:
+            step("examplelib@1.21.4:release", dispatched_at="2026-10-21T16:00:00Z")
+            expect(False, "a red release run passed")
+        except StepError:
+            pass
+        with State.tx(rs, write=False) as st:
+            rr_ = st.item("examplelib@1.21.4:release")["result"]
+        expect(not rr_.get("dispatched_at") and not rr_.get("dispatching_at"),
+               f"a completed red release run: its dispatch marks cleared for the next attempt: {rr_}")
+        runs["workflow_dispatch"] = "success"
         # S3-3: commits an interrupted run left unpushed are pushed, and never dropped by the fast-forward
         git(lib, "checkout", "-q", "neoforge-1.21.1", check=True)
         c_ = commit(lib, ".port/KNOWN-ISSUES.json", "[]\n")
@@ -5481,12 +5530,21 @@ def self_check():
             expect(r_.get("skip") and r_["workflow"] and waited == ["push"],
                    f"a changed workflow with nothing shipped: pushed and its push run awaited green: {note}")
             G["wait_runs"] = lambda *a_, **k_: (False, "Port CI failure")
+            pre59 = git(nc_, "rev-parse", "HEAD").stdout.strip()
             commit(nc_, ".github/workflows/port-ci.yml", "kit 59\n", "Port CI at kit 59")
             try:
                 t_nochange(_St7(), nci, log_)
                 expect(False, "a red push run after a workflow change passed")
             except StepError as e:
                 expect("red" in str(e), f"a red push run stops the version: {e}")
+            # its re-run (a retry, a restart): origin already has the push, the push run still decides
+            waited.clear()
+            G["wait_runs"] = lambda *a_, **k_: (waited.append(k_.get("event")), (False, "Port CI failure"))[1]
+            try:
+                t_nochange(_St7(), dict(nci, result={"pre_push": pre59}), log_)
+                expect(False, "a re-run after the push passed a red push run")
+            except StepError as e:
+                expect("red" in str(e) and waited == ["push"], f"a re-run after the push still waits on it: {e} {waited}")
             G["wait_runs"] = kept["wait_runs"]
             for f_, text_, why_ in (("src/main/java/A.java", "class A { int a = 2; }\n", "a code change"),
                                     (".port/1.21.10/branch.properties", "port_jar.com.example\\:lib=u2\nport_taken=b\n",
@@ -5632,6 +5690,17 @@ def self_check():
                 except StepError as e:
                     expect("NOT green" in str(e) and not posted,
                            f"red: a blocking finding; a recorded dispatch is waited for, never sent twice: {e} {posted}")
+                with State.tx(_St9.path, write=False) as s_:
+                    dgr_ = s_.item(dgi["id"])["result"]
+                expect(not dgr_.get("dispatched_at"),
+                       f"a completed red dependent run clears its dispatch mark: the next attempt runs it again: {dgr_}")
+                # a fixer changed the library: its PR's CI ran again (a new candidate run) -- gated again, not the old verdict
+                dgi["result"] = {"dispatched_at": "2026-10-28T00:00:00Z", "dispatched_for": 98}
+                posted.clear()
+                G["wait_runs"] = lambda *a_, **k_: (True, "Port CI success")
+                r_ = depgate_ci(_St9(), dgi, _St9().fork("o/nc"), "1.21.10", log_)
+                expect(bool(r_) and len(posted) == 1,
+                       f"a new candidate run is dispatched again, never judged by the old run: {posted} {dgi['result']}")
                 commit(nc_, ".github/workflows/port-ci.yml", "on:\n  workflow_dispatch:\n", "an old template")
                 git(nc_, "push", "-q", "origin", "HEAD:neoforge-1.21.10")
                 expect(depgate_ci(_St9(), dgi, _St9().fork("o/nc"), "1.21.10", log_) is None,
@@ -5774,7 +5843,8 @@ def main(argv=None):
         if name == "status":
             s.add_argument("--json", action="store_true"); s.add_argument("--markdown", action="store_true")
         if name == "drive":
-            s.add_argument("--max-hours", type=float, default=6.0, help="start no new step after this long")
+            s.add_argument("--max-hours", type=float, default=None,
+                           help="start no new step after this long (default 6; with --follow 1.75)")
             s.add_argument("--follow", action="store_true", help="print each agent job the moment it is dispatched "
                            "(`round: AGENT JOB {...}`), record each one when its summary appears, and keep going until "
                            "nothing runs or waits -- the session only starts the workers")
