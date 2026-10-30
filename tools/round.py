@@ -3199,6 +3199,22 @@ def cmd_drive(a, out=print):
         follow = bool(getattr(a, "follow", False))
         deadline = time.monotonic() + a.max_hours * 3600
         beat = time.monotonic()
+        if follow:
+            # jobs still out from before this drive (a restart killed their workers, or the last drive ended while they
+            # ran) and with no summary yet: their AGENT JOB line again, so the one watch on this output starts them
+            # (measured, weekly round 2026-10-30: after a restart only WAITING lines came, and two jobs never ran)
+            with State.tx(a.state, write=False) as st:
+                for it in st.items:
+                    if it["status"] == "running" and is_agent_work(it):
+                        jid = job_id(it, bool(it.get("fixing")))
+                        sm = st.rdir / "round/summaries" / f"{jid}.md"
+                        if not sm.is_file():
+                            jf = st.rdir / "round/jobs" / f"{jid}.md"
+                            out("round: AGENT JOB " + json.dumps({
+                                "id": jid, "redispatch": True, "prompt": f"Read {jf} and do exactly what it says.",
+                                "summary": str(sm), "record": f"python3 {TOOLS / 'round.py'} record {jid} --summary "
+                                                              f"{sm} --state {a.state}"}))
+            sys.stdout.flush()
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             running = {}
             while True:
@@ -3485,7 +3501,9 @@ def cmd_resume(a, out=print):
         else:
             with State.tx(a.state, write=False) as st:
                 jf = st.rdir / "round/jobs" / f"{jid}.md"
-            out(json.dumps({"id": jid, "redispatch": True, "prompt": f"Read {jf} and do exactly what it says.",
+            # the same `round: AGENT JOB ` line drive --follow prints, so the session's one watch sees it (measured,
+            # weekly round 2026-10-30: after a container restart two killed jobs were never started again)
+            out("round: AGENT JOB " + json.dumps({"id": jid, "redispatch": True, "prompt": f"Read {jf} and do exactly what it says.",
                             "summary": str(s), "record": f"python3 {TOOLS / 'round.py'} record {jid} --summary {s} "
                                                          f"--state {a.state}"}))
     out(f"round: then `python3 {TOOLS / 'round.py'} drive --state {a.state}`")
@@ -4680,6 +4698,26 @@ def self_check():
             expect(rc == 0 and 0 <= ij < ir and [x["status"] for x in fin["items"]] == ["ok", "ok"]
                    and "ROUND DONE" in o,
                    f"drive --follow: the job line at once, recorded from its summary, the next step run, done: {o}")
+            # a job still out from before this drive (its worker killed by a restart): its AGENT JOB line again first
+            st2 = json.loads(fsp.read_text(encoding="utf-8"))
+            st2["items"][0].update(status="running", result={}, started=now())
+            st2["items"][1].update(status="pending", result={})
+            fsp.write_text(json.dumps(st2), encoding="utf-8")
+            for f_ in (fd / "round/summaries").glob("o@1_job*"):
+                f_.unlink()
+            G_["SLEEP"] = lambda n: None if sj.exists() else sj.write_text("RESULT: ok\n", encoding="utf-8")
+            TOOL_IMPL["after"] = lambda st_, it_, log_: ("after ran", {})
+            try:
+                rc, o = q(cmd_drive, argparse.Namespace(state=str(fsp), max_hours=1.0, follow=True))
+            finally:
+                G_.update(keep2)
+                if keep_after is None:
+                    TOOL_IMPL.pop("after", None)
+                else:
+                    TOOL_IMPL["after"] = keep_after
+            first = (o.splitlines() or [""])[0]
+            expect(first.startswith("round: AGENT JOB ") and '"redispatch": true' in first and "ROUND DONE" in o,
+                   f"drive --follow re-lists a job still out with no summary as its first line: {o[:600]}")
 
         def rec(i, text, st_path=state):
             p_ = pathlib.Path(st_path).parent / "summaries" / f"{i}.md"
@@ -4725,7 +4763,8 @@ def self_check():
             with State.tx(state, write=False) as st:
                 expect(rc == 2 and st.item(bad)["status"] == before, f"record refuses {bad} ({before}): {o}")
         rc, o = q(cmd_resume, argparse.Namespace(state=state))
-        expect("redispatch" in o and js and js[0]["id"] in o, f"resume re-lists a job that is out: {o}")
+        expect("redispatch" in o and js and js[0]["id"] in o and "round: AGENT JOB {" in o,
+               f"resume re-lists a job that is out, as an AGENT JOB line: {o}")
         n_gates = calls.count("examplelib@1.21.4:gates")
         rec(js[0]["id"], "RESULT: ok\ncommit: abcdef1 fix the shared render path\n")
         with State.tx(state, write=False) as st:
