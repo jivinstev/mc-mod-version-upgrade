@@ -1961,7 +1961,15 @@ def t_nochange(st, it, log):
     F, v, slug = st.fork(it["fork"]), it["version"], it["fork"]
     d, base = vco(st, slug, v), f"neoforge-{v}"
     git(d, "fetch", "-q", "origin", base, check=True)
-    changed = shipped_changes(d, f"origin/{base}", "HEAD", v)
+    # origin as it was before this step's first push: a re-run after that push (a restart, a retry after a red push
+    # run) still sees what the merge-up changed (review 2026-10-30: the diff against the fresh origin was empty)
+    pre = (it.get("result") or {}).get("pre_push")
+    if not pre:
+        pre = git(d, "rev-parse", f"origin/{base}").stdout.strip()
+        if getattr(st, "path", None):           # kept through a failure and a retry (finish updates, retry keeps it)
+            with State.tx(st.path) as s2:
+                s2.item(it["id"])["result"]["pre_push"] = pre
+    changed = shipped_changes(d, pre, "HEAD", v)
     if changed:
         return f"shipped code changed ({len(changed)} file(s): {', '.join(changed[:4])}): the full cycle", {}
     if "push-version-branches" not in st.data["allow"]:
@@ -1969,7 +1977,7 @@ def t_nochange(st, it, log):
     commit_records(d, v)
     if git(d, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         raise StepError(f"{d} has uncommitted changes after the merge-up: commit or discard them")
-    wf = any(f.startswith(".github/") for f in git(d, "diff", "--name-only", f"origin/{base}", "HEAD").stdout.splitlines())
+    wf = any(f.startswith(".github/") for f in git(d, "diff", "--name-only", pre, "HEAD").stdout.splitlines())
     sha = head(d)
     pushed = push_ahead(F["dir"], base)
     skip = [x["id"] for x in st.items if x["fork"] == slug and x["version"] == v and x["step"] in SKIP_ON_NOCHANGE]
@@ -1978,7 +1986,8 @@ def t_nochange(st, it, log):
         if not ok:
             raise StepError(f"nothing shipped changed, but the workflow did: the push run on {base} is red ({text})")
     return (f"nothing shipped changed: {base} pushed at {sha[:12]}" + (", its push run green (the workflow changed)"
-            if wf else "") + f"; {len(skip)} step(s) skipped"), {"skip": skip, "pushed": sha, "workflow": wf}
+            if wf else "") + f"; {len(skip)} step(s) skipped"), {"skip": skip, "pushed": sha, "workflow": wf,
+                                                                                 "pre_push": pre}
 
 
 def t_repin(st, it, log):
@@ -2493,6 +2502,12 @@ def depgate_ci(st, it, dep, v, log):
         gh(f"repos/{dep_slug}/actions/workflows/port-ci.yml/dispatches", "POST",
            {"ref": br, "inputs": {"dep_override": " ".join(entries)}})
     ok, text = wait_runs(dep_slug, dsha, log, event="workflow_dispatch", branch=br, since=since, first=True)
+    if not ok and not text.startswith("still running"):
+        # finished red (a fixer's or retry's next attempt re-runs it), or the POST never went out (a restart between
+        # the mark and the POST): the next attempt dispatches again -- never while a run is still going
+        with State.tx(st.path) as s2:
+            for k in ("dispatched_at", "dispatched_for"):
+                s2.item(it["id"])["result"].pop(k, None)
     if not ok:
         raise StepError(f"{dep_slug} {v}: its CI against {lib_slug}'s candidate jar (run {run_id}) is NOT green ({text}): "
                         "a blocking finding on the library version, which does not merge")
@@ -2829,16 +2844,16 @@ def t_release(st, it, log):
         with State.tx(st.path) as s2:
             s2.item(it["id"])["result"]["dispatched_at"] = since
     ok, text = wait_runs(slug, mg["merge_sha"], log, event="workflow_dispatch", branch=base, since=since, first=True)
+    if not ok and not text.startswith(("no Actions run appeared", "still running")):
+        # it finished red: a retry or fixer dispatches a new run (one still running is never dispatched twice)
+        with State.tx(st.path) as s2:
+            for k in ("dispatched_at", "dispatching_at"):
+                s2.item(it["id"])["result"].pop(k, None)
     if release_waits_push(st, it) and push_run_needed(st, it):   # the merge's push run, awaited with the release run
         ok2, text2 = wait_runs(slug, mg["merge_sha"], log, event="push", branch=base)
         if not ok2:
             raise StepError(f"the merge's push run on {base} is red ({text2}): it blocks the pre-release's promotion")
     if not ok:
-        if not text.startswith(("no Actions run appeared", "still running")):
-            # it finished red: a retry or fixer dispatches a new run (one still running is never dispatched twice)
-            with State.tx(st.path) as s2:
-                for k in ("dispatched_at", "dispatching_at"):
-                    s2.item(it["id"])["result"].pop(k, None)
         raise StepError(f"the release run on {base}: {text}")
     rx = re.compile(TAG_RE.format(v=re.escape(v)))
     # published_at is when the release was made; created_at is the tagged commit's time, which precedes the dispatch
@@ -2884,7 +2899,7 @@ def t_ledger(st, it, log):
     merged |= {x["version"] for x in st.items if x["fork"] == it["fork"] and x["step"] == "nochange"
                and x["status"] == "ok" and x["result"].get("pushed")}
     unmerged = [x["version"] for x in st.items if x["fork"] == it["fork"] and x["step"] == "merge"
-                and x["status"] != "ok"]
+                and x["status"] != "ok" and x["version"] not in merged]
     d = checkout(d, F["head"])
     ff_local(d, F["head"])
     sets, refused, found_new = 0, [], []
@@ -3178,10 +3193,11 @@ def cmd_run(a, out=print):
     return 0 if status == "ok" else 1
 
 
-FOLLOW_POLL = 20
+FOLLOW_POLL = 20            # seconds between `drive --follow`'s looks at the jobs out
 SUMMARY_SETTLE = 60         # seconds a summary stays unchanged before drive --follow records it
-FOLLOW_HOURS = 1.75         # drive --follow ends itself before a harness's 2-hour background limit kills it: a clean
-                            # deadline line, its jobs still out left running (measured, weekly round 2026-10-30)       # seconds between `drive --follow`'s looks at the jobs out
+FOLLOW_HOURS = 1.75         # drive --follow starts no new step after this and ends once the running ones end (a step in
+                            # a long CI wait can still outlast a 2-hour background limit; reap re-queues it), its jobs
+                            # still out left running (measured, weekly round 2026-10-30)
 FOLLOW_HEARTBEAT = 1800   # `drive --follow` names the jobs still out this often (a worker that ended without its summary)
 
 
@@ -3546,7 +3562,8 @@ def cmd_retry(a, out=print):
                 c.update(status="pending", result={}, note=f"re-queued: {a.id} was retried after the ledger ran")
         # its last outcome goes (a stale `blocking` would block the merge again); a release keeps its dispatch marks,
         # so a retried release waits for a run it already started instead of dispatching a second one
-        it["result"] = {k: v for k, v in it.get("result", {}).items() if k in ("dispatching_at", "dispatched_at")}
+        it["result"] = {k: v for k, v in it.get("result", {}).items() if k in ("dispatching_at", "dispatched_at",
+                                                                                         "dispatched_for", "pre_push")}
         it.pop("fixing", None)
         if a.allow:
             it["allow_once"] = True
@@ -5511,12 +5528,21 @@ def self_check():
             expect(r_.get("skip") and r_["workflow"] and waited == ["push"],
                    f"a changed workflow with nothing shipped: pushed and its push run awaited green: {note}")
             G["wait_runs"] = lambda *a_, **k_: (False, "Port CI failure")
+            pre59 = git(nc_, "rev-parse", "HEAD").stdout.strip()
             commit(nc_, ".github/workflows/port-ci.yml", "kit 59\n", "Port CI at kit 59")
             try:
                 t_nochange(_St7(), nci, log_)
                 expect(False, "a red push run after a workflow change passed")
             except StepError as e:
                 expect("red" in str(e), f"a red push run stops the version: {e}")
+            # its re-run (a retry, a restart): origin already has the push, the push run still decides
+            waited.clear()
+            G["wait_runs"] = lambda *a_, **k_: (waited.append(k_.get("event")), (False, "Port CI failure"))[1]
+            try:
+                t_nochange(_St7(), dict(nci, result={"pre_push": pre59}), log_)
+                expect(False, "a re-run after the push passed a red push run")
+            except StepError as e:
+                expect("red" in str(e) and waited == ["push"], f"a re-run after the push still waits on it: {e} {waited}")
             G["wait_runs"] = kept["wait_runs"]
             for f_, text_, why_ in (("src/main/java/A.java", "class A { int a = 2; }\n", "a code change"),
                                     (".port/1.21.10/branch.properties", "port_jar.com.example\\:lib=u2\nport_taken=b\n",
@@ -5662,6 +5688,10 @@ def self_check():
                 except StepError as e:
                     expect("NOT green" in str(e) and not posted,
                            f"red: a blocking finding; a recorded dispatch is waited for, never sent twice: {e} {posted}")
+                with State.tx(_St9.path, write=False) as s_:
+                    dgr_ = s_.item(dgi["id"])["result"]
+                expect(not dgr_.get("dispatched_at"),
+                       f"a completed red dependent run clears its dispatch mark: the next attempt runs it again: {dgr_}")
                 # a fixer changed the library: its PR's CI ran again (a new candidate run) -- gated again, not the old verdict
                 dgi["result"] = {"dispatched_at": "2026-10-28T00:00:00Z", "dispatched_for": 98}
                 posted.clear()
