@@ -1715,7 +1715,10 @@ def regen_workflow(st, it, d, log):
         raise StepError(f"the work branch's {PORT_CI_WF} cannot be read back to regenerate it: {e}")
     args = [x for i, x in enumerate(rec) if x not in ("--kit-version", "--kit-sha")
             and (i == 0 or rec[i - 1] not in ("--kit-version", "--kit-sha"))]
-    sh(st, it, [sys.executable, TOOLS / "port-ci.py", "--repo", d, *args], log)
+    # the head's own name, never the checked-out work branch: port-ci.py falls back to that on a checkout with no
+    # .port/<mc>/ (a version-branch head) -- measured, trial round 2026-10-29: the triggers, the manifest refresh and
+    # the release jobs named keep-current/<date>, caught by the head's review
+    sh(st, it, [sys.executable, TOOLS / "port-ci.py", "--repo", d, *args, "--branch", st.fork(it["fork"])["head"]], log)
     return commit_paths(d, [PORT_CI_WF], "Port CI workflow at the newest kit (keep-current round)")
 
 
@@ -3794,6 +3797,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         sh = rec_sh(effect=regen)
         note, r_ = step(sa2, "examplesvlib@1.21.1:setup")
         want("workflow regenerated" in note and cmds[-1][0][2:6] == ["--repo", str(sl), "--modid", "examplesvlib"]
+             and cmds[-1][0][-2:] == ["--branch", "neoforge-1.21.1"]
              and git(sl, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "keep-current/2026-10-21"
              and "# kit 30" in git(sl, "show", f"HEAD:{PORT_CI_WF}").stdout,
              f"setup: the work branch, the workflow regenerated with its own options and committed: {note} {cmds[-1:]}")
