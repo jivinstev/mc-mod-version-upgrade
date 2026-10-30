@@ -2489,7 +2489,6 @@ def depgate_ci(st, it, dep, v, log):
         if not jar:
             raise StepError(f"{lib_slug} run {run_id}'s jars: {why} (the asset {dep_slug} pins): which is the candidate?")
         entries.append(f"{lib_slug}#{run_id}/{art}/{jar.name}={ga}:{p['version']}@{digests[jar.name]}")
-    dsha = gh(f"repos/{dep_slug}/branches/{br}")["commit"]["sha"]
     since = it["result"].get("dispatched_at")
     if since and it["result"].get("dispatched_for") not in (None, run_id):
         # a new candidate (a fixer changed the library and its PR's CI ran again): gate that one, never the old run's
@@ -2501,7 +2500,9 @@ def depgate_ci(st, it, dep, v, log):
             s2.item(it["id"])["result"].update(dispatched_at=since, dispatched_for=run_id)
         gh(f"repos/{dep_slug}/actions/workflows/port-ci.yml/dispatches", "POST",
            {"ref": br, "inputs": {"dep_override": " ".join(entries)}})
-    ok, text = wait_runs(dep_slug, dsha, log, event="workflow_dispatch", branch=br, since=since, first=True)
+    # by branch, event and time, not by the sha read before the POST: the dependent's branch can move in between (its
+    # own nochange push or merge in a pipelined round), and its run would never be found (review, 2026-10-30)
+    ok, text = wait_runs(dep_slug, None, log, event="workflow_dispatch", branch=br, since=since, first=True)
     if not ok and not text.startswith("still running"):
         # finished red (a fixer's or retry's next attempt re-runs it), or the POST never went out (a restart between
         # the mark and the POST): the next attempt dispatches again -- never while a run is still going
@@ -2708,7 +2709,8 @@ def wait_runs(slug, sha, log, event=None, branch=None, since=None, appear=900, l
     say = say_to(log)
     t0 = time.monotonic()
     while True:
-        runs = gh(f"repos/{slug}/actions/runs?head_sha={sha}&per_page=50").get("workflow_runs", [])
+        q_ = f"head_sha={sha}" if sha else f"branch={branch}&event={event}"   # no sha: the run the round dispatched
+        runs = gh(f"repos/{slug}/actions/runs?{q_}&per_page=50").get("workflow_runs", [])
         runs = [r for r in runs if (not event or r.get("event") == event) and (not branch or r.get("head_branch") == branch)
                 and (not since or (r.get("created_at") or "") >= since)]
         if first:
@@ -2720,7 +2722,7 @@ def wait_runs(slug, sha, log, event=None, branch=None, since=None, appear=900, l
             say(f"runs: {text}")
             return not bad, text
         if len(runs) < want and el > appear:
-            return False, f"no Actions run appeared for {sha[:12]} in {appear // 60} min ({event or 'any event'})"
+            return False, f"no Actions run appeared for {(sha or branch)[:24]} in {appear // 60} min ({event or 'any event'})"
         if el > limit:
             return False, f"still running after {limit // 3600} h: " + ", ".join(str(r.get("html_url")) for r in runs)
         SLEEP(POLL)
