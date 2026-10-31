@@ -262,6 +262,19 @@ def hits_row(name, hits):
     return f"| {name} | REPORT | {len(hits)} to read: " + "; ".join(h.replace('|', '/') for h in hits)[:600] + " |"
 
 
+ZERO_USES_ROW = "Durability -- no 0-use tier fed to durability(), an unbreakable tool that breaks on its first hit (report)"
+
+
+def zero_uses_row(repo, work):
+    """The REPORT row of tools/audit-zero-uses.py (CATALOG 177) over the repo's sources, or None: every kind of fork
+    (a single-version one and a version branch alike), static, no build needed. Never a FAIL."""
+    r = subprocess.run([sys.executable, str(ROOT / "tools/audit-zero-uses.py"), str(repo)], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace")
+    (pathlib.Path(work) / "audit-zero-uses.log").write_text(r.stdout + r.stderr, encoding="utf-8")
+    print((r.stdout.strip().splitlines() or ["audit-zero-uses: no output"])[-1], flush=True)
+    return report_row(ZERO_USES_ROW, r.returncode, r.stdout, "audit-zero-uses:")
+
+
 MIXIN_ROW = "Mixin targets -- every injection point against the build's Minecraft sources (report)"
 LISTENER_ROW = "Event listeners -- none names an abstract or interface event (report)"
 
@@ -639,6 +652,17 @@ def self_check():
         (r / ".port/1.21.1/shipped-expect-mr.txt").write_text("A.log:x\n", encoding="utf-8")
         ok &= sg.expect_file(r, None, sg.variant_of("*_mr.jar")) == r / ".port/1.21.1/shipped-expect-mr.txt"
         ok &= sg.expect_file(r, None, None) is None and branch_version(r) is None   # still single-version
+    with tempfile.TemporaryDirectory() as d:      # a 0-use tier on a single-version fork: a REPORT row; a clean tree none
+        r = pathlib.Path(d) / "sv"
+        (r / "src/main/java/com/example/mod").mkdir(parents=True)
+        (r / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        tier = r / "src/main/java/com/example/mod/InfTier.java"
+        tier.write_text("class InfTier implements Tier {\n  public int getUses() { return 0; }\n}\n", encoding="utf-8")
+        row = zero_uses_row(r, d)
+        ok &= branch_version(r) is None and bool(row) and f"| {ZERO_USES_ROW} | REPORT | 1 to read: " in row \
+            and "src/main/java/com/example/mod/InfTier.java:2" in row and "FAIL" not in row
+        tier.write_text("class InfTier implements Tier {\n  public int getUses() { return 512; }\n}\n", encoding="utf-8")
+        ok &= zero_uses_row(r, d) is None
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -777,6 +801,9 @@ def main():
         print((r.stdout.strip().splitlines() or ["audit-descriptors: no output"])[-1], flush=True)
         row = report_row("Descriptors -- vanilla names in strings outside the mixins (report)", r.returncode, r.stdout,
                          "audit-descriptors:")
+        if row:
+            rows.append(row)
+        row = zero_uses_row(repo, work)              # report only: a 0-use tier (CATALOG 177)
         if row:
             rows.append(row)
         # report only, as on a version branch's fork-port audit stage (which gates on them): the mixins' targets and the

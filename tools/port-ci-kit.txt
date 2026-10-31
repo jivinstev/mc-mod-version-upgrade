@@ -10,6 +10,7 @@
 # Also by hand: ci-gates.py's report-only audits, audit-wiring.py and audit-descriptors.py (standard library; the
 # latter loads audit-mixin-targets.py beside it), audit-mixin-targets.py itself and audit-event-listeners.py with
 # qtc-init.gradle (Gradle's own compile classpath, which that audit asks the JDK's javap about).
+# Also by hand: audit-zero-uses.py, ci-gates.py's report-only 0-use tier row (CATALOG 177; standard library only).
 templates/multi-version/tools/gametest_adapter.py
 templates/multi-version/tools/prepare-sources.py
 templates/multi-version/versions/26.2.renames.hand.tsv
@@ -33,6 +34,7 @@ tools/audit-event-listeners.py
 tools/audit-mixin-targets.py
 tools/audit-unit-codecs.py
 tools/audit-wiring.py
+tools/audit-zero-uses.py
 tools/central-mirror.init.gradle
 tools/checkout-lock.py
 tools/ci-gates.py

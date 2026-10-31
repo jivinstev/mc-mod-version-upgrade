@@ -112,7 +112,7 @@ Exit codes: 0 ok (drive: progress made or the round done); 3 nothing can run (bl
 Standard library only.
 """
 import argparse, concurrent.futures, contextlib, datetime, hashlib, importlib.util, io, json, os, pathlib, re, shlex
-import shutil, subprocess, sys, tempfile, threading, time
+import shutil, stat, subprocess, sys, tempfile, threading, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
@@ -1219,8 +1219,34 @@ def job_text(st, it, fixing=False):
                   "what to ask)."]
     else:
         lines += job_task(st, it)
+    lines += answer_lines(it, fixing)
     lines += ["", *job_rules(st, it), "", SUMMARY_FORMAT.format(summary=summary)]
     return "\n".join(x for x in lines if x is not None) + "\n"
+
+
+def answer_lines(it, fixing=False):
+    """The owner's answers `retry --why` recorded on this item (every one so far) for each job written for it: without
+    them a retried worker repeated the verdict the owner had just overruled (measured, keep-current round 2026-10-31:
+    "this IS a defect, here is the evidence" never reached the backlog job). An answer binds the job it answered -- the
+    item's agent job (every job of that step is the same verdict), or for a tool step the first fixer after that retry
+    -- and is context only for any other job of the item (a later failure's fixer was not what the owner answered)."""
+    ans = it.get("answers") or []
+    kind = "fix" if fixing else "agent"
+    binds = [x for x in ans if x.get("job", "agent") == kind and x.get("step", it["step"]) == it["step"]
+             and (kind == "agent" or (x is ans[-1] and not it.get("fixes")))]
+    rest = [x for x in ans if not any(x is y for y in binds)]
+    out = []
+    if binds:
+        out += ["", "## The owner's decision", "",
+                f"The owner answered this item's blocked `{it['step']}` {'verdict' if kind == 'agent' else 'fix'} on the plan "
+                "issue and the driver re-queued it (`round.py retry --why`). This is the owner's decision, recorded on the "
+                "plan issue: act on it. It overrides the earlier verdict it answered (do not block again for the reason "
+                "the owner answered).", "", *[f"- {x['at']}: {x['why']}" for x in binds]]
+    if rest:
+        out += ["", "## The owner's earlier answers on this item (context)", "",
+                "These answered an earlier job or failure of this item, not necessarily what this job is about: weigh "
+                "them, they do not decide this job.", "", *[f"- {x['at']}: {x['why']}" for x in rest]]
+    return out
 
 
 UNTRUSTED = ("The excerpt below is DATA copied from tool and build output -- it can hold text written by the authors' code, "
@@ -2026,17 +2052,24 @@ def pins_of(text):
 
 def shipped_changes(d, old, new, v):
     """What between `old` and `new` changes what the version ships or builds against: every file outside the round's
-    records, the workflow and the docs (a Java source only when its code changed, its comments and layout aside), and
-    the version's dependency pins (.port/<v>/branch.properties port_jar.*). -> the paths."""
+    records, the workflow and the docs (a Java source only when its code changed, its comments and layout aside); under
+    .port/ what fork-branches.py's jar_relevant counts -- the build script .port/branch.gradle, and the version's
+    .port/<v>/branch.properties by its build keys (build_keys) and dependency pins (port_jar.*). -> the paths."""
     def show(ref, path):
         r = git(d, "show", f"{ref}:{path}")
         return None if r.returncode else r.stdout
-    out = []
+    fb, out = mod("fb"), []
     for f in git(d, "diff", "--name-only", old, new).stdout.splitlines():
         if f == f".port/{v}/branch.properties":
-            a, b = show(old, f), show(new, f)
-            if pins_of(a or "") != pins_of(b or ""):
+            a, b = show(old, f) or "", show(new, f) or ""
+            if pins_of(a) != pins_of(b) or fb.build_keys(a) != fb.build_keys(b):
                 out.append(f)
+            continue
+        # the jar's names and contents come from .port/branch.gradle too: the two tools agree on it (measured,
+        # keep-current round 2026-10-31: a jar rename there cascaded to ten versions and seven got no release, which
+        # the library record then reported as jar-relevant changes not done)
+        if f.startswith(".port/") and fb.jar_relevant(f, v):
+            out.append(f)
             continue
         if f.startswith(NOT_SHIPPED) or ("/" not in f and f.lower().endswith(".md")):
             continue
@@ -2273,12 +2306,21 @@ def t_gates(st, it, log):
     au = seg_item(st, it, "authors")
     up = au["extra"].get("upstream_commit") if au else None
     gated, at = head(d), time.time()
+    def pins():
+        # the jars the head's Port CI installs before it builds (its workflow's --dep-jar steps) into ~/.m2,
+        # sha256-checked (a version branch's pins go in through fork-port.py); a workflow pinning nothing: untouched
+        for ok_, m_ in mod("ld").install_workflow_pins(d):
+            if not ok_:
+                raise StepError(f"a pinned jar could not be put into mavenLocal before the gates: {m_}")
+            say_to(log)("round: pins:" + (" WARNING" if "REPLACED" in m_ else ""), m_)
     if ci_record(d):                # the PR's CI is the gate of record (both kinds): build and Gate A/B here
+        pins()                      # no lock here, as for the build itself: every dependent gate has its own mavenLocal
         for cmd in sv_gate_cmds(d, up, gatec=""):
             sh(st, it, cmd, log)
         return "ci-gates build and Gate A/B green (full and minimal); Gate C is the PR's CI (the gate of record)", {
             "gated_head": gated, "gated_at": at, "head_after": head(d), "ci_record": True}
     with full_gate_lock(it["id"], say_to(log)) as lk:
+        pins()
         for cmd in sv_gate_cmds(d, up):
             sh(st, it, cmd, log, hold=lk)
     c = None
@@ -2424,11 +2466,15 @@ def t_depgate(st, it, log):
         git(dep["dir"], "worktree", "remove", "--force", str(work))
         shutil.rmtree(work, ignore_errors=True)
     git(dep["dir"], "worktree", "add", "-q", "--detach", str(work), f"origin/neoforge-{v}", check=True)
+    m2 = private_dir(st, f"depgate-{dep['name']}-{v}-m2")
     try:
         wt_head = head(work)
         with full_gate_lock(it["id"], say_to(log)) as lk:
+            # a PRIVATE mavenLocal, as depgate_head's: layer-deps' --port-checkout puts the candidate jar there (at the
+            # release pin's coordinate) and every Gradle call of the run reads it there, so a pinned-jar install by any
+            # other build on this machine (fork-port's, round's) cannot overwrite the candidate mid-run
             r = sh(st, it, gate_run_cmd(work, v, "setup", st.data["frozen"], "--port-checkout", f"{it['fork']}={lco}",
-                                        "--allow-undone-library"), log, ok=range(0, 256), hold=lk)
+                                        "--allow-undone-library"), log, ok=range(0, 256), hold=lk, env=private_env(m2))
         for f in ("GATES.md", "GATES-RED.md", "RESIDUE.md", "DEPS.md"):
             q_ = work / ".port" / v / f
             if q_.is_file():
@@ -2442,31 +2488,83 @@ def t_depgate(st, it, log):
     finally:
         git(dep["dir"], "worktree", "remove", "--force", str(work))
         shutil.rmtree(work, ignore_errors=True)
+        remove_tree(m2, say_to(log))
         git(dep["dir"], "worktree", "prune")
     return f"{it['extra']['dependent']} {v} Gate C green against the candidate jar", {"evidence": str(evid),
                                                                                        "library_head": head(lco)}
 
 
+def private_dir(st, name):
+    """A new directory path under round/work for one run (`name`, the pid and a timestamp): a copy a run could not
+    remove (a jar held open on Windows) never meets the next run's copy, which always starts from nothing."""
+    base = st.rdir / "round/work" / f"{name}-{os.getpid()}-{int(time.time() * 1000)}"
+    d, n = base, 1
+    while d.exists():
+        d, n = base.with_name(f"{base.name}-{n}"), n + 1
+    return d
+
+
+def remove_tree(d, say=None):
+    """Remove a run's directory: a read-only file (git objects, a jar on Windows) has its write bit set and is tried
+    again; what still cannot go is said (a leaked copy is named, never silent). -> True when it is gone."""
+    def again(fn, path, _exc):
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            fn(path)
+        except OSError:
+            pass
+    d = pathlib.Path(d)
+    if d.exists():
+        shutil.rmtree(d, onerror=again)
+    if d.exists() and say:
+        say(f"round: WARNING could not remove {d.as_posix()} (a file still open?): remove it by hand")
+    return not d.exists()
+
+
+def link_or_copy(src, dst):
+    """copytree's copy_function for a private mavenLocal: a hard link where the file system allows one (no bytes
+    copied), else a copy. Safe because every write into the private copy replaces the file (os.replace), so nothing
+    ever writes through a link into ~/.m2."""
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+    return dst
+
+
 def private_m2(dest, cands):
-    """A private mavenLocal for one dependent gate run: a copy of ~/.m2/repository (what the dependent's build resolves
-    from mavenLocal besides the library: other sibling ports' pinned jars, --dep builds), with each candidate jar put
-    at the coordinates the dependent pins ({group:artifact: (version, bytes)}, a minimal POM beside it). ~/.m2 itself is
-    only read: no kill, restart or unlocked build elsewhere ever sees the candidate there. -> dest."""
+    """A private mavenLocal for one dependent gate run: ~/.m2/repository linked file by file (link_or_copy: what the
+    dependent's build resolves from mavenLocal besides the library: other sibling ports' pinned jars, --dep builds),
+    with each candidate jar put at the coordinates the dependent pins ({group:artifact: (version, bytes)}, a minimal POM
+    beside it), written by replacing the file (layer-deps.py write_atomic) so a link to ~/.m2 is never written through.
+    `dest` must not exist yet (private_dir). ~/.m2 itself is only read: no kill, restart or unlocked build elsewhere ever
+    sees the candidate there. -> dest."""
     dest = pathlib.Path(dest)
-    shutil.rmtree(dest, ignore_errors=True)
     home = pathlib.Path.home() / ".m2/repository"
     if home.is_dir():
-        shutil.copytree(home, dest, symlinks=True)
+        shutil.copytree(home, dest, symlinks=True, copy_function=link_or_copy)
     dest.mkdir(parents=True, exist_ok=True)
+    put = mod("ld").write_atomic
     for ga, (ver, data) in cands.items():
         g, a = ga.split(":")
         d_ = dest / g.replace(".", "/") / a / ver
         d_.mkdir(parents=True, exist_ok=True)
-        (d_ / f"{a}-{ver}.jar").write_bytes(data)
-        (d_ / f"{a}-{ver}.pom").write_text(f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
-                                          f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar"
-                                          "</packaging></project>\n", encoding="utf-8")
+        put(d_ / f"{a}-{ver}.jar", data)
+        put(d_ / f"{a}-{ver}.pom", (f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
+                                   f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar"
+                                   "</packaging></project>\n").encode("utf-8"))
     return dest
+
+
+def private_env(m2, cands=None):
+    """The environment of a dependent gate run against a private mavenLocal: private_m2(m2, cands), MMVU_M2_REPO
+    pointing layer-deps' installs at it, and -Dmaven.repo.local=<it> in PORT_GRADLE_ARGS, which every Gradle call of
+    a gate run carries (tools/port_gates.py, tools/fork-port.py). ~/.m2 is only read."""
+    private_m2(m2, cands or {})
+    env = dict(os.environ, MMVU_M2_REPO=str(m2))
+    env["PORT_GRADLE_ARGS"] = "\n".join(x for x in (env.get("PORT_GRADLE_ARGS", ""), f"-Dmaven.repo.local={m2}")
+                                        if x.strip())
+    return env
 
 
 CI_RECORD_INPUTS = ("from_run:", "dep_override:")
@@ -2634,7 +2732,7 @@ def depgate_head(st, it, lib, dep, v, lco, jars, log):
     br = dep["head"]
     git(dep["dir"], "fetch", "-q", "origin", br, check=True)
     work = st.rdir / "round/work" / f"depgate-{dep['name']}-{v}"
-    m2 = st.rdir / "round/work" / f"depgate-{dep['name']}-{v}-m2"
+    m2 = private_dir(st, f"depgate-{dep['name']}-{v}-m2")
     evid = st.rdir / "round/logs" / job_id(it)
     evid.mkdir(parents=True, exist_ok=True)
     if work.exists():
@@ -2663,10 +2761,7 @@ def depgate_head(st, it, lib, dep, v, lco, jars, log):
             raise StepError(f"{it['extra']['dependent']}'s {PORT_CI_WF} cannot be read back: {e}")
         rcs = []
         with full_gate_lock(it["id"], say_to(log)) as lk:
-            private_m2(m2, cands)
-            env = dict(os.environ)
-            env["PORT_GRADLE_ARGS"] = "\n".join(x for x in (env.get("PORT_GRADLE_ARGS", ""),
-                                                              f"-Dmaven.repo.local={m2}") if x.strip())
+            env = private_env(m2, cands)
             for cmd in gate_cmds:
                 rcs.append(sh(st, it, cmd, log, cwd=work, ok=range(0, 256), hold=lk, env=env).returncode)
         for f_ in (work / "build").glob("round-gates-*.md"):
@@ -2679,7 +2774,7 @@ def depgate_head(st, it, lib, dep, v, lco, jars, log):
     finally:
         git(dep["dir"], "worktree", "remove", "--force", str(work))
         shutil.rmtree(work, ignore_errors=True)
-        shutil.rmtree(m2, ignore_errors=True)
+        remove_tree(m2, say_to(log))
         git(dep["dir"], "worktree", "prune")
     return (f"{it['extra']['dependent']} {v} gates green against the candidate jar",
             {"evidence": str(evid), "library_head": head(lco)})
@@ -3728,7 +3823,12 @@ def cmd_retry(a, out=print):
         if it["status"] not in ("blocked", "failed"):
             out(f"round: {it['id']} is {it['status']}: nothing to retry")
             return 2
-        it.update(status="pending", fixes=0, attempts=0, note=f"retried at {now()}: {a.why or 'by the session'}")
+        # the answer is kept on the item, never in the note: a fixer job prints the note as untrusted data
+        it.update(status="pending", fixes=0, attempts=0,
+                  note=f"retried at {now()}: " + ("see the owner's decision in the job" if a.why else "by the session"))
+        if a.why:                           # every answer so far, with the job it answered: each job carries them
+            it.setdefault("answers", []).append({"at": now(), "why": a.why, "step": it["step"],
+                                                 "job": "agent" if it["kind"] == "agent" else "fix"})
         st.data.pop("close_anyway", None)
         affected, grew = {it["fork"]}, True          # the fork and every fork that depends on it, transitively
         while grew:
@@ -5205,6 +5305,44 @@ def self_check():
         with State.tx(state, write=False) as st:
             expect(rc == 0 and st.item("examplemod@1.21.4:review")["status"] == "pending"
                    and not st.item("examplemod@1.21.4:review")["result"].get("blocking"), "retry clears the old outcome")
+        # the owner's answers reach every job written for the item, a second retry keeping the first's (measured,
+        # keep-current round 2026-10-31: the answer stayed in the note and the re-dispatched worker blocked again)
+        with State.tx(state) as st:
+            it = st.item("examplemod@1.21.4:review")
+            saved_ans = json.loads(json.dumps(it))
+            it.update(status="blocked", answers=[])
+        q(cmd_retry, argparse.Namespace(id=it["id"], why="ANSWER-ONE: this is a defect", allow=False, state=state))
+        with State.tx(state) as st:
+            jf1 = pathlib.Path(dispatch_agent(st, st.item(it["id"]))["prompt"].split("Read ", 1)[1].split(" and do", 1)[0])
+            st.item(it["id"])["status"] = "blocked"
+        j1 = jf1.read_text(encoding="utf-8")
+        q(cmd_retry, argparse.Namespace(id=it["id"], why="ANSWER-TWO: here is the evidence", allow=False, state=state))
+        with State.tx(state) as st:
+            it_ = st.item(it["id"])
+            j2 = job_text(st, it_)
+            jfix = job_text(st, it_, fixing=True)          # an agent item's answers bind its agent job only
+            note_ = it_["note"]
+            # a tool step's answer binds the first fixer after that retry, and is context for a later failure's fixer
+            it_.update(kind="tool", status="blocked")
+        q(cmd_retry, argparse.Namespace(id=it["id"], why="ANSWER-FIX: rerun it", allow=False, state=state))
+        with State.tx(state) as st:
+            it_ = st.item(it["id"])
+            jt1 = job_text(st, it_, fixing=True)
+            it_["fixes"] = 1
+            jt2 = job_text(st, it_, fixing=True)
+            st.items[st.items.index(it_)] = saved_ans
+        sec, ctx = "## The owner's decision", "## The owner's earlier answers on this item (context)"
+        expect(sec in j1 and "ANSWER-ONE" in j1.split(sec, 1)[1] and "overrides the earlier verdict it answered" in j1
+               and "`review` verdict" in j1, f"a retried item's job carries the owner's answer under its own section: {j1[-600:]}")
+        expect(sec in j2 and "ANSWER-ONE" in j2.split(sec, 1)[1] and "ANSWER-TWO" in j2.split(sec, 1)[1] and ctx not in j2,
+               f"a second retry keeps the first answer: {j2[-600:]}")
+        expect("ANSWER" not in note_ and "see the owner's decision" in note_, f"the answer stays out of the note: {note_}")
+        expect(sec not in jfix and ctx in jfix and "ANSWER-TWO" in jfix.split(ctx, 1)[1],
+               f"an agent verdict's answer is context, not an override, in a fixer job: {jfix[-600:]}")
+        expect(sec in jt1 and "ANSWER-FIX" in jt1.split(sec, 1)[1].split(ctx, 1)[0] and "ANSWER-ONE" in jt1.split(ctx, 1)[1],
+               f"a tool step's answer binds its first fixer after the retry, the others are context: {jt1[-700:]}")
+        expect(sec not in jt2 and "ANSWER-FIX" in jt2.split(ctx, 1)[1],
+               f"a later fixer of the same step gets the answer as context only: {jt2[-600:]}")
         with State.tx(state) as st:
             it = st.item("examplemod@1.21.4:review")
             claim(st, it)
@@ -5317,11 +5455,22 @@ def self_check():
             expect("older than its gate run" in str(e), f"a stale jar is refused: {e}")
         setres("examplelib@1.21.4:gates", gated_head=g0, gated_at=time.time() - 5)
         seen = {}
+        # a temporary home: the dependent gate copies ~/.m2 into its private mavenLocal, and must never write it
+        dg_home = tmp / "dg-home"
+        (dg_home / ".m2/repository/com/example/examplelib/1.0").mkdir(parents=True)
+        (dg_home / ".m2/repository/com/example/examplelib/1.0/examplelib-1.0.jar").write_bytes(b"released")
+        dg_env_keep = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
+        os.environ["HOME"] = os.environ["USERPROFILE"] = str(dg_home)
 
-        def fake_sh(st_, it_, cmd, log, cwd=None, ok=(0,), hold=None):
+        def fake_sh(st_, it_, cmd, log, cwd=None, ok=(0,), hold=None, env=None):
             """fork-port.py on the dependent's worktree: writes the GATES.md the case asks for, exits 18."""
             w = pathlib.Path(cmd[cmd.index("--repo") + 1])
             seen["held"] = hold is not None
+            pm_ = pathlib.Path((env or {}).get("MMVU_M2_REPO") or "/nonexistent-m2")
+            seen["m2"] = (str(pm_), (pm_ / "com/example/examplelib/1.0/examplelib-1.0.jar").is_file(),
+                          (env or {}).get("PORT_GRADLE_ARGS", "").splitlines())
+            if pm_.is_dir():               # layer-deps' --port-checkout installs the candidate into the private copy
+                mod("ld").write_atomic(pm_ / "com/example/examplelib/1.0/examplelib-1.0.jar", b"candidate")
             (w / ".port/1.21.4").mkdir(parents=True, exist_ok=True)
             (w / ".port/1.21.4/GATES.md").write_text(seen["gates"].format(head=head(w)), encoding="utf-8")
             return subprocess.CompletedProcess(cmd, 18, "", "")
@@ -5344,13 +5493,81 @@ def self_check():
         note, r_ = step(dg)
         expect("green against the candidate jar" in note and seen.get("held"),
                f"the dependent gate: green with its GATES.md, the gate lock held by the run: {note}")
+        pm_, copied_, gargs_ = seen.get("m2", ("", False, []))
+        expect("depgate-" in pm_ and "-1.21.4-m2-" in pm_ and copied_ and f"-Dmaven.repo.local={pm_}" in gargs_
+               and not pathlib.Path(pm_).exists()
+               and (dg_home / ".m2/repository/com/example/examplelib/1.0/examplelib-1.0.jar").read_bytes() == b"released",
+               f"the version-branch dependent gate runs on a private mavenLocal (a copy of ~/.m2; MMVU_M2_REPO and "
+               f"-Dmaven.repo.local point at it), ~/.m2 is never written and the copy is removed: {seen.get('m2')}")
         commit(lco, "Main.java", "class Main { int y; }\n")
         try:
             step(dg)
             expect(False, "the library checkout moved with code and the dependent gate still ran")
         except Reset as e:
             expect(e.ids == ["examplelib@1.21.4:gates"], f"a moved library checkout sends its gates back: {e}")
+        # the private copy is hard links where the file system allows them; the candidate (and any install, through
+        # layer-deps) replaces its file, so ~/.m2's bytes never change; each run's copy is a new directory, a
+        # leftover of an earlier run (not removable on Windows while a jar is open) is no crash
+        m2h_ = dg_home / ".m2/repository"
+        (m2h_ / "com/example/other/2.0").mkdir(parents=True)
+        (m2h_ / "com/example/other/2.0/other-2.0.jar").write_bytes(b"another sibling")
+        class _StP:
+            rdir = tmp / "priv-round"
+        leftover_ = private_dir(_StP(), "depgate-x-1.21.4-m2")
+        leftover_.mkdir(parents=True)
+        (leftover_ / "held.jar").write_bytes(b"held open")
+        pd_ = private_dir(_StP(), "depgate-x-1.21.4-m2")
+        private_m2(pd_, {"com.example:examplelib": ("1.0", b"candidate")})
+        keep_m2 = os.environ.get("MMVU_M2_REPO")
+        os.environ["MMVU_M2_REPO"] = str(pd_)
+        try:
+            mod("ld").install_m2("com.example:other", "2.0", b"installed over the link")
+        finally:
+            os.environ.pop("MMVU_M2_REPO", None) if keep_m2 is None else os.environ.update(MMVU_M2_REPO=keep_m2)
+        try:
+            probe_ = tmp / "link-probe"
+            probe_.write_bytes(b"x")
+            os.link(probe_, tmp / "link-probe-2")
+            links_ = True
+        except OSError:
+            links_ = False
+        copied_ = pd_ / "com/example/examplelib/1.0/examplelib-1.0.jar"
+        expect(pd_ != leftover_ and leftover_.is_dir()
+               and (m2h_ / "com/example/examplelib/1.0/examplelib-1.0.jar").read_bytes() == b"released"
+               and (m2h_ / "com/example/other/2.0/other-2.0.jar").read_bytes() == b"another sibling"
+               and copied_.read_bytes() == b"candidate"
+               and (pd_ / "com/example/other/2.0/other-2.0.jar").read_bytes() == b"installed over the link",
+               "a private mavenLocal: a new directory beside a leftover, the candidate and an install replace their "
+               "files there, ~/.m2's bytes unchanged")
+        (m2h_ / "com/example/third/3.0").mkdir(parents=True)
+        (m2h_ / "com/example/third/3.0/third-3.0.jar").write_bytes(b"untouched")
+        pd2_ = private_dir(_StP(), "depgate-x-1.21.4-m2")
+        private_m2(pd2_, {})
+        if links_:
+            expect(os.path.samefile(m2h_ / "com/example/third/3.0/third-3.0.jar", pd2_ / "com/example/third/3.0/third-3.0.jar"),
+                   "an unchanged file of the private copy is a hard link, not a copy")
+        ro_ = pd2_ / "com/example/third/3.0/third-3.0.jar"
+        os.chmod(ro_, stat.S_IREAD)                            # read-only, as git objects and held jars on Windows
+        said_ = []
+        expect(remove_tree(pd2_, said_.append) and not pd2_.exists() and not said_
+               and (m2h_ / "com/example/third/3.0/third-3.0.jar").read_bytes() == b"untouched",
+               f"remove_tree removes a copy with a read-only file, ~/.m2 kept: {said_}")
+        rm_keep = shutil.rmtree
+        shutil.rmtree = lambda *a_, **k_: None                 # a removal that cannot finish (a jar held open)
+        try:
+            gone_ = remove_tree(pd_, said_.append)
+        finally:
+            shutil.rmtree = rm_keep
+        expect(not gone_ and said_ and "could not remove" in said_[0] and pd_.as_posix() in said_[0],
+               f"a copy that cannot be removed is said, not ignored: {said_}")
+        remove_tree(pd_)
+        remove_tree(leftover_)
         sh = real_sh
+        for k_, v_ in dg_env_keep.items():
+            if v_ is None:
+                os.environ.pop(k_, None)
+            else:
+                os.environ[k_] = v_
         # S2-1: nothing new against origin: no PR (and no CI, merge or release)
         dco = pathlib.Path(vco(State(rs, json.loads(pathlib.Path(rs).read_text(encoding="utf-8"))), DEP, "1.21.4"))
         setres("examplemod@1.21.4:gates", gated_head=head(dco), gated_at=time.time())
@@ -5821,6 +6038,22 @@ def self_check():
             commit(nc_, ".port/1.21.10/REVIEW.md", "r\n", "records")
             expect(shipped_changes(str(nc_), "origin/neoforge-1.21.10", "HEAD", "1.21.10") == [],
                    "a comment, a port_taken move and records change nothing shipped")
+            top_ = base_ = head(nc_)
+            commit(nc_, ".port/KNOWN-ISSUES.json", "{}\n", "ledger")
+            commit(nc_, ".port/1.21.10/COST.md", "c\n", "cost")
+            commit(nc_, ".port/1.21.10/shipped-jar.txt", "examplemod-1.0-mc1.21.10.jar\n", "the gate's expectation")
+            commit(nc_, ".port/1.21.10/branch.properties", "port_jar.com.example\\:lib=u1\nport_taken=c\n", "taken")
+            expect(shipped_changes(str(nc_), base_, "HEAD", "1.21.10") == [],
+                   "the ledger, COST.md, shipped-jar.txt and a bookkeeping key of branch.properties ship nothing")
+            commit(nc_, ".port/1.21.10/branch.properties", "port_jar.com.example\\:lib=u1\nport_taken=c\njava_version=21\n",
+                   "a build key")
+            expect(shipped_changes(str(nc_), base_, "HEAD", "1.21.10") == [".port/1.21.10/branch.properties"],
+                   "a build key of branch.properties is a shipped change")
+            base_ = head(nc_)
+            commit(nc_, ".port/branch.gradle", "jar { archiveFileName = 'x-mc1.21.10.jar' }\n", "jar names")
+            expect(shipped_changes(str(nc_), base_, "HEAD", "1.21.10") == [".port/branch.gradle"],
+                   "the build script .port/branch.gradle (the jar's name) is a shipped change")
+            git(nc_, "reset", "-q", "--hard", top_)       # the fixture as the rest of the test expects it
 
             class _St7:
                 data = {"allow": ["push-version-branches"]}
@@ -6084,16 +6317,40 @@ def self_check():
             G["full_gate_lock"] = lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("the gate lock was taken"))
             seen_cmds.clear()
             sh = rec_out("")
+            ld_, pinned_ = mod("ld"), []
+            pin_keep = ld_.install_pin
             try:
+                # the single-version head with no pins: nothing is installed
+                ld_.install_pin = lambda *a_: (pinned_.append(a_), (True, "fake install"))[1]
+                t_gates(_St11(), {"id": "examplemod@1.21.1:gates", "fork": "o/examplemod", "version": "1.21.1",
+                                  "step": "gates"}, log_)
+                expect(pinned_ == [], f"a single-version head that pins nothing installs nothing: {pinned_}")
+                seen_cmds.clear()
+                wf_keep = (sv_ / PORT_CI_WF).read_text(encoding="utf-8")
+                (sv_ / PORT_CI_WF).write_text(wf_keep + mod("pc").dep_jars(
+                    ["owner/examplelib@examplelib-1.0-mc1.21.1/examplelib-1.0.jar=com.example:examplelib:1.0"],
+                    sha_of=lambda u_: "a" * 64) + "\n", encoding="utf-8")
                 note, r_ = t_gates(_St11(), {"id": "examplemod@1.21.1:gates", "fork": "o/examplemod", "version": "1.21.1",
                                              "step": "gates"}, log_)
                 ran_ = [c for c in seen_cmds]
+                expect(pinned_ == [("com.example:examplelib", "1.0", "https://github.com/owner/examplelib/releases/"
+                                    "download/examplelib-1.0-mc1.21.1/examplelib-1.0.jar " + "a" * 64)],
+                       f"a single-version head's Port CI --dep-jar jar goes into mavenLocal before its gates: {pinned_}")
+                ld_.install_pin = lambda *a_: (False, "x.jar has sha256 b, the pin says a")
+                try:
+                    t_gates(_St11(), {"id": "examplemod@1.21.1:gates", "fork": "o/examplemod", "version": "1.21.1",
+                                      "step": "gates"}, log_)
+                    expect(False, "a pin that cannot be installed must stop the gates step")
+                except StepError as e_:
+                    expect("mavenLocal" in str(e_), f"a pin that cannot be installed stops the gates step: {e_}")
+                (sv_ / PORT_CI_WF).write_text(wf_keep, encoding="utf-8")
                 expect(r_.get("ci_record") and len(ran_) == 2 and all("ci-gates.py" in " ".join(c) for c in ran_)
                        and all(c[c.index("--gatec") + 1] == "" for c in ran_)
                        and not (sv_ / ".port/1.21.1/GATES.md").exists(),
                        f"a single-version ci_record head: build and Gate A/B in both environments, no GATES.md: {note} {ran_}")
             finally:
                 G["checkout"], G["full_gate_lock"] = ck_keep, lock_keep
+                ld_.install_pin = pin_keep
                 sh = real_sh
             # the driver applies the skips: only this version's pending steps, never another version's
             sd_ = tmp / "nc-state"

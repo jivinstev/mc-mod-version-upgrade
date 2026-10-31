@@ -15,4 +15,5 @@ port="${1:-.}"
 script="$(awk '/^```bash/{f=1;next} /^```/{if(f)exit} f' "$doc")"
 [ -n "$script" ] || { echo "run-catalog-scans: no \`\`\`bash block found in $doc" >&2; exit 2; }
 bash -n <(printf '%s\n' "$script") || { echo "run-catalog-scans: the sweep in $doc is not valid shell" >&2; exit 2; }
-cd "$port" && bash <(printf '%s\n' "$script")
+# MMVU_TOOLS: where the sweep finds the tools it runs (tools/audit-zero-uses.py), whatever the port directory is
+cd "$port" && MMVU_TOOLS="$here/tools" bash <(printf '%s\n' "$script")

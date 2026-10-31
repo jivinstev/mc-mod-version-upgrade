@@ -298,13 +298,30 @@ def _get(url, headers=None):
         return r.read()
 
 
+def m2_root():
+    """The local Maven repository jars are installed into: $MMVU_M2_REPO when set (round.py's version-branch dependent
+    gate gives each run a private one, Gradle pointed at it with -Dmaven.repo.local, so no install elsewhere touches
+    its candidate jar), else ~/.m2/repository."""
+    d = os.environ.get("MMVU_M2_REPO")
+    return pathlib.Path(d) if d else pathlib.Path.home() / ".m2/repository"
+
+
+def write_atomic(path, data):
+    """Write `data` (bytes) to `path` through a temporary file beside it and os.replace: a build reading the jar
+    concurrently sees the old file or the new one, never half of one."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
 def install_pin(ga, ver, value):
     """Install a port_jar pin ("<url> <sha256>") into ~/.m2 as ga:ver, the download checked against the sha256; a jar
     already there with that sha256 is not fetched again. -> (ok, message)."""
     url, sha = value.split()
     g, a = ga.split(":")
-    have = pathlib.Path.home() / ".m2/repository" / g.replace(".", "/") / a / ver / f"{a}-{ver}.jar"
-    if have.is_file() and hashlib.sha256(have.read_bytes()).hexdigest() == sha:
+    have = m2_root() / g.replace(".", "/") / a / ver / f"{a}-{ver}.jar"
+    old = hashlib.sha256(have.read_bytes()).hexdigest() if have.is_file() else None
+    if old == sha:
         return True, f"{ga}:{ver} already in mavenLocal (sha256 ok)"
     try:
         data = _get(url)
@@ -314,18 +331,74 @@ def install_pin(ga, ver, value):
     if got != sha:
         return False, f"{url} has sha256 {got}, the pin says {sha}"
     install_m2(ga, ver, data)
-    return True, f"{ga}:{ver} <- {url} (sha256 ok)"
+    # a different jar at the coordinate is said loudly: a stale download, or a jar something else put there on purpose
+    return True, f"{ga}:{ver} <- {url} (sha256 ok)" + (f"; REPLACED {have.as_posix()} (sha256 {old[:12]} -> {sha[:12]})"
+                                                       if old else "")
 
 
 def install_m2(ga, ver, data):
-    """Put a jar into ~/.m2 as group:artifact:ver (with a minimal POM), the way port-ci's --dep-jar step does."""
+    """Put a jar into the local Maven repository (m2_root) as group:artifact:ver (with a minimal POM), the way
+    port-ci's --dep-jar step does; each file written atomically."""
     g, a = ga.split(":")
-    dest = pathlib.Path.home() / ".m2/repository" / g.replace(".", "/") / a / ver
+    dest = m2_root() / g.replace(".", "/") / a / ver
     dest.mkdir(parents=True, exist_ok=True)
-    (dest / f"{a}-{ver}.jar").write_bytes(data)
-    (dest / f"{a}-{ver}.pom").write_text(f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
-                                         f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar</packaging>"
-                                         f"</project>\n", encoding="utf-8")
+    write_atomic(dest / f"{a}-{ver}.jar", data)
+    write_atomic(dest / f"{a}-{ver}.pom", (f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
+                                            f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar"
+                                            f"</packaging></project>\n").encode("utf-8"))
+
+
+def install_pins(repo, target, pin_jar=None):
+    """Install the jars version branch `target` pins into ~/.m2 before a local build: each port_jar.<g:a>=<url>
+    <sha256> of .port/<target>/branch.properties, under the coordinate its substitute.<g:a> names, the download
+    sha256-checked and a jar already there with that sha256 kept (install_pin). These are the pins the branch's Port
+    CI installs too, but not exactly its set: CI installs what its workflow's --dep-jar steps name (fork-branches.py
+    remap_ci_args swaps a step's release for the pin when it is a GitHub release URL with a substitute coordinate), so
+    this can also install a pin no step names. A file with no pin, or no file, installs nothing. Without it a fresh
+    machine's compileClasspath could not resolve the pinned library at every dependent version (measured, keep-current
+    round 2026-10-31: each worker installed the jar by hand and re-ran). A head (single-version) branch pins in its
+    workflow instead: install_workflow_pins. -> [(ok, message)], one per pin."""
+    tp = props_file(repo, target)
+    text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
+    got = {}
+    for kind, k, v in PIN_LINE.findall(text):
+        got.setdefault(k.replace("\\:", ":"), {})[kind] = v
+    out = []
+    for ga in sorted(got):
+        pin, coord = got[ga].get("port_jar"), got[ga].get("substitute")
+        if not pin:
+            continue
+        if not coord or coord.count(":") < 2 or len(pin.split()) != 2:
+            out.append((False, f"{ga}: port_jar pin without a substitute.{key(ga)} coordinate or a sha256: not installed"))
+            continue
+        g, a, ver = coord.split(":", 2)
+        out.append((pin_jar or install_pin)(f"{g}:{a}", ver, pin))
+    return out
+
+
+DEP_JAR_SHA = re.compile(DEP_JAR.pattern + r'\n          echo "([0-9a-f]{64})  ')
+
+
+def workflow_pins(workflow):
+    """{group:artifact: (version, "<url> <sha256>")} for each sibling release jar the workflow's --dep-jar steps
+    (tools/port-ci.py dep_jars) put into mavenLocal, with the sha256 the step checks."""
+    out = {}
+    for m in DEP_JAR_SHA.finditer(workflow or ""):
+        art, ver, path, repo, tag, asset, sha = m.groups()
+        g = path[:-len(f"/{art}/{ver}")].replace("/", ".")
+        out[f"{g}:{art}"] = (ver, f"https://github.com/{repo}/releases/download/{tag}/{asset} {sha}")
+    return out
+
+
+def install_workflow_pins(repo, pin_jar=None):
+    """Install into ~/.m2 what a head branch's Port CI installs before it builds: each --dep-jar step of its
+    .github/workflows/port-ci.yml (the sibling release jar at the step's coordinate, sha256-checked as the step checks
+    it), through install_pin. A single-version fork pins its library there, not in .port/<mc>/branch.properties; a
+    workflow with no such step, or none, installs nothing. Its --dep-jar-variant legs are CI's alone. -> [(ok,
+    message)], one per step."""
+    wf = pathlib.Path(repo) / ".github/workflows/port-ci.yml"
+    pins = workflow_pins(wf.read_text(encoding="utf-8") if wf.is_file() else "")
+    return [(pin_jar or install_pin)(ga, ver, val) for ga, (ver, val) in sorted(pins.items())]
 
 
 def mr_files(project):
@@ -1763,6 +1836,7 @@ def self_check():
     expect("port_jar.com.example\\:lib=https://github.com/owner/lib/releases/download/lib-1.0-mc1.21.1/lib-1.0_a-mc1.21.4.jar "
            + "a" * 64 in blk2, f"pin line: {blk2}")
     _check_pins_and_bumps(expect)
+    _check_install_pins(expect)
     if bad:
         print("layer-deps self-check: FAIL\n  " + "\n  ".join(bad))
         return 1
@@ -1976,6 +2050,105 @@ def _check_pins_and_bumps(expect):
            f"restore: a dropped dependency with a build now is an unticked restore row; one still without none: {res}")
 
 
+def _check_install_pins(expect):
+    """install_pins: the version's pins into ~/.m2 (a stand-in download, a temporary home), sha256-checked, a jar there
+    with that sha256 never fetched again; a single-version fork with pins gets them, one without is untouched."""
+    global _get
+    jar = b"PK\x03\x04 a library jar"
+    sha = hashlib.sha256(jar).hexdigest()
+    url = "https://github.com/owner/examplelib/releases/download/examplelib-1.0-mc1.21.1/examplelib-1.0_a.jar"
+    fetched, keep_get, keep_env = [], _get, {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
+    _get = lambda u, headers=None: (fetched.append(u), jar)[1]
+    with tempfile.TemporaryDirectory() as td:
+        home = pathlib.Path(td) / "home"
+        home.mkdir()
+        os.environ["HOME"] = os.environ["USERPROFILE"] = str(home)
+        try:
+            m2 = home / ".m2/repository/com/example/examplelib/1.0-mc1.21.1/examplelib-1.0-mc1.21.1.jar"
+            for kind, mc in (("single-version", "1.21.1"), ("version-branch", "1.21.4")):
+                repo = pathlib.Path(td) / kind
+                (repo / ".port" / mc).mkdir(parents=True)
+                (repo / "gradle.properties").write_text(f"minecraft_version={mc}\n", encoding="utf-8")
+                (repo / ".port" / mc / "branch.properties").write_text(
+                    f"{BEGIN}\nsubstitute.com.example\\:examplelib=com.example:examplelib:1.0-mc{mc}\n"
+                    f"port_jar.com.example\\:examplelib={url} {sha}\n{END}\n", encoding="utf-8")
+                want = m2.parent.parent / f"1.0-mc{mc}" / f"examplelib-1.0-mc{mc}.jar"
+                del fetched[:]
+                r1 = install_pins(repo, mc)
+                r2 = install_pins(repo, mc)
+                expect(len(r1) == 1 and r1[0][0] and want.read_bytes() == jar and want.with_suffix(".pom").is_file()
+                       and len(r2) == 1 and r2[0][0] and "already in mavenLocal" in r2[0][1] and fetched == [url],
+                       f"install_pins on a {kind} branch: installed under the substitute's coordinate, sha256-checked, "
+                       f"not fetched again: {r1} {r2} {fetched}")
+                want.parent.mkdir(parents=True, exist_ok=True)
+                want.write_bytes(b"a stale jar")
+                r3 = install_pins(repo, mc)
+                expect(r3 and r3[0][0] and want.read_bytes() == jar and f"REPLACED {want.as_posix()} (sha256 "
+                       f"{hashlib.sha256(b'a stale jar').hexdigest()[:12]} -> {sha[:12]})" in r3[0][1],
+                       f"a jar there with another sha256 is replaced, and said so: {r3}")
+            bad_ = pathlib.Path(td) / "bad"
+            (bad_ / ".port/1.21.1").mkdir(parents=True)
+            (bad_ / ".port/1.21.1/branch.properties").write_text(
+                f"substitute.com.example\\:other=com.example:other:2.0\nport_jar.com.example\\:other={url} {'0' * 64}\n",
+                encoding="utf-8")
+            r4 = install_pins(bad_, "1.21.1")
+            expect(len(r4) == 1 and not r4[0][0] and "sha256" in r4[0][1]
+                   and not (home / ".m2/repository/com/example/other").exists(), f"a sha256 mismatch installs nothing: {r4}")
+            # a single-version head pins its library in its Port CI workflow (port-ci.py --dep-jar), not in .port/
+            import importlib.util as _iu
+            _sp = _iu.spec_from_file_location("port_ci_for_layer_deps", ROOT / "tools/port-ci.py")
+            pc = _iu.module_from_spec(_sp)
+            _sp.loader.exec_module(pc)
+            head_ = pathlib.Path(td) / "head"
+            (head_ / ".github/workflows").mkdir(parents=True)
+            (head_ / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+            (head_ / ".github/workflows/port-ci.yml").write_text(
+                "jobs:\n  gates:\n    steps:\n" + pc.dep_jars(
+                    ["owner/examplelib@examplelib-2.0-mc1.21.1/examplelib-2.0.jar=com.example:examplelib:2.0"],
+                    sha_of=lambda u: sha) + "\n", encoding="utf-8")
+            del fetched[:]
+            w1 = install_workflow_pins(head_)
+            hw = home / ".m2/repository/com/example/examplelib/2.0/examplelib-2.0.jar"
+            expect(len(w1) == 1 and w1[0][0] and hw.read_bytes() == jar and fetched == [
+                       "https://github.com/owner/examplelib/releases/download/examplelib-2.0-mc1.21.1/examplelib-2.0.jar"]
+                   and install_pins(head_, "1.21.1") == [],
+                   f"a single-version head: its workflow's --dep-jar installed at the step's coordinate: {w1} {fetched}")
+            (head_ / ".github/workflows/port-ci.yml").write_text("jobs: {}\n", encoding="utf-8")
+            expect(install_workflow_pins(head_) == [] and install_workflow_pins(pathlib.Path(td) / "nofile") == [],
+                   "a workflow with no --dep-jar step, or none, installs nothing")
+            # a private repository (MMVU_M2_REPO, round.py's version-branch dependent gate): installs go there, ~/.m2
+            # is not touched; each file is written through a temporary file, none left behind
+            priv, keep_m2 = pathlib.Path(td) / "private-m2", os.environ.get("MMVU_M2_REPO")
+            os.environ["MMVU_M2_REPO"] = str(priv)
+            try:
+                before_ = sorted(str(p) for p in home.rglob("*"))
+                install_m2("com.example:cand", "1.0-mc1.21.4", b"the candidate")
+                pj = priv / "com/example/cand/1.0-mc1.21.4/cand-1.0-mc1.21.4.jar"
+                expect(pj.is_file() and pj.read_bytes() == b"the candidate" and sorted(str(p) for p in home.rglob("*")) == before_
+                       and not [p for p in priv.rglob("*.tmp")] and pj.with_suffix(".pom").is_file()
+                       and m2_root() == priv,
+                       "MMVU_M2_REPO: an install goes into the private repository, atomically, ~/.m2 untouched")
+            finally:
+                os.environ.pop("MMVU_M2_REPO", None)
+                if keep_m2 is not None:
+                    os.environ["MMVU_M2_REPO"] = keep_m2
+            none_ = pathlib.Path(td) / "nopins"
+            (none_ / ".port/1.21.1").mkdir(parents=True)
+            (none_ / ".port/1.21.1/branch.properties").write_text("upstream_commit=abc\n", encoding="utf-8")
+            before = sorted(str(p) for p in home.rglob("*"))
+            del fetched[:]
+            expect(install_pins(none_, "1.21.1") == [] and install_pins(pathlib.Path(td) / "nofile", "1.21.1") == []
+                   and not fetched and sorted(str(p) for p in home.rglob("*")) == before,
+                   "a single-version fork without pins (or without the file) is untouched")
+        finally:
+            _get = keep_get
+            for k, v in keep_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
 PORT_JAR = re.compile(r"(?m)^port_jar\.(.+?)=(https://github\.com/[\w.-]+/[\w.-]+/releases/download/\S+\.jar) ([0-9a-f]{64})\s*$")
 
 
@@ -2005,12 +2178,12 @@ def sibling_jars(repo, target, home=None):
     """The sibling ports' jars for this version in mavenLocal (what a resolve installed) for its sibling substitutes:
     what a version branch's shipped-jar gate boots beside the built jar, as port-ci's `shipped jars`
     job passes the --dep-jar jars on the port branch. A jar not in mavenLocal is left out (shipped-gate then names the
-    missing mod)."""
-    home = pathlib.Path(home) if home else pathlib.Path.home()
+    missing mod). `home`: a home whose ~/.m2 to read, else m2_root()."""
+    m2 = pathlib.Path(home) / ".m2/repository" if home else m2_root()
     out = []
     for ga, coord in sibling_substitutes(repo, target).items():
         g, a, ver = coord.split(":", 2)
-        jar = home / ".m2/repository" / g.replace(".", "/") / a / ver / f"{a}-{ver}.jar"
+        jar = m2 / g.replace(".", "/") / a / ver / f"{a}-{ver}.jar"
         if jar.is_file():
             out.append(str(jar))
     return out

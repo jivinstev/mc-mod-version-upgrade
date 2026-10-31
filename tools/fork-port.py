@@ -32,6 +32,10 @@ Stages, each logged as one line and skipped with a reason when it does not apply
            checkout for its jar, --port-release its release, pinned for CI); then the data forms the version needs
            (1.21.2 recipes and item definitions, 26.2 entity predicates, 26.3 data, GeckoLib 5 asset paths) written into
            the branch's own src/main/resources
+  (pins)   before the first stage that builds (a resume --from-stage measure too): each jar .port/<t>/branch.properties
+           pins (port_jar.*, under its substitute. coordinate) into ~/.m2, sha256-checked, one already there with that
+           sha256 kept and a different one replaced and said (a WARNING line, and the summary's "pins") (layer-deps.py
+           install_pins; a pin that cannot be installed stops, exit 10)
   stage    `./gradlew compileJava` to stage Minecraft; while createMinecraftArtifacts fails on the access transformer,
            fix-access-transformer.py --overrides-from <log> on the branch's AT (bounded: 4 rounds)
   moves    build-class-move-map.py between the parent version's staged jars and this one's -> .port/<t>/moves.generated.tsv,
@@ -42,7 +46,8 @@ Stages, each logged as one line and skipped with a reason when it does not apply
   measure  compile every source set (srcsets.compile_tasks); burndown-count.sh decides whether it is a count
   loop     file-loop.py --budget N on the branch's source (its kept rows land in .port/<t>/renames.tsv)
   audit    audit-mixin-targets.py against the version's sources jar, then audit-event-listeners.py (abstract events)
-           over every source tree against the branch's resolved classpath (only at 0 errors)
+           over every source tree against the branch's resolved classpath (only at 0 errors); a 0-use tier
+           (tools/audit-zero-uses.py: CATALOG 177) is a WARNING in its line, never a stop
   gates    ci-gates.py --mc <t>: none = skip; ab = author build, Gate A, Gate B; full = + Gate C phases. After a green run, the
            mod's own log files (harness/run/logs, minus vanilla's) are compared with the parent version's last gate run: a file
            it wrote there and not here is residue (exit 11) -- a subsystem stopped running (CATALOG X47)
@@ -786,6 +791,13 @@ def client_refs_in_common(repo, prepared):
     return out
 
 
+def zero_use_tiers(repo):
+    """tools/audit-zero-uses.py over the repo's src/*/java trees (the one implementation the catalogue sweep and
+    ci-gates.py's report row run too): a tier with 0 uses fed to durability(), an unbreakable tool that breaks on its
+    first hit (CATALOG 177). -> ["<file>:<line>: <what>"]. Report only."""
+    return [f"{p}:{ln}: {what}" for p, ln, what in load("audit_zero_uses", "audit-zero-uses.py").scan(repo)]
+
+
 def unreviewed_stubs(tdir):
     """The entries of tdir/STUBS.json nobody has reviewed yet."""
     try:
@@ -1478,6 +1490,13 @@ def gradle_env(env):
     return env
 
 
+def gradle_args(env):
+    """PORT_GRADLE_ARGS (newline-separated, as tools/port_gates.py reads it): the extra arguments every Gradle call of
+    the run carries -- round.py's version-branch dependent gate passes -Dmaven.repo.local=<its private repository>, so
+    this run's builds resolve the library's candidate jar from there and never from ~/.m2."""
+    return [x.strip() for x in env.get("PORT_GRADLE_ARGS", "").splitlines() if x.strip()]
+
+
 GRADLE_MAINS = re.compile(r"(?:^|[./])(GradleDaemon|GradleWorkerMain|GradleMain|KotlinCompileDaemon|GradleStart\w*)$")
 
 
@@ -1857,7 +1876,8 @@ class Run:
     def gradle(self, tasks, log):
         init = [str(x) for x in ("--init-script", ROOT / "tools/maxerrs.init.gradle",
                                  "--init-script", ROOT / "tools/central-mirror.init.gradle")]
-        return self.sh([BASH, "gradlew", *tasks, "--continue", "--console=plain", *init, "-Dorg.gradle.jvmargs=-Xmx6g"], log)
+        return self.sh([BASH, "gradlew", *tasks, "--continue", "--console=plain", *init, "-Dorg.gradle.jvmargs=-Xmx6g",
+                        *gradle_args(self.env)], log)
 
     def artifacts(self, root=None):
         d = (root or self.repo) / "build" / "moddev" / "artifacts"
@@ -1912,6 +1932,23 @@ class Run:
             did.append(f"{n} resource file(s) written in {self.t}'s data forms")
         return {"done": ", ".join(did) or "on its branch"}
 
+    def install_pins(self):
+        """The version's pinned jars (port_jar.* in .port/<t>/branch.properties) into ~/.m2, sha256-checked
+        (layer-deps.py install_pins: the pins its Port CI's --dep-jar steps are rendered from): a run resumed past setup (--from-stage measure) never ran layer-deps.py resolve, and
+        compileClasspath could not resolve the pinned library (measured, keep-current round 2026-10-31: at every
+        dependent version from 1.21.4 up, each worker installed the jar by hand)."""
+        got = load("layer_deps", "layer-deps.py").install_pins(self.repo, self.t)
+        failed = [m for ok, m in got if not ok]
+        if failed:
+            return {"stop": "a pinned jar could not be put into mavenLocal: " + "; ".join(failed)[:500], "code": 10,
+                    "choices": [f"fix the pin in .port/{self.t}/branch.properties (layer-deps.py resolve --port-release), "
+                                "or put the jar there by hand, then resume"]}
+        for _ok, m in got:
+            self.say("pins", ("WARNING " if "REPLACED" in m else "") + m)
+        if got:              # in the run's summary too, a jar replaced at its coordinate most of all
+            self.summary["pins"] = [m for _ok, m in got]
+        return {"done": f"{len(got)} pinned jar(s) in mavenLocal"}
+
     def data_forms(self):
         """The layer's data conversions, written into the branch's own src/main/resources (convert_data)."""
         props = self.fb.read_file(self.tdir / "branch.properties")
@@ -1955,7 +1992,8 @@ class Run:
                     "choices": [f"stage it by hand: git worktree add <dir> {fb.branch_name(pv)} && ./gradlew createMinecraftArtifacts"]}
         old = self.artifacts(work)[0]
         if not old:
-            self.sh([BASH, "gradlew", "createMinecraftArtifacts", "--console=plain"], self.work / "stage-prev.log", cwd=work)
+            self.sh([BASH, "gradlew", "createMinecraftArtifacts", "--console=plain", *gradle_args(self.env)],
+                    self.work / "stage-prev.log", cwd=work)
             old = self.artifacts(work)[0]
         new, _ = self.artifacts()
         if not old or not new:
@@ -2103,7 +2141,13 @@ class Run:
             ev = self.audit_event_listeners()
             if ev.get("stop"):
                 return ev
-            return {"done": ((lines[-1] if lines else "all targets match")[:120] + "; " + ev["done"])[:200]}
+            done = {"done": ((lines[-1] if lines else "all targets match")[:120] + "; " + ev["done"])[:200]}
+            zero = zero_use_tiers(self.repo)
+            if zero:          # report only (CATALOG 177): a warning in the stage line and the summary, never a stop
+                done["warnings"] = [f"0-use tier (CATALOG 177: breaks on its first hit unless it has no durability "
+                                    f"components): {h}" for h in zero]
+                done["done"] += f"; WARNING {len(zero)} 0-use tier(s), CATALOG 177: {', '.join(zero[:4])}"
+            return done
         if r.returncode == 2 or any("NO TARGETS CHECKED" in l for l in lines):
             return {"stop": "the mixin audit checked no targets (wrong jar or tree?) -- not a pass", "code": 13,
                     "audit": lines[:8], "detail": lines[:4], "choices": ["fix the audit's inputs and resume with --from-stage audit"]}
@@ -2137,7 +2181,7 @@ class Run:
         plain ./gradlew. Never rebuilt by hand (CATALOG X25b-ii)."""
         self.work.mkdir(parents=True, exist_ok=True)
         cmd = [BASH, "gradlew", "-I", str(ROOT / "tools/qtc-init.gradle"), "-I", str(ROOT / "tools/central-mirror.init.gradle"),
-               "-q", "qtcClasspath", "--console=plain"]
+               "-q", "qtcClasspath", "--console=plain", *gradle_args(self.env)]
         r = subprocess.run(cmd, cwd=self.repo, capture_output=True, text=True, encoding="utf-8", errors="replace", env=self.env)
         m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", r.stdout or "", re.S)
         jars = [l.strip() for l in m.group(1).splitlines() if l.strip()] if m else []
@@ -2268,8 +2312,15 @@ def carry_over(old_stages, skipped):
 
 
 def execute(run, todo):
-    """Run the stages in order; -> the stop dict (with stage/left) of the first stage that cannot finish, or None."""
+    """Run the stages in order; -> the stop dict (with stage/left) of the first stage that cannot finish, or None.
+    Before the first stage that builds, the version's pinned jars go into mavenLocal (Run.install_pins)."""
+    pinned = False
     for s in todo:
+        if s not in ("setup", "cost") and not pinned and hasattr(run, "install_pins"):
+            pinned = True
+            res = run.install_pins()
+            if "stop" in res:
+                return dict(res, stage=s, left=res["stop"])
         res = getattr(run, "s_" + s)()
         run.summary["stages"][s] = {k: v for k, v in res.items() if k not in ("view", "esc", "stop", "choices", "code", "detail")}
         if "stop" in res:
@@ -2767,6 +2818,75 @@ def self_check():
     # the single-run (no resume) path is untouched: the measure of THIS run is used as is
     stop, n_meas, cmds, _s = resumed("setup", fresh=0)
     expect(n_meas == 1 and stop is None or (stop and stop["stage"] != "measure"), "full run: one measure, then on")
+    # ---- a resume past setup still puts the version's pinned jars into mavenLocal before it builds (keep-current round
+    # 2026-10-31: --from-stage measure stopped on compileClasspath at every dependent version); no network: one jar is
+    # already there with its sha256, the other's download is a file:// URL whose bytes do not match the pin
+    with tempfile.TemporaryDirectory() as d:
+        repo, home = pathlib.Path(d) / "vb", pathlib.Path(d) / "home"
+        (repo / ".port/1.21.4").mkdir(parents=True)
+        jar_ = b"PK a library jar"
+        have_ = home / ".m2/repository/com/example/examplelib/1.0-mc1.21.4/examplelib-1.0-mc1.21.4.jar"
+        have_.parent.mkdir(parents=True)
+        have_.write_bytes(jar_)
+        wrong_ = pathlib.Path(d) / "wrong.jar"
+        wrong_.write_bytes(b"not the pinned jar")
+        props_ = repo / ".port/1.21.4/branch.properties"
+        pin_ = ("substitute.com.example\\:examplelib=com.example:examplelib:1.0-mc1.21.4\n"
+                f"port_jar.com.example\\:examplelib=https://github.com/owner/examplelib/releases/download/t/a.jar "
+                f"{hashlib.sha256(jar_).hexdigest()}\n")
+        keep_env = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
+        os.environ["HOME"] = os.environ["USERPROFILE"] = str(home)
+        try:
+            for extra_, want_stop in (("", False), ("substitute.com.example\\:other=com.example:other:2.0\n"
+                                                    f"port_jar.com.example\\:other={wrong_.resolve().as_uri()} {'0' * 64}\n", True)):
+                props_.write_text(pin_ + extra_, encoding="utf-8")
+                a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=0.0, gates="ab", modid="m",
+                                        base="x", direct=False, from_stage="measure", max_errors=None, confirm_spend=False)
+                run = Run(a_)
+                order = []
+                run.say = lambda st_, msg: order.append((st_, msg))
+                run.s_measure = lambda: (order.append(("measure", "ran")), {"done": "0 error(s)", "errors": 0, "this_run": True})[1]
+                stop = execute(run, ["measure"])
+                if want_stop:
+                    expect(stop and stop["stage"] == "measure" and stop["code"] == 10 and "sha256" in stop["left"]
+                           and ("measure", "ran") not in order and not (home / ".m2/repository/com/example/other").exists(),
+                           f"a pin that cannot be installed stops before the build, nothing installed: {stop} {order}")
+                else:
+                    expect(stop is None and order[:2] == [("pins", "com.example:examplelib:1.0-mc1.21.4 already in mavenLocal "
+                                                                   "(sha256 ok)"), ("measure", "ran")],
+                           f"--from-stage measure: the pinned jar is checked into mavenLocal before the build: {order}")
+            # a different jar at the coordinate is replaced, and said loudly: a WARNING line and the summary's "pins"
+            have_.write_bytes(b"a stale jar")
+            good_ = pathlib.Path(d) / "good.jar"
+            good_.write_bytes(jar_)
+            props_.write_text(pin_.replace("https://github.com/owner/examplelib/releases/download/t/a.jar",
+                                           good_.resolve().as_uri()), encoding="utf-8")
+            run = Run(a_)
+            order = []
+            run.say = lambda st_, msg: order.append((st_, msg))
+            run.s_measure = lambda: {"done": "0 error(s)", "errors": 0, "this_run": True}
+            stop = execute(run, ["measure"])
+            expect(stop is None and have_.read_bytes() == jar_ and order[0][0] == "pins"
+                   and order[0][1].startswith("WARNING ") and "REPLACED" in order[0][1]
+                   and any("REPLACED" in m_ for m_ in run.summary.get("pins", [])),
+                   f"a replaced jar is a WARNING line and in the summary: {order} {run.summary.get('pins')}")
+        finally:
+            for k, v in keep_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    # ---- PORT_GRADLE_ARGS reaches every Gradle call of the run (the version-branch dependent gate's private repository)
+    with tempfile.TemporaryDirectory() as d:
+        a_ = argparse.Namespace(repo=d, target="1.21.4", json=None, budget=0.0, gates="ab", modid="m", base="x",
+                                direct=False, from_stage="measure", max_errors=None, confirm_spend=False)
+        run = Run(a_)
+        run.env = dict(run.env, PORT_GRADLE_ARGS="-Dmaven.repo.local=/private/m2\n")
+        seen_ = []
+        run.sh = lambda cmd, log=None, cwd=None: (seen_.append(cmd), CompletedProcess(cmd, 0, "", ""))[1]
+        run.gradle(["compileJava"], pathlib.Path(d) / "x.log")
+        expect(seen_ and seen_[-1][-1] == "-Dmaven.repo.local=/private/m2" and gradle_args({}) == [],
+               f"PORT_GRADLE_ARGS reaches the run's Gradle calls: {seen_}")
     # ---- spend guard and the skipped-shared warning
     expect(spend_guard(900, 15) is None and spend_guard(1501, 15) and spend_guard(1501, 15, confirm=True) is None
            and spend_guard(50, 0.1) and spend_guard(50, 0.1, max_errors=60) is None, "spend guard thresholds")
@@ -3216,6 +3336,34 @@ def self_check():
         hits = client_refs_in_common(repo, repo / "build/mc1.21.8/mv/java")
         expect(hits == ["m/Doc.java:7", "m/EnMixin.java:3", "m/Item.java:3"],
                f"client lookups in common classes (comments and javadoc ignored, a string with /* kept as code): {hits}")
+    # ---- a 0-use tier is reported (CATALOG 177), a real one and a comment are not; report only
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); jt = repo / "src/main/java"; (jt / "com/example/mod").mkdir(parents=True)
+        (jt / "com/example/mod/Infinite.java").write_text(
+            "class Infinite implements Tier {\n  @Override\n  public int getUses() { return 0; }\n}\n", encoding="utf-8")
+        (jt / "com/example/mod/Iron.java").write_text(
+            "class Iron implements Tier {\n  public int getUses() { return 512; }\n  // public int getUses() { return 0; }\n"
+            "  /* new Item.Properties().durability(0) */\n}\n", encoding="utf-8")
+        (jt / "com/example/mod/Mat.java").write_text(
+            "class Mat {\n  static final ToolMaterial M = new ToolMaterial(BlockTags.INCORRECT_FOR_NETHERITE_TOOL,\n"
+            "      0, 9.0F, 4.0F, 15, Tags.Items.INGOTS);\n  Item.Properties p = new Item.Properties().durability(0);\n}\n",
+            encoding="utf-8")
+        hits = [h.split(": ", 1)[0] for h in zero_use_tiers(repo)]
+        expect(hits == ["src/main/java/com/example/mod/Infinite.java:3", "src/main/java/com/example/mod/Mat.java:2",
+                        "src/main/java/com/example/mod/Mat.java:4"],
+               f"0-use tiers: getUses() 0, a 0-durability ToolMaterial and durability(0); 512 and comments not: {hits}")
+        # report only: the audit stage stays done, the warning in its line and the summary
+        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=0.0, gates="ab", modid="m",
+                                base="x", direct=False, from_stage="audit", max_errors=None, confirm_spend=False)
+        run = Run(a_)
+        run.compile_errors = lambda: 0
+        run.props = lambda: {}
+        run.artifacts = lambda root=None: ([], [pathlib.Path("neo-sources.jar")])
+        run.sh = lambda cmd, log=None, cwd=None: CompletedProcess(cmd, 0, "all targets match\n", "")
+        run.audit_event_listeners = lambda: {"done": "listeners ok"}
+        res = run.s_audit()
+        expect("stop" not in res and "WARNING 3 0-use tier(s), CATALOG 177" in res.get("done", "")
+               and len(res.get("warnings", [])) == 3, f"the 0-use audit is a warning, never a stop: {res}")
     # ---- a review carries one version on when the file and every signal are the same; a changed count does not
     with tempfile.TemporaryDirectory() as d:
         mv = pathlib.Path(d); a, b = mv / "1.21.5", mv / "1.21.8"; a.mkdir(); b.mkdir()
