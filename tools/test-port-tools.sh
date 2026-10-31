@@ -90,7 +90,7 @@ grep -q 'audit-zero-uses: src/main/java/com/example/mod/InfTier.java:2: getUses(
 printf 'class Defaults {\n  static void on(ModifyDefaultComponentsEvent e) {\n    e.modify(X, b -> b.remove(DataComponents.MAX_DAMAGE));\n  }\n}\n' > "$P2/src/main/java/com/example/mod/Defaults.java"
 out="$(bash tools/run-catalog-scans.sh "$P2" 2>&1)"
 grep -q 'audit-zero-uses (handled): src/main/java/com/example/mod/InfTier.java:2: getUses() returns 0 -- handled by src/main/java/com/example/mod/Defaults.java:3' <<<"$out" \
-  && ! grep -q '^audit-zero-uses: src/main/java/com/example/mod/InfTier.java' <<<"$out" \
+  && ! grep -q '^audit-zero-uses: src/main/java/com/example/mod/InfTier.java' <<<"$out" && ! grep -q 'audit-zero-uses: did not run' <<<"$out" \
   && ok "the sweep says a 0-use tier a ModifyDefaultComponentsEvent handler covers is handled, not a hit" || bad "handled 0-use tier: $(grep -A4 '#177' <<<"$out")"
 rm -f "$P2/src/main/java/com/example/mod/Defaults.java"
 # a sweep whose audit cannot run says so, never a silent clean section (a layout without the tool)

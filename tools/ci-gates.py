@@ -272,7 +272,20 @@ def zero_uses_row(repo, work):
                        text=True, encoding="utf-8", errors="replace")
     (pathlib.Path(work) / "audit-zero-uses.log").write_text(r.stdout + r.stderr, encoding="utf-8")
     print((r.stdout.strip().splitlines() or ["audit-zero-uses: no output"])[-1], flush=True)
-    return report_row(ZERO_USES_ROW, r.returncode, r.stdout, "audit-zero-uses:")
+    row = report_row(ZERO_USES_ROW, r.returncode, r.stdout, "audit-zero-uses:")
+    # hits a ModifyDefaultComponentsEvent handler may cover (exit 3, or beside findings): still a REPORT row, never
+    # silent -- which items the handler matches is not followed, so someone verifies it
+    hp = "audit-zero-uses (handled):"
+    handled = [l[len(hp):].strip() for l in r.stdout.splitlines() if l.startswith(hp)] if r.returncode in (1, 3) else []
+    closed = re.search(r"(?m)^audit-zero-uses: \d+ finding\(s\)", r.stdout)
+    if not handled or not closed:
+        return row
+    by = sorted({h.rsplit(" -- handled by ", 1)[-1].split(" (verify", 1)[0] for h in handled})
+    note = (f"{len(handled)} 0-use tier(s) handled by {', '.join(by)} -- verify it covers these items: "
+            + "; ".join(h.split(" -- handled by ", 1)[0] for h in handled))
+    if row:
+        return row[:-2] + " / " + note.replace("|", "/")[:400] + " |"
+    return f"| {ZERO_USES_ROW} | REPORT | " + note.replace("|", "/")[:600] + " |"
 
 
 MIXIN_ROW = "Mixin targets -- every injection point against the build's Minecraft sources (report)"
@@ -665,8 +678,17 @@ def self_check():
         (r / "src/main/java/com/example/mod/Defaults.java").write_text(
             "class Defaults {\n  static void on(ModifyDefaultComponentsEvent e) {\n"
             "    e.modify(X, b -> b.remove(DataComponents.MAX_DAMAGE));\n  }\n}\n", encoding="utf-8")
-        ok &= zero_uses_row(r, d) is None and "audit-zero-uses (handled): src/main/java/com/example/mod/InfTier.java:2" \
+        row = zero_uses_row(r, d)
+        ok &= bool(row) and row == (f"| {ZERO_USES_ROW} | REPORT | 1 0-use tier(s) handled by "
+                                    "src/main/java/com/example/mod/Defaults.java:3 -- verify it covers these items: "
+                                    "src/main/java/com/example/mod/InfTier.java:2: getUses() returns 0 |") \
+            and "audit-zero-uses (handled): src/main/java/com/example/mod/InfTier.java:2" \
             in (pathlib.Path(d) / "audit-zero-uses.log").read_text(encoding="utf-8")
+        (r / "src/main/java/com/example/mod/Other.java").write_text(
+            "class Other implements Tier {\n  public int getUses() { return 0; }\n}\n", encoding="utf-8")
+        row = zero_uses_row(r, d) or ""       # a second 0-use tier: both handled, both in the one row
+        ok &= row.startswith(f"| {ZERO_USES_ROW} | REPORT | 2 0-use tier(s) handled by ") and "Other.java:2" in row
+        (r / "src/main/java/com/example/mod/Other.java").unlink()
         tier.write_text("class InfTier implements Tier {\n  public int getUses() { return 512; }\n}\n", encoding="utf-8")
         ok &= zero_uses_row(r, d) is None
     print("self-check:", "OK" if ok else "FAIL")
