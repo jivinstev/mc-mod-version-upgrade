@@ -97,7 +97,8 @@ forks already on the current shared library, builds nothing but the close):
   pinned readers (the plan's migrator_sha, its Port CI kits) accept the new keys (ledger_readers); otherwise the job or
   the ledger step blocks for the owner, as before. A `regrade:` line re-grades a reproduced one. A job given only
   confirmed fixes reads as before. Every agent job on a head checkout gets the head workflow's --dep-jar pins in
-  ~/.m2 first (head_pins).
+  ~/.m2 first (head_pins). During a round the driver is the only writer of the head's ledger: a branch about to go out
+  as a PR with any other commit touching a ledger blocks for the owner (ledger_guard).
 
 DISPATCH. A `tool` item runs here (`drive`, `run`). An `agent` item is printed as a job: a fresh worker (the session's
 Agent/Task subagent, never the orchestrator itself) gets the one-line prompt "Read <job file> and do exactly what it
@@ -323,7 +324,11 @@ def full_gate_lock(who, say=print):
     p = gate_lock_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a+", encoding="utf-8") as fh:
-        if not _flock(fh, block=False):
+        for _ in range(5):          # gate_lock_busy's probe holds it for an instant: never a 30 s wait for that
+            if _flock(fh, block=False):
+                break
+            time.sleep(0.1)
+        else:
             holder = (p.with_suffix(".holder").read_text(encoding="utf-8").strip()
                       if p.with_suffix(".holder").is_file() else "?")
             say(f"round: waiting for the machine's full-gate lock ({p}, held by {holder})")
@@ -700,9 +705,11 @@ def migrator_file(rev, path="tools/known-issues.py"):
     if r.returncode:
         spec = f"refs/tags/{rev}:refs/tags/{rev}" if rev.startswith("port-ci-kit-v") else rev
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
-            subprocess.run(["git", "-C", str(MIGRATOR), "fetch", "-q", "--depth", "1", "--no-tags", "origin", spec],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=MIGRATOR_FETCH_TIMEOUT)
+            # no pipes (Windows: a killed git leaves git-remote-https holding them, and the timeout would wait on
+            # it); a transfer that stalls is git's own to end (lowSpeed*)
+            subprocess.run(["git", "-C", str(MIGRATOR), "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=30", "fetch",
+                            "-q", "--depth", "1", "--no-tags", "origin", spec], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=MIGRATOR_FETCH_TIMEOUT)
         r = git(MIGRATOR, "show", f"{rev}:{path}")
     return r.stdout if r.returncode == 0 else None
 
@@ -2074,7 +2081,8 @@ def t_grades(st, it, log):
                     "--reason", f"{g.get('reason', '')} (plan #{P['issue']})", "--by", g.get("by", "owner"), "--owner"], log)
     c = commit_paths(d, [".port"], f"Known issues: the plan's grade overrides (plan #{P['issue']})")
     push_ahead(d, F["head"])
-    return f"{len(it['extra']['grades'])} override(s)" + (f", {c[:12]}" if c else ", nothing to commit"), {}
+    return f"{len(it['extra']['grades'])} override(s)" + (f", {c[:12]}" if c else ", nothing to commit"), (
+        {"ledger_commits": [c]} if c else {})
 
 
 def t_setup(st, it, log):
@@ -3056,6 +3064,27 @@ def seg_ids(st, it, steps):
     return [x["id"] for x in st.items if x["fork"] == it["fork"] and x["version"] == it["version"] and x["step"] in steps]
 
 
+LEDGER_PATHS = (".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json")
+
+
+def ledger_guard(st, it, d, base, local):
+    """F3: during a round the driver is the only writer of the head's known-issues ledger (its ledger and grades steps,
+    each commit recorded in its result's `ledger_commits`). A branch about to go out as a PR -- the head's work branch,
+    or a version branch, which never carries the ledger -- with any other commit touching a ledger blocks for the owner,
+    naming it: a worker's commit could otherwise give itself a disproval or a grade. `retry --allow` lets one PR through
+    once the owner has read it."""
+    r = git(d, "rev-list", f"origin/{base}..{local}", "--", *LEDGER_PATHS)
+    mine = {c for x in st.items for c in (x.get("result") or {}).get("ledger_commits", [])}
+    bad = [c for c in r.stdout.split() if c not in mine]
+    if bad and not it.get("allow_once"):
+        subj = [git(d, "log", "-1", "--format=%h %s", c).stdout.strip() for c in bad[:5]]
+        diff = git(d, "diff", "--stat", f"origin/{base}...{local}", "--", *LEDGER_PATHS).stdout.strip().splitlines()
+        raise Blocked(f"{local} changes the known-issues ledger outside the driver ({'; '.join(subj)}; "
+                      f"{diff[-1] if diff else 'see git diff'}): during a round only the driver writes it. The owner "
+                      f"reads it: revert it on {local} and `round.py retry {it.get('id', '<this item>')}`, or keep it with "
+                      f"`round.py retry {it.get('id', '<this item>')} --allow`")
+
+
 def t_pr(st, it, log):
     """Push the version's branch as its work branch and open its PR -- only what the gates certified: a branch with code
     committed after the gated commit (a fixer, a retry) sends the version back to its gates (and the library's
@@ -3074,6 +3103,7 @@ def t_pr(st, it, log):
     if moved:
         raise Reset(seg_ids(st, it, ("gates", "depgate")), f"code committed after the gated commit {gated[:12]} "
                     f"({', '.join(moved[:4])}): the gates run again before the push")
+    ledger_guard(st, it, d, base, local)
     work = f"keep-current/{st.data['date']}-{v}" if is_vb(st, it) else f"keep-current/{st.data['date']}"
     owner = slug.split("/")[0]
     have = gh(f"repos/{slug}/pulls?state=all&head={owner}:{work}&base={base}")
@@ -3298,7 +3328,7 @@ def t_ledger(st, it, log):
                 and x["status"] not in ("ok", "skipped") and x["version"] not in merged]
     d = checkout(d, F["head"])
     ff_local(d, F["head"])
-    sets, refused, found_new, disproved, blocked_ = 0, [], [], [], []
+    sets, refused, found_new, disproved, blocked_, led_c = 0, [], [], [], [], None
     # N5: what this step refused before and the owner retried it over: left as it is, never a stop again
     held, refusing = set(it.get("result", {}).get("refused_disproofs", [])), set()
     if (pathlib.Path(d) / ".port/KNOWN-ISSUES.json").is_file():
@@ -3511,7 +3541,7 @@ def t_ledger(st, it, log):
                     set_fixed(f_["id"], hit[0], x["version"], "subject")
                 else:
                     refused.append(f"{f_['id']} (no `fixed:` line and no commit naming it on {br})")
-        commit_paths(d, [".port/KNOWN-ISSUES.json"], "Known issues: the round's fixes" + (
+        led_c = commit_paths(d, [".port/KNOWN-ISSUES.json"], "Known issues: the round's fixes" + (
             f" and new findings {', '.join(found_new)}" if found_new else "") + (
             f", closed as not a defect: {', '.join(x['id'] for x in disproved)}" if disproved else "") + " (keep-current round)")
     else:
@@ -3530,7 +3560,8 @@ def t_ledger(st, it, log):
             + (f"; new in the ledger: {', '.join(found_new)}" if found_new else "")
             + (f"; closed as not a defect: {', '.join(x['id'] for x in disproved)}" if disproved else "")
             + (f"; refused: {'; '.join(refused)}" if refused else ""))
-    res = {"unmerged": unmerged, "refused": refused, "added": found_new, **({"disproved": disproved} if disproved else {})}
+    res = {"unmerged": unmerged, "refused": refused, "added": found_new, **({"disproved": disproved} if disproved else {}),
+           **({"ledger_commits": [led_c]} if led_c else {})}
     if blocked_:          # S4: a disproval the round may not make is the owner's (everything else is committed and pushed)
         raise Blocked(f"{note}; NOT done, the owner's to decide: {'; '.join(blocked_)}. The owner can: close it or "
                       f"re-grade it by hand on {F['head']} (`known-issues.py disprove <ID> --repo {d} --version <v> --kind "
@@ -3719,7 +3750,8 @@ def gate_lock_busy():
 
 
 def guarded_pin(ga, ver, val):
-    """install_pin (PIN_JAR in the self-check), but never replacing a differing jar under a full gate run (head_pins)."""
+    """install_pin (PIN_JAR in the self-check), but never replacing a differing jar while a full (locked) gate run holds
+    the machine's lock (head_pins)."""
     ld = mod("ld")
     url, sha = val.split()
     g_, a_ = ga.split(":")
@@ -4655,6 +4687,16 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
              and rc == 0 and status2 == "ok" and "regrade SU-3 not applied (refused before; the owner retried this step)"
              in note2 and led_["SU-3"]["severity"] == "S1",
              f"N5: the stop names the owner's ways out; a retried ledger step goes on: {o} {status2} {note2}")
+        # ... a refused disproval the same way: the step stops, and its retry goes on with the entry left open
+        with State.tx(stA) as st_:
+            st_.item(bid).update(status="ok", result={"disproved": [["SU-5", "no-regression", "abcdef1234 never had it"]]})
+        status3, note3, res3, close, led_ = su_ledger()
+        rc, o = q(cmd_retry, argparse.Namespace(state=stA, id=lid, why=None, allow=False))
+        status4, note4, res4, close, led_ = su_ledger()
+        want(status3 == "blocked" and "disproved SU-5: known-issues.py disprove refused it" in note3 and rc == 0
+             and status4 == "ok" and "disproved SU-5 at 1.21.1 left open (refused before; the owner retried this step)"
+             in note4 and led_["SU-5"]["status"] == {"1.21.1": "open"} and "disproved" not in res4,
+             f"N5: a refused disproval stops the step; its retry goes on, the entry open: {note3} {note4}")
         # B1: the fork's pinned readers decide whether the round writes the new keys
         with State.tx(stA) as st_:
             F_ = st_.fork(SU)
@@ -4695,7 +4737,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
 
         def spy(cmd, *a_, **k_):
             if "fetch" in cmd:
-                seen_fetch.append((list(cmd), k_.get("timeout")))
+                seen_fetch.append((list(cmd), k_.get("timeout"), (k_.get("stdout"), k_.get("stderr"))))
             return run0(cmd, *a_, **k_)
         subprocess.run = spy
         try:
@@ -4703,8 +4745,9 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         finally:
             subprocess.run = run0
         want(got_later and got_later.endswith("# later\n") and seen_fetch and "--depth" in seen_fetch[0][0]
-             and seen_fetch[0][0][seen_fetch[0][0].index("--depth") + 1] == "1" and seen_fetch[0][1],
-             f"N3: a missing migrator commit is fetched alone, with a timeout: {seen_fetch}")
+             and seen_fetch[0][0][seen_fetch[0][0].index("--depth") + 1] == "1" and seen_fetch[0][1]
+             and seen_fetch[0][2] == (subprocess.DEVNULL, subprocess.DEVNULL) and "http.lowSpeedTime=30" in seen_fetch[0][0],
+             f"N3: a missing migrator commit is fetched alone, bounded, with no pipes: {seen_fetch}")
         with State.tx(stA) as st_:
             st_.fork(SU)["ledger_readers"] = r_old
             told = job_text(st_, st_.item(bid))
@@ -4794,6 +4837,15 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
             free_ = guarded_pin("com.example:examplesvlib", "1.0", "https://example.invalid/x.jar " + "a" * 64)
             os.environ.pop("MMVU_M2_REPO", None) if m2_0 is None else os.environ.update(MMVU_M2_REPO=m2_0)
         globals()["PIN_JAR"] = pj0
+        # F4: a probe's instant hold of the gate lock costs a real gate run no long wait and no "waiting" line
+        said_ = []
+        probe = open(gate_lock_path(), "a+", encoding="utf-8")
+        _flock(probe, block=False)
+        threading.Timer(0.15, lambda: (_funlock(probe), probe.close())).start()
+        t0_ = time.monotonic()
+        with full_gate_lock("f4", say=said_.append):
+            took_ = time.monotonic() - t0_
+        want(not said_ and took_ < 5, f"F4: a probe's hold is waited out in a moment, unannounced: {said_} {took_:.2f} s")
         want(failed_once == ["com.example:examplesvlib"] and not under[0] and "NOT REPLACED" in under[1]
              and free_[0] and pinned_jars == ["com.example:examplesvlib"],
              f"N2: a failing pin tried once; a differing jar left alone under a full gate run: {failed_once} {under} "
@@ -5187,6 +5239,26 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         prs["listed"] = [{"number": 4, "state": "closed", "merged_at": "2026-10-20T00:00:00Z", "head": {"sha": head(sl)}}]
         note, r_ = step(sa2, "examplesvlib@1.21.1:pr")
         want(r_.get("pr") == 4, f"this very commit's PR already merged (a resume): taken, not opened again: {note} {r_}")
+        # F3: a commit on the work branch that touches the ledger is not the driver's: the PR step stops for the owner;
+        # the driver's own ledger commit (recorded in its step's result) goes out
+        led_f = sl / ".port/KNOWN-ISSUES.json"
+        led_f.write_text('{"issues": [], "schema": 1}\n', encoding="utf-8")
+        led_sha = commit_paths(sl, [".port/KNOWN-ISSUES.json"], "Known issues: the round's fixes (keep-current round)")
+        try:
+            step(sa2, "examplesvlib@1.21.1:pr")
+            want(False, "a worker's ledger commit on the work branch went out")
+        except Blocked as e:
+            want("changes the known-issues ledger outside the driver" in str(e) and led_sha[:7] in str(e)
+                 and "--allow" in str(e), f"F3: a ledger edit on the work branch blocks the PR, named: {e}")
+        with State.tx(sa2) as st_:
+            st_.item("examplesvlib@1.21.1:grades" if any(x["id"] == "examplesvlib@1.21.1:grades" for x in st_.items)
+                     else "examplesvlib@1.21.1:ledger")["result"]["ledger_commits"] = [led_sha]
+        note, r_ = step(sa2, "examplesvlib@1.21.1:pr")
+        want(r_.get("pr") in (4, 9), f"F3: the driver's own ledger commit is not blocked: {note} {r_}")
+        with State.tx(sa2) as st_:
+            for x in st_.items:
+                (x.get("result") or {}).pop("ledger_commits", None)
+        git(sl, "reset", "-q", "--hard", "HEAD~1", check=True)
         prs["listed"] = []
         (sl / "Main.java").write_text("class Main { int late; }\n", encoding="utf-8")
         commit_paths(sl, ["Main.java"], "code after the gates")
@@ -6234,6 +6306,14 @@ def self_check():
             except Reset as e:
                 expect(set(e.ids) == {"examplelib@1.21.4:gates", dg} and path in str(e),
                        f"code after the gated commit ({path}) sends the gates and the dependent gate back: {e.ids} {e}")
+        git(lco, "reset", "-q", "--hard", lsha["pr"], check=True)
+        # F3 on a version branch (which never carries the ledger): a commit adding one blocks its PR for the owner
+        commit(lco, ".port/KNOWN-ISSUES.json", '{"issues": [], "schema": 1}\n')
+        try:
+            step("examplelib@1.21.4:pr")
+            expect(False, "a ledger commit on a version branch went out")
+        except Blocked as e:
+            expect("changes the known-issues ledger outside the driver" in str(e), f"F3: a version branch's ledger edit: {e}")
         git(lco, "reset", "-q", "--hard", lsha["pr"], check=True)
         git(lco, "mv", "Main.java", ".port/1.21.4/NOTES.md", check=True)
         git(lco, "commit", "-q", "-m", "move", check=True)

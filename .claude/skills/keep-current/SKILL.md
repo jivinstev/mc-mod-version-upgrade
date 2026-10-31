@@ -681,7 +681,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      and an S1/S2 the job did not fix blocks the version like any S1/S2 finding. A regrade only raises or keeps a
      grade: one that would lower it blocks the job for the owner (`/grade`) and is not applied. A ledger step blocked
      on a disproval or regrade it may not make says what the owner can do; `round.py retry` of that step then leaves
-     what it refused as it is and goes on. **To reopen** a closed one for good:
+     what it refused as it is and goes on. During a round the driver is the only writer of the head's ledger: a branch
+     about to go out as a PR (the head's work branch, or a version branch) with any other commit touching a ledger
+     blocks for the owner, naming the commit (`round.py retry <pr item> --allow` lets it through once read). **To reopen** a closed one for good:
      `known-issues.py status <ID> --set <v>=open` and `confirm <ID>`; a round never closes a version twice. Before
      any agent job on a head checkout (a single-version fork's, or a version-branch fork's head) the driver installs the
      head workflow's `--dep-jar` pins into `~/.m2`, sha256-checked (a REPLACED jar is warned about), so the worker's
