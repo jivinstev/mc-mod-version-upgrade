@@ -2041,17 +2041,24 @@ def pins_of(text):
 
 def shipped_changes(d, old, new, v):
     """What between `old` and `new` changes what the version ships or builds against: every file outside the round's
-    records, the workflow and the docs (a Java source only when its code changed, its comments and layout aside), and
-    the version's dependency pins (.port/<v>/branch.properties port_jar.*). -> the paths."""
+    records, the workflow and the docs (a Java source only when its code changed, its comments and layout aside); under
+    .port/ what fork-branches.py's jar_relevant counts -- the build script .port/branch.gradle, and the version's
+    .port/<v>/branch.properties by its build keys (build_keys) and dependency pins (port_jar.*). -> the paths."""
     def show(ref, path):
         r = git(d, "show", f"{ref}:{path}")
         return None if r.returncode else r.stdout
-    out = []
+    fb, out = mod("fb"), []
     for f in git(d, "diff", "--name-only", old, new).stdout.splitlines():
         if f == f".port/{v}/branch.properties":
-            a, b = show(old, f), show(new, f)
-            if pins_of(a or "") != pins_of(b or ""):
+            a, b = show(old, f) or "", show(new, f) or ""
+            if pins_of(a) != pins_of(b) or fb.build_keys(a) != fb.build_keys(b):
                 out.append(f)
+            continue
+        # the jar's names and contents come from .port/branch.gradle too: the two tools agree on it (measured,
+        # keep-current round 2026-10-31: a jar rename there cascaded to ten versions and seven got no release, which
+        # the library record then reported as jar-relevant changes not done)
+        if f.startswith(".port/") and fb.jar_relevant(f, v):
+            out.append(f)
             continue
         if f.startswith(NOT_SHIPPED) or ("/" not in f and f.lower().endswith(".md")):
             continue
@@ -5859,6 +5866,22 @@ def self_check():
             commit(nc_, ".port/1.21.10/REVIEW.md", "r\n", "records")
             expect(shipped_changes(str(nc_), "origin/neoforge-1.21.10", "HEAD", "1.21.10") == [],
                    "a comment, a port_taken move and records change nothing shipped")
+            top_ = base_ = head(nc_)
+            commit(nc_, ".port/KNOWN-ISSUES.json", "{}\n", "ledger")
+            commit(nc_, ".port/1.21.10/COST.md", "c\n", "cost")
+            commit(nc_, ".port/1.21.10/shipped-jar.txt", "examplemod-1.0-mc1.21.10.jar\n", "the gate's expectation")
+            commit(nc_, ".port/1.21.10/branch.properties", "port_jar.com.example\\:lib=u1\nport_taken=c\n", "taken")
+            expect(shipped_changes(str(nc_), base_, "HEAD", "1.21.10") == [],
+                   "the ledger, COST.md, shipped-jar.txt and a bookkeeping key of branch.properties ship nothing")
+            commit(nc_, ".port/1.21.10/branch.properties", "port_jar.com.example\\:lib=u1\nport_taken=c\njava_version=21\n",
+                   "a build key")
+            expect(shipped_changes(str(nc_), base_, "HEAD", "1.21.10") == [".port/1.21.10/branch.properties"],
+                   "a build key of branch.properties is a shipped change")
+            base_ = head(nc_)
+            commit(nc_, ".port/branch.gradle", "jar { archiveFileName = 'x-mc1.21.10.jar' }\n", "jar names")
+            expect(shipped_changes(str(nc_), base_, "HEAD", "1.21.10") == [".port/branch.gradle"],
+                   "the build script .port/branch.gradle (the jar's name) is a shipped change")
+            git(nc_, "reset", "-q", "--hard", top_)       # the fixture as the rest of the test expects it
 
             class _St7:
                 data = {"allow": ["push-version-branches"]}
