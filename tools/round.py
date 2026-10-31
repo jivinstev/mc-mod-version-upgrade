@@ -946,6 +946,30 @@ def disproved_lines(st):
             *([f"Name the re-pin in the comment: {REPIN}."] if repin else [])]
 
 
+def filing_lines(st):
+    """The close job's lines for what each fork's ledger step filed this round: the new findings confirmed and
+    suspected (counts and ids), "high suspected share" when the suspected outnumber the confirmed and are two or more
+    (a suspicion is not a way around a reproduction), and the suspected lines filed confirmed for want of a reason.
+    Nothing when no fork filed anything."""
+    rows = []
+    for x in st.items:
+        r = x.get("result") or {}
+        if x["step"] != "ledger" or not (r.get("added") or r.get("unreasoned")):
+            continue
+        sus = [i for i in r.get("added_suspected", []) if i in r.get("added", [])]
+        conf = [i for i in r.get("added", []) if i not in sus]
+        rows.append(f"- {x['fork']}: {len(conf)} confirmed" + (f" ({', '.join(conf)})" if conf else "")
+                    + f", {len(sus)} suspected" + (f" ({', '.join(sus)})" if sus else "")
+                    + (" -- high suspected share: say so, and why each could not be verified (its notes)"
+                       if len(sus) > len(conf) and len(sus) >= 2 else "")
+                    + (f"; {len(r['unreasoned'])} filed suspected without a reason, recorded confirmed"
+                       if r.get("unreasoned") else ""))
+    if not rows:
+        return []
+    return ["Add a section `### Findings filed this round` to the closing comment, one line per fork, as written here:",
+            *rows]
+
+
 def hand_repin_lines(st):
     """The close job's lines for sv_library_branches (nothing for a set without such a branch)."""
     rows = st.data.get("hand_repins") or []
@@ -1572,7 +1596,7 @@ def job_task(st, it):
                 f"--session-cwd {st.rdir}` (the phase marks are in round/marks.tsv), with the authors' change size per "
                 "version and the mechanical-merge share (step 6).",
                 "Add the `### Lessons for the migrator` table (step 6; a `| none | | | |` row when there is none).",
-                *harvest_lines(st), *hand_repin_lines(st), *disproved_lines(st),
+                *harvest_lines(st), *hand_repin_lines(st), *disproved_lines(st), *filing_lines(st),
                 "Close the issue (state completed) only when every item in status is ok, skipped or a blocked item "
                 "that waits on the owner and is named in the comment; a round that stopped leaves it open (step 5).",
                 *trial_lines(st),
@@ -1695,8 +1719,13 @@ def job_task(st, it):
                 f"rubric (`python3 {T / 'known-issues.py'} add --help`) at its lowest affected version (step 5; read the "
                 "entries first: a row the ledger has already is named by its ID, not added again). A row you only "
                 "suspect -- no reproduction, no version compared and no regressing line in the diff you can point at "
-                "-- adds `\"suspected\": true` to its line (the ledger marks it suspected: a later round verifies it "
-                "before fixing it); a row whose regressing line you can name is confirmed. The driver adds each "
+                "-- adds `\"suspected\": true` to its line with `\"unverified\": \"<why it could not be verified "
+                "here>\"` and `\"verify_by\": \"<what would verify it: the test, the version to compare, the "
+                "reproduction>\"` (the ledger marks it suspected, both reasons in its notes: a later round verifies it "
+                "before fixing it, and the owner sees every suspected entry still unresolved after two plans); a "
+                "suspected line without both is recorded confirmed. Suspected is not a way around a reproduction or a "
+                "comparison you can run here: run it and file what it shows. A row whose regressing line you can name "
+                "is confirmed. The driver adds each "
                 "one to the ledger and commits it. An S1 or S2 at this version blocks its merge: write its `blocking:` "
                 "line and RESULT: blocked. S3/S4 are ledgered and do not block.",
                 f"Acceptance: the changed rows have verdicts (committed on {br}); `not_ok: <n>` in the summary."]
@@ -3364,6 +3393,7 @@ def t_ledger(st, it, log):
     d = checkout(d, F["head"])
     ff_local(d, F["head"])
     sets, refused, found_new, disproved, blocked_, led_c = 0, [], [], [], [], None
+    found_sus, unreasoned = [], []          # the new ids filed suspected; the suspected lines with no reason (titles)
     # N5: what this step refused before and the owner retried it over: left as it is, never a stop again
     held, refusing = set(it.get("result", {}).get("refused_disproofs", [])), set()
     if (pathlib.Path(d) / ".port/KNOWN-ISSUES.json").is_file():
@@ -3488,11 +3518,20 @@ def t_ledger(st, it, log):
                     cmd += [f"--{k_}", str(fd.get(k_) or "")]
                 cmd += sum([["--status", f"{v}=open"] for v in vs], [])
                 cmd += sum([["--file", str(f_)] for f_ in fd.get("files") or [] if isinstance(f_, str)], [])
+                sus_ = False
                 if fd.get("suspected") is True:      # no reproduction, no version compared
-                    if readers_of(st, F)["ok"]:
-                        cmd += ["--suspected"]
+                    # why it could not be verified and what would: without both, it is filed as the defect it names
+                    why_, how_ = (" ".join(str(fd.get(k_) or "").split()) for k_ in ("unverified", "verify_by"))
+                    nt_ = cmd.index("--notes") + 1
+                    if not (why_ and how_):
+                        cmd[nt_] += "; filed suspected without a reason; recorded confirmed"
+                        unreasoned.append(title)
+                    elif readers_of(st, F)["ok"]:
+                        cmd += ["--suspected", "--unverified", why_, "--verify-by", how_]
+                        sus_ = True
                     else:                            # B1: the fork's pinned readers would reject the key
-                        cmd[cmd.index("--notes") + 1] = "Suspected (unverified): " + cmd[cmd.index("--notes") + 1]
+                        cmd[nt_] = (f"Suspected (unverified): {cmd[nt_]} Unverified: {why_.rstrip('.')}. "
+                                    f"Verify by: {how_.rstrip('.')}.")
                 try:
                     before = {e["id"] for e in ki_.read_ledger(led_path)["issues"]}
                 except ki_.Invalid:
@@ -3508,6 +3547,8 @@ def t_ledger(st, it, log):
                 titles.add(title.lower())
                 ids.add(new[0])
                 found_new.append(new[0])
+                if sus_:
+                    found_sus.append(new[0])
                 if fd.get("fixed"):
                     set_fixed(new[0], str(fd["fixed"]), x["version"], "finding")
         for x in st.items:
@@ -3593,9 +3634,12 @@ def t_ledger(st, it, log):
     note = (f"{sets} status update(s){'' if merged else ', no version merged'}" + (", pushed" if pushed else "")
             + (f"; NOT merged this round: {', '.join(unmerged)}" if unmerged else "")
             + (f"; new in the ledger: {', '.join(found_new)}" if found_new else "")
+            + (f" ({len(found_sus)} suspected: {', '.join(found_sus)})" if found_sus else "")
+            + (f"; filed suspected without a reason, recorded confirmed: {'; '.join(unreasoned)}" if unreasoned else "")
             + (f"; closed as not a defect: {', '.join(x['id'] for x in disproved)}" if disproved else "")
             + (f"; refused: {'; '.join(refused)}" if refused else ""))
     res = {"unmerged": unmerged, "refused": refused, "added": found_new, **({"disproved": disproved} if disproved else {}),
+           **({"added_suspected": found_sus} if found_sus else {}), **({"unreasoned": unreasoned} if unreasoned else {}),
            **({"ledger_commits": [led_c]} if led_c else {})}
     if blocked_:          # S4: a disproval the round may not make is the owner's (everything else is committed and pushed)
         raise Blocked(f"{note}; NOT done, the owner's to decide: {'; '.join(blocked_)}. The owner can: close it or "
@@ -4560,7 +4604,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         globals()["MIGRATOR"] = mig
         want(old_ki != new_ki and not reader_accepts(old_ki) and reader_accepts(new_ki),
              "B1: the reader check tells a known-issues.py without the keys from today's")
-        for args_ in (["--id", "SU-1", "--title", "a tint may no longer apply", "--suspected"], ["--id", "SU-2", "--title",
+        for args_ in (["--id", "SU-1", "--title", "a tint may no longer apply", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test"], ["--id", "SU-2", "--title",
                                                                                                   "a seam we saw"]):
             subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "add", "--repo", str(su), *args_, "--failure",
                             "cosmetic", "--visibility", "rare", "--reach", "normal", "--workaround", "no", "--lowest",
@@ -4653,7 +4697,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         for args_ in (["--id", "SU-3", "--title", "a crash may happen", "--failure", "crash"],
                       ["--id", "SU-4", "--title", "a menu may be unusable", "--failure", "cosmetic"],
                       ["--id", "SU-5", "--title", "a sound may be missing", "--failure", "cosmetic"]):
-            subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "add", "--repo", str(su), *args_, "--suspected",
+            subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "add", "--repo", str(su), *args_, "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test",
                             "--visibility", "rare", "--reach", "normal", "--workaround", "no", "--lowest", "1.21.1"],
                            capture_output=True, check=True)
         (su / "Fix.java").write_text("class Fix {}\n", encoding="utf-8")
@@ -4717,7 +4761,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         newf = ["add", "--title", "a new crash on load", "--failure", "crash", "--visibility", "common", "--reach",
                 "normal", "--workaround", "no", "--lowest", "1.21.1"]
         g_ok = guard([newf])
-        g_sus = guard([newf + ["--suspected"]])
+        g_sus = guard([newf + ["--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test"]])
         g_closed = guard([newf[:-1] + ["1.21.1", "--status", "1.21.1=fixed@abcdef1"]])
         g_chg = guard([["status", "SU-2", "--set", "1.21.1=wontfix:not ours"]])
         g_vb = guard([newf], kind="branches", version="1.21.4")
@@ -4836,7 +4880,9 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
             st_.item("examplesvsus@1.21.1:recheck").update(status="ok", result={
                                   "findings": [{"title": "a cursor may be drawn transparent", "failure": "cosmetic",
                                                 "visibility": "rare", "reach": "normal", "workaround": "no",
-                                                "lowest": "1.21.1", "suspected": True},
+                                                "lowest": "1.21.1", "suspected": True,
+                                                "unverified": "no client in this session",
+                                                "verify_by": "a Gate C shot of the cursor"},
                                                {"title": "the panel closes on its own", "failure": "functional",
                                                 "visibility": "common", "reach": "feature", "workaround": "yes",
                                                 "lowest": "1.21.1", "fixed": sha4}]})
@@ -4844,7 +4890,9 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         unv = [e for e in led_.values() if e["title"] == "a cursor may be drawn transparent"]
         pan = [e for e in led_.values() if e["title"] == "the panel closes on its own"]
         want(status_ == "ok" and len(unv) == 1 and "confidence" not in unv[0]
-             and unv[0]["notes"].startswith("Suspected (unverified): found by the round") and len(pan) == 1
+             and unv[0]["notes"].startswith("Suspected (unverified): found by the round")
+             and unv[0]["notes"].endswith("Unverified: no client in this session. Verify by: a Gate C shot of the cursor.")
+             and len(pan) == 1
              and pan[0]["status"] == {"1.21.1": f"fixed@{sha4}"} and sorted(res_["added"]) == sorted([unv[0]["id"], pan[0]["id"]])
              and not any("refused it" in r for r in res_["refused"]) and "new in the ledger" in note,
              f"the real sh: findings added once, in `added`, fixed@ where fixed; a suspected one, with readers that "
@@ -4854,8 +4902,30 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
             st_.item("examplesvsus@1.21.1:recheck")["result"]["findings"][0]["title"] = "a tooltip may be cut off"
         status_, note, res_, close, led_ = su_ledger()
         tip = [e for e in led_.values() if e["title"] == "a tooltip may be cut off"]
-        want(len(tip) == 1 and tip[0].get("confidence") == "suspected" and len(res_["added"]) == 1,
-             f"readers that accept it: a suspected finding is added with --suspected: {res_} {tip}")
+        want(len(tip) == 1 and tip[0].get("confidence") == "suspected" and len(res_["added"]) == 1
+             and res_.get("added_suspected") == [tip[0]["id"]] and "(1 suspected: " in note
+             and tip[0]["notes"].endswith("Unverified: no client in this session. Verify by: a Gate C shot of the cursor."),
+             f"readers that accept it: a suspected finding is added with --suspected, its reasons in notes: {res_} {tip}")
+        with State.tx(stA) as st_:
+            rj_ = job_text(st_, st_.item("examplesvsus@1.21.1:recheck"))
+        want('`"unverified": "<why it could not be verified here>"`' in rj_ and '`"verify_by": "<what would verify it' in rj_
+             and "a suspected line without both is recorded confirmed" in rj_
+             and "Suspected is not a way around a reproduction" in rj_,
+             f"B1: the re-checker is told a suspected line carries both reasons, or is recorded confirmed: {rj_[-1500:]}")
+        # B1: a suspected line without both reasons is filed CONFIRMED, and the step note says so
+        for drop_, title_ in (("verify_by", "a label may be cut off"), ("unverified", "a border may be drawn twice")):
+            with State.tx(stA) as st_:
+                fd_ = st_.item("examplesvsus@1.21.1:recheck")["result"]["findings"][0]
+                fd_.update(title=title_, unverified="no client in this session", verify_by="a Gate C shot")
+                fd_.pop(drop_)
+            status_, note, res_, close, led_ = su_ledger()
+            lab = [e for e in led_.values() if e["title"] == title_]
+            want(status_ == "ok" and len(lab) == 1 and "confidence" not in lab[0]
+                 and lab[0]["notes"].endswith("; filed suspected without a reason; recorded confirmed")
+                 and "Unverified:" not in lab[0]["notes"] and not res_.get("added_suspected")
+                 and res_.get("unreasoned") == [title_]
+                 and f"filed suspected without a reason, recorded confirmed: {title_}" in note,
+                 f"B1: a suspected finding with no {drop_}: recorded confirmed, said in the note: {note} {res_} {lab}")
         globals()["MIGRATOR"] = mig0
         want(suspected_of(su, "neoforge-1.21.1", [{"id": "SU-5"}, {"id": "SU-2"}]) == {"SU-5": "S3"}
              and suspected_of(su, "neoforge-1.21.1", [{"id": "SU-5"}], [{"fork": SU, "id": "SU-5", "severity": "S2"}])
@@ -5314,7 +5384,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         # the driver's own ledger commit (recorded in its step's result) goes out
         subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "add", "--repo", str(sl), "--title", "a tint may be "
                         "off", "--failure", "cosmetic", "--visibility", "rare", "--reach", "normal", "--workaround", "no",
-                        "--lowest", "1.21.1", "--suspected"], capture_output=True, check=True)
+                        "--lowest", "1.21.1", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test"], capture_output=True, check=True)
         led_sha = commit_paths(sl, [".port/KNOWN-ISSUES.json"], "Known issues: the round's fixes (keep-current round)")
         try:
             step(sa2, "examplesvlib@1.21.1:pr")
@@ -6683,6 +6753,21 @@ def self_check():
                == [["KI-1", "crash", "always", "normal", "no"]], "a kind is a whole word; a regrade line has five fields")
         expect(parse_summary('RESULT: ok\nfinding: {"title": "t", "lowest": "1.21.4"}\nfinding: {bad\n')["findings"]
                == [{"title": "t", "lowest": "1.21.4"}, {"invalid": "finding: {bad"}], "a finding line: JSON, or marked invalid")
+        # B2: the close says per fork what was filed confirmed and suspected, and flags a high suspected share
+        ns_ = lambda items: type("St", (), {"items": items})
+        fs_ = ns_([
+            {"fork": "o/a", "step": "ledger", "result": {"added": ["A-1", "A-2", "A-3"], "added_suspected": ["A-2", "A-3"],
+                                                         "unreasoned": ["t"]}},
+            {"fork": "o/b", "step": "ledger", "result": {"added": ["B-1", "B-2"], "added_suspected": ["B-2"]}},
+            {"fork": "o/c", "step": "ledger", "result": {"added": []}},
+            {"fork": "o/d", "step": "backlog", "result": {"added": ["D-1"]}}])
+        fl_ = filing_lines(fs_)
+        expect(fl_ == ["Add a section `### Findings filed this round` to the closing comment, one line per fork, as written here:",
+                       "- o/a: 1 confirmed (A-1), 2 suspected (A-2, A-3) -- high suspected share: say so, and why each could "
+                       "not be verified (its notes); 1 filed suspected without a reason, recorded confirmed",
+                       "- o/b: 1 confirmed (B-1), 1 suspected (B-2)"]
+               and filing_lines(ns_(fs_.items[2:])) == [],
+               f"B2: findings filed per fork, confirmed vs suspected, the high share flagged; nothing filed, no lines: {fl_}")
         # the plan's grade overrides are the owner's: t_grades applies a /grade below S2 on a crash (--owner), which
         # known-issues.py refuses from anyone else
         gd = tmp / "grades-fork"
@@ -6861,7 +6946,7 @@ def self_check():
             subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "add", "--repo", str(lr), "--id", "X-7",
                             "--title", "a tint may be off", "--failure", "cosmetic", "--visibility", "rare", "--reach",
                             "normal", "--workaround", "no", "--lowest", "1.21.1", "--status", "1.21.1=open", "--status",
-                            "1.21.4=open", "--suspected"], capture_output=True, check=True)
+                            "1.21.4=open", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test"], capture_output=True, check=True)
             git(lr, "add", "-A"); git(lr, "commit", "-qm", "X-7")
 
             class _St6(_St4):
@@ -6881,7 +6966,7 @@ def self_check():
             subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "add", "--repo", str(lr), "--id", "X-8",
                             "--title", "a seam may show", "--failure", "cosmetic", "--visibility", "rare", "--reach",
                             "normal", "--workaround", "no", "--lowest", "1.21.4", "--status",
-                            "1.21.4=wontfix:not a defect (disproved, no-regression): by hand", "--suspected"],
+                            "1.21.4=wontfix:not a defect (disproved, no-regression): by hand", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test"],
                            capture_output=True, check=True)
             git(lr, "add", "-A"); git(lr, "commit", "-qm", "X-8")
 

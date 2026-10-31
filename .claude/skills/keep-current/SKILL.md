@@ -804,7 +804,10 @@ it small, so the orchestration is a tool, which replaces the four rules above:
    added with `--suspected`** (a lesson harvest's or a reader's suspicion: "may no longer ...", "not verified in a
    client"; a later round verifies it first, step 3); one with a reproduction, a failing gate or test, a version compared,
    or a reviewer who read the diff and can point at the regressing line is confirmed (no flag). On the driver such a
-   `finding:` line carries `"suspected": true` and the ledger step adds it with `--suspected`. At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
+   `finding:` line carries `"suspected": true` with `"unverified"` (why it could not be verified) and `"verify_by"` (what
+   would), and the ledger step adds it with `--suspected --unverified --verify-by`; a suspected line without both is
+   recorded confirmed (said in the step's note), and the closing comment counts each fork's findings confirmed and
+   suspected ("high suspected share" when the suspected outnumber the confirmed and are two or more). At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
    reopens it (fixed at its lowest open version, only that fix cascaded, by step 3's rule: from a version branch, or
    `--port-ref fix/<ID>` at the head's version when the plan does not take the authors' code); anything else stays in the
    ledger with its lowest version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap
