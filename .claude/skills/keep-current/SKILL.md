@@ -571,8 +571,11 @@ it small, so the orchestration is a tool, which replaces the four rules above:
    remote set-head origin -a`); on a version-branch fork, **the remote each version's upstream freeze names** (`upstream=<remote>/<branch>`: without it the gates stop
    with exit 19; it prints the fetch-only `git remote add`); on a single-version fork, **a remote fetching its authors'
    repository** as the set's `.github/weekly-plan.json` names it (`upstream`, read from the clones given, so pass the
-   library's too), which `port-sync.py` merges from (missing, with the fetch-only `git remote add`). A shallow single-branch clone of a version branch has its other version branches
-   read from origin by name (`git ls-remote`), so their JDK and libEGL are asked too. Install or set what it names that the session can (apt, an export, the git commands) and run it again; anything
+   library's too), which `port-sync.py` merges from (missing, with the fetch-only `git remote add`). First it makes each clone whole as `round.py init` does
+   later (origin's `neoforge-*` branches fetched as remote-tracking refs, the clone unshallowed; nothing when it has them
+   all): a cloud session's clone is of the fork's GitHub default branch, which can be the authors' own branch, and
+   without the port's branches it reads as an unported tree -- no 26.x JDK, no freeze remote, no `weekly-plan.json` (read
+   from HEAD, `origin/HEAD`, then the `neoforge-*` branches). A clone it cannot make whole is `MISSING`. Install or set what it names that the session can (apt, an export, the git commands) and run it again; anything
    left missing other than a clone is reported in the first comment and the versions that need it wait.
 1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out
    round/frozen.json --decisions-dir round/decisions`. It reads GitHub through `GITHUB_TOKEN` when that is set (REST), else
