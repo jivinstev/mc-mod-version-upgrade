@@ -2306,12 +2306,12 @@ def t_gates(st, it, log):
     au = seg_item(st, it, "authors")
     up = au["extra"].get("upstream_commit") if au else None
     gated, at = head(d), time.time()
-    # the head's pinned jars (port_jar.* in .port/<v>/branch.properties) into ~/.m2 as its Port CI does, sha256-checked
-    # (a version branch's go in through fork-port.py); a head that pins nothing is untouched
-    for ok_, m_ in mod("ld").install_pins(d, v):
+    # the jars the head's Port CI installs before it builds (its workflow's --dep-jar steps) into ~/.m2, sha256-checked
+    # (a version branch's pins go in through fork-port.py); a head whose workflow pins nothing is untouched
+    for ok_, m_ in mod("ld").install_workflow_pins(d):
         if not ok_:
             raise StepError(f"a pinned jar could not be put into mavenLocal before the gates: {m_}")
-        say_to(log)("round: pins:", m_)
+        say_to(log)("round: pins:" + (" WARNING" if "REPLACED" in m_ else ""), m_)
     if ci_record(d):                # the PR's CI is the gate of record (both kinds): build and Gate A/B here
         for cmd in sv_gate_cmds(d, up, gatec=""):
             sh(st, it, cmd, log)
@@ -6191,17 +6191,16 @@ def self_check():
                                   "step": "gates"}, log_)
                 expect(pinned_ == [], f"a single-version head that pins nothing installs nothing: {pinned_}")
                 seen_cmds.clear()
-                (sv_ / ".port/1.21.1").mkdir(parents=True, exist_ok=True)
-                (sv_ / ".port/1.21.1/branch.properties").write_text(
-                    "substitute.com.example\\:examplelib=com.example:examplelib:1.0-mc1.21.1\n"
-                    "port_jar.com.example\\:examplelib=https://github.com/owner/examplelib/releases/download/t/a.jar "
-                    + "a" * 64 + "\n", encoding="utf-8")
+                wf_keep = (sv_ / PORT_CI_WF).read_text(encoding="utf-8")
+                (sv_ / PORT_CI_WF).write_text(wf_keep + mod("pc").dep_jars(
+                    ["owner/examplelib@examplelib-1.0-mc1.21.1/examplelib-1.0.jar=com.example:examplelib:1.0"],
+                    sha_of=lambda u_: "a" * 64) + "\n", encoding="utf-8")
                 note, r_ = t_gates(_St11(), {"id": "examplemod@1.21.1:gates", "fork": "o/examplemod", "version": "1.21.1",
                                              "step": "gates"}, log_)
                 ran_ = [c for c in seen_cmds]
-                expect(pinned_ == [("com.example:examplelib", "1.0-mc1.21.1", "https://github.com/owner/examplelib/releases/"
-                                    "download/t/a.jar " + "a" * 64)],
-                       f"a single-version head's pinned jar goes into mavenLocal before its gates: {pinned_}")
+                expect(pinned_ == [("com.example:examplelib", "1.0", "https://github.com/owner/examplelib/releases/"
+                                    "download/examplelib-1.0-mc1.21.1/examplelib-1.0.jar " + "a" * 64)],
+                       f"a single-version head's Port CI --dep-jar jar goes into mavenLocal before its gates: {pinned_}")
                 ld_.install_pin = lambda *a_: (False, "x.jar has sha256 b, the pin says a")
                 try:
                     t_gates(_St11(), {"id": "examplemod@1.21.1:gates", "fork": "o/examplemod", "version": "1.21.1",
@@ -6209,6 +6208,7 @@ def self_check():
                     expect(False, "a pin that cannot be installed must stop the gates step")
                 except StepError as e_:
                     expect("mavenLocal" in str(e_), f"a pin that cannot be installed stops the gates step: {e_}")
+                (sv_ / PORT_CI_WF).write_text(wf_keep, encoding="utf-8")
                 expect(r_.get("ci_record") and len(ran_) == 2 and all("ci-gates.py" in " ".join(c) for c in ran_)
                        and all(c[c.index("--gatec") + 1] == "" for c in ran_)
                        and not (sv_ / ".port/1.21.1/GATES.md").exists(),

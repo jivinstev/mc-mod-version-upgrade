@@ -304,7 +304,8 @@ def install_pin(ga, ver, value):
     url, sha = value.split()
     g, a = ga.split(":")
     have = pathlib.Path.home() / ".m2/repository" / g.replace(".", "/") / a / ver / f"{a}-{ver}.jar"
-    if have.is_file() and hashlib.sha256(have.read_bytes()).hexdigest() == sha:
+    old = hashlib.sha256(have.read_bytes()).hexdigest() if have.is_file() else None
+    if old == sha:
         return True, f"{ga}:{ver} already in mavenLocal (sha256 ok)"
     try:
         data = _get(url)
@@ -314,7 +315,9 @@ def install_pin(ga, ver, value):
     if got != sha:
         return False, f"{url} has sha256 {got}, the pin says {sha}"
     install_m2(ga, ver, data)
-    return True, f"{ga}:{ver} <- {url} (sha256 ok)"
+    # a different jar at the coordinate is said loudly: a stale download, or a jar something else put there on purpose
+    return True, f"{ga}:{ver} <- {url} (sha256 ok)" + (f"; REPLACED {have.as_posix()} (sha256 {old[:12]} -> {sha[:12]})"
+                                                       if old else "")
 
 
 def install_m2(ga, ver, data):
@@ -329,12 +332,15 @@ def install_m2(ga, ver, data):
 
 
 def install_pins(repo, target, pin_jar=None):
-    """Install the jars version `target` pins into ~/.m2 before a local build, as its Port CI's --dep-jar steps do
-    (fork-branches.py remap_ci_args): each port_jar.<g:a>=<url> <sha256> of .port/<target>/branch.properties under the
-    coordinate its substitute.<g:a> names, the download sha256-checked and a jar already there with that sha256 kept
-    (install_pin). Every kind of fork: a file with no pin, or no file, installs nothing. Without it a fresh machine's
-    compileClasspath could not resolve the pinned library at every dependent version (measured, keep-current round
-    2026-10-31: each worker installed the jar by hand and re-ran). -> [(ok, message)], one per pin."""
+    """Install the jars version branch `target` pins into ~/.m2 before a local build: each port_jar.<g:a>=<url>
+    <sha256> of .port/<target>/branch.properties, under the coordinate its substitute.<g:a> names, the download
+    sha256-checked and a jar already there with that sha256 kept (install_pin). These are the pins the branch's Port
+    CI installs too, but not exactly its set: CI installs what its workflow's --dep-jar steps name (fork-branches.py
+    remap_ci_args swaps a step's release for the pin when it is a GitHub release URL with a substitute coordinate), so
+    this can also install a pin no step names. A file with no pin, or no file, installs nothing. Without it a fresh
+    machine's compileClasspath could not resolve the pinned library at every dependent version (measured, keep-current
+    round 2026-10-31: each worker installed the jar by hand and re-ran). A head (single-version) branch pins in its
+    workflow instead: install_workflow_pins. -> [(ok, message)], one per pin."""
     tp = props_file(repo, target)
     text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
     got = {}
@@ -351,6 +357,31 @@ def install_pins(repo, target, pin_jar=None):
         g, a, ver = coord.split(":", 2)
         out.append((pin_jar or install_pin)(f"{g}:{a}", ver, pin))
     return out
+
+
+DEP_JAR_SHA = re.compile(DEP_JAR.pattern + r'\n          echo "([0-9a-f]{64})  ')
+
+
+def workflow_pins(workflow):
+    """{group:artifact: (version, "<url> <sha256>")} for each sibling release jar the workflow's --dep-jar steps
+    (tools/port-ci.py dep_jars) put into mavenLocal, with the sha256 the step checks."""
+    out = {}
+    for m in DEP_JAR_SHA.finditer(workflow or ""):
+        art, ver, path, repo, tag, asset, sha = m.groups()
+        g = path[:-len(f"/{art}/{ver}")].replace("/", ".")
+        out[f"{g}:{art}"] = (ver, f"https://github.com/{repo}/releases/download/{tag}/{asset} {sha}")
+    return out
+
+
+def install_workflow_pins(repo, pin_jar=None):
+    """Install into ~/.m2 what a head branch's Port CI installs before it builds: each --dep-jar step of its
+    .github/workflows/port-ci.yml (the sibling release jar at the step's coordinate, sha256-checked as the step checks
+    it), through install_pin. A single-version fork pins its library there, not in .port/<mc>/branch.properties; a
+    workflow with no such step, or none, installs nothing. Its --dep-jar-variant legs are CI's alone. -> [(ok,
+    message)], one per step."""
+    wf = pathlib.Path(repo) / ".github/workflows/port-ci.yml"
+    pins = workflow_pins(wf.read_text(encoding="utf-8") if wf.is_file() else "")
+    return [(pin_jar or install_pin)(ga, ver, val) for ga, (ver, val) in sorted(pins.items())]
 
 
 def mr_files(project):
@@ -2035,7 +2066,9 @@ def _check_install_pins(expect):
                 want.parent.mkdir(parents=True, exist_ok=True)
                 want.write_bytes(b"a stale jar")
                 r3 = install_pins(repo, mc)
-                expect(r3 and r3[0][0] and want.read_bytes() == jar, f"a jar there with another sha256 is replaced: {r3}")
+                expect(r3 and r3[0][0] and want.read_bytes() == jar and f"REPLACED {want.as_posix()} (sha256 "
+                       f"{hashlib.sha256(b'a stale jar').hexdigest()[:12]} -> {sha[:12]})" in r3[0][1],
+                       f"a jar there with another sha256 is replaced, and said so: {r3}")
             bad_ = pathlib.Path(td) / "bad"
             (bad_ / ".port/1.21.1").mkdir(parents=True)
             (bad_ / ".port/1.21.1/branch.properties").write_text(
@@ -2044,6 +2077,28 @@ def _check_install_pins(expect):
             r4 = install_pins(bad_, "1.21.1")
             expect(len(r4) == 1 and not r4[0][0] and "sha256" in r4[0][1]
                    and not (home / ".m2/repository/com/example/other").exists(), f"a sha256 mismatch installs nothing: {r4}")
+            # a single-version head pins its library in its Port CI workflow (port-ci.py --dep-jar), not in .port/
+            import importlib.util as _iu
+            _sp = _iu.spec_from_file_location("port_ci_for_layer_deps", ROOT / "tools/port-ci.py")
+            pc = _iu.module_from_spec(_sp)
+            _sp.loader.exec_module(pc)
+            head_ = pathlib.Path(td) / "head"
+            (head_ / ".github/workflows").mkdir(parents=True)
+            (head_ / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+            (head_ / ".github/workflows/port-ci.yml").write_text(
+                "jobs:\n  gates:\n    steps:\n" + pc.dep_jars(
+                    ["owner/examplelib@examplelib-2.0-mc1.21.1/examplelib-2.0.jar=com.example:examplelib:2.0"],
+                    sha_of=lambda u: sha) + "\n", encoding="utf-8")
+            del fetched[:]
+            w1 = install_workflow_pins(head_)
+            hw = home / ".m2/repository/com/example/examplelib/2.0/examplelib-2.0.jar"
+            expect(len(w1) == 1 and w1[0][0] and hw.read_bytes() == jar and fetched == [
+                       "https://github.com/owner/examplelib/releases/download/examplelib-2.0-mc1.21.1/examplelib-2.0.jar"]
+                   and install_pins(head_, "1.21.1") == [],
+                   f"a single-version head: its workflow's --dep-jar installed at the step's coordinate: {w1} {fetched}")
+            (head_ / ".github/workflows/port-ci.yml").write_text("jobs: {}\n", encoding="utf-8")
+            expect(install_workflow_pins(head_) == [] and install_workflow_pins(pathlib.Path(td) / "nofile") == [],
+                   "a workflow with no --dep-jar step, or none, installs nothing")
             none_ = pathlib.Path(td) / "nopins"
             (none_ / ".port/1.21.1").mkdir(parents=True)
             (none_ / ".port/1.21.1/branch.properties").write_text("upstream_commit=abc\n", encoding="utf-8")

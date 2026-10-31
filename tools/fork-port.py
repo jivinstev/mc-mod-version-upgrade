@@ -33,8 +33,9 @@ Stages, each logged as one line and skipped with a reason when it does not apply
            (1.21.2 recipes and item definitions, 26.2 entity predicates, 26.3 data, GeckoLib 5 asset paths) written into
            the branch's own src/main/resources
   (pins)   before the first stage that builds (a resume --from-stage measure too): each jar .port/<t>/branch.properties
-           pins (port_jar.*, under its substitute. coordinate) into ~/.m2 as the version's Port CI does, sha256-checked,
-           one already there with that sha256 kept (layer-deps.py install_pins; a pin that cannot be installed stops, exit 10)
+           pins (port_jar.*, under its substitute. coordinate) into ~/.m2, sha256-checked, one already there with that
+           sha256 kept and a different one replaced and said (a WARNING line, and the summary's "pins") (layer-deps.py
+           install_pins; a pin that cannot be installed stops, exit 10)
   stage    `./gradlew compileJava` to stage Minecraft; while createMinecraftArtifacts fails on the access transformer,
            fix-access-transformer.py --overrides-from <log> on the branch's AT (bounded: 4 rounds)
   moves    build-class-move-map.py between the parent version's staged jars and this one's -> .port/<t>/moves.generated.tsv,
@@ -1924,8 +1925,8 @@ class Run:
         return {"done": ", ".join(did) or "on its branch"}
 
     def install_pins(self):
-        """The version's pinned jars (port_jar.* in .port/<t>/branch.properties) into ~/.m2, sha256-checked, as its Port
-        CI does before it builds: a run resumed past setup (--from-stage measure) never ran layer-deps.py resolve, and
+        """The version's pinned jars (port_jar.* in .port/<t>/branch.properties) into ~/.m2, sha256-checked
+        (layer-deps.py install_pins: the pins its Port CI's --dep-jar steps are rendered from): a run resumed past setup (--from-stage measure) never ran layer-deps.py resolve, and
         compileClasspath could not resolve the pinned library (measured, keep-current round 2026-10-31: at every
         dependent version from 1.21.4 up, each worker installed the jar by hand)."""
         got = load("layer_deps", "layer-deps.py").install_pins(self.repo, self.t)
@@ -1935,7 +1936,9 @@ class Run:
                     "choices": [f"fix the pin in .port/{self.t}/branch.properties (layer-deps.py resolve --port-release), "
                                 "or put the jar there by hand, then resume"]}
         for _ok, m in got:
-            self.say("pins", m)
+            self.say("pins", ("WARNING " if "REPLACED" in m else "") + m)
+        if got:              # in the run's summary too, a jar replaced at its coordinate most of all
+            self.summary["pins"] = [m for _ok, m in got]
         return {"done": f"{len(got)} pinned jar(s) in mavenLocal"}
 
     def data_forms(self):
@@ -2843,6 +2846,21 @@ def self_check():
                     expect(stop is None and order[:2] == [("pins", "com.example:examplelib:1.0-mc1.21.4 already in mavenLocal "
                                                                    "(sha256 ok)"), ("measure", "ran")],
                            f"--from-stage measure: the pinned jar is checked into mavenLocal before the build: {order}")
+            # a different jar at the coordinate is replaced, and said loudly: a WARNING line and the summary's "pins"
+            have_.write_bytes(b"a stale jar")
+            good_ = pathlib.Path(d) / "good.jar"
+            good_.write_bytes(jar_)
+            props_.write_text(pin_.replace("https://github.com/owner/examplelib/releases/download/t/a.jar",
+                                           good_.resolve().as_uri()), encoding="utf-8")
+            run = Run(a_)
+            order = []
+            run.say = lambda st_, msg: order.append((st_, msg))
+            run.s_measure = lambda: {"done": "0 error(s)", "errors": 0, "this_run": True}
+            stop = execute(run, ["measure"])
+            expect(stop is None and have_.read_bytes() == jar_ and order[0][0] == "pins"
+                   and order[0][1].startswith("WARNING ") and "REPLACED" in order[0][1]
+                   and any("REPLACED" in m_ for m_ in run.summary.get("pins", [])),
+                   f"a replaced jar is a WARNING line and in the summary: {order} {run.summary.get('pins')}")
         finally:
             for k, v in keep_env.items():
                 if v is None:
