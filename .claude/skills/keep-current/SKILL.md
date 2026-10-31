@@ -650,6 +650,22 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      into the head too, by its own PR. Work the versions in ladder order, oldest affected first.
      `fork-branches.py untaken --repo DIR --upstream <remote>/<branch>` lists, at any point, the authors' code the head
      has that a version has not taken: after a `head_cascade: false` round it must still list what the plan listed.
+   - **A selected entry that is SUSPECTED** (every kind of fork; `"confidence": "suspected"` in the ledger, `S3?` in
+     `known-issues.py list`, "(suspected)" on the plan: added without a reproduction or a version comparison, step 5) is
+     verified before it is fixed: compare the version below (a version branch), the authors' original source on their
+     branch and the target version's own API sources, or write the failing test. It reproduces: it is confirmed
+     (`known-issues.py confirm ID --evidence TEXT`), fixed as usual. An **S3 or S4** proven NOT a defect -- `no-regression`
+     (the original never had the behaviour), `api-unchanged` (the target version's API does not change it) or
+     `test-passes` (a test of the behaviour passes) -- is closed without asking the owner: `known-issues.py disprove ID
+     --version V --kind KIND --evidence TEXT` (the evidence cites a commit sha, a `path:line` or a test name; refused for
+     a confirmed entry, an S1/S2 -- an override's grade counts -- and vague evidence) sets that version
+     `wontfix:not a defect (disproved, KIND): TEXT` and records the disproval; nothing else is committed for it. An S1 or
+     S2, or one the worker cannot decide, is as any selected issue: fixed, or a stop that names what to ask. **On the
+     driver** the backlog job's text says so for each suspected entry it was given (a confirmed entry's job is as
+     before): its `fixed:` line confirms the entry (the ledger step runs `confirm`); for a disproval it runs `disprove
+     ... --ref origin/<head> --check` and writes `disproved: <ID> <kind> <evidence>` with `RESULT: ok`; the ledger step
+     runs `disprove` on the head at the job's version and commits it with the round's statuses, and the closing comment
+     lists each one under `### Closed as not a defect (suspected entries)`, so the owner sees it after the fact.
 4. **Per version, in ladder order**, once its code is in -- first `python3 tools/port-cost.py mark --fork <owner/repo>
    --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks; the
    driver writes it, with `--phase`, at every item boundary).
@@ -756,7 +772,11 @@ it small, so the orchestration is a tool, which replaces the four rules above:
 5. **New findings.** Grade each with `known-issues.py add` (the rubric's inputs, `--lowest` its lowest affected
    version, `--file` each file it is in, `--pattern` a text whose presence means the defect is there, so a later
    `known-issues.py lowest` finds it on other branches with git alone); a WARNING that it may repeat an entry means read that entry first and record
-   the finding there when it is the same defect. At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
+   the finding there when it is the same defect. **A finding added without a reproduction or a version comparison is
+   added with `--suspected`** (a lesson harvest's or a reader's suspicion: "may no longer ...", "not verified in a
+   client"; a later round verifies it first, step 3); one with a reproduction, a failing gate or test, a version compared,
+   or a reviewer who read the diff and can point at the regressing line is confirmed (no flag). On the driver such a
+   `finding:` line carries `"suspected": true` and the ledger step adds it with `--suspected`. At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
    reopens it (fixed at its lowest open version, only that fix cascaded, by step 3's rule: from a version branch, or
    `--port-ref fix/<ID>` at the head's version when the plan does not take the authors' code); anything else stays in the
    ledger with its lowest version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap
