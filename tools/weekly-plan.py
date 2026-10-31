@@ -56,9 +56,9 @@ head branch, install refuses (exit 3) unless --default-branch-too, which also co
 default branch (a local commit; push both). Nothing is pushed. An unchanged file set makes no commit. --trailer adds
 a `Key: value` line to the end of the commit message (an agent passes its session's attribution trailers).
 Install builds the config from its flags only, so a re-run drops what it is not given again: when a config exists,
-each per-fork `ledger_issues` and `depends_on`, and the set's `allow`, that it holds and the new flags
-leave out is warned about on stderr, naming the flag to re-pass; --keep-existing keeps those values instead. Without
-an existing config, or with every value re-passed, the output is as before.
+each per-fork `ledger_issues` and `depends_on`, and the set's `allow` and `plan_owner`, that it holds and the new
+flags leave out is warned about on stderr, naming the flag to re-pass; --keep-existing keeps those values instead.
+Without an existing config, or with every value re-passed, the output is as before.
 
 ROUND-TASK prints the Wednesday round's scheduled task as JSON for the skill to create (create_trigger): its name, the
 cron `CRON_TZ=America/Los_Angeles <minute> 8 * * 3` (minute jittered below 08:30 from the name), a fresh session per
@@ -412,14 +412,28 @@ def install(a, say=print, repo_info=None):
     resolve_upstreams(forks, info)
     owner_login = forks[0]["repo"].split("/")[0]
     otype = a.owner_type
-    if not a.plan_owner and not otype:
+    old, warns = None, []
+    if (repo / CONFIG).is_file():
+        try:
+            old = json.loads((repo / CONFIG).read_text(encoding="utf-8"))
+        except ValueError as e:
+            print(f"weekly-plan: warning: the existing {CONFIG} is not JSON ({e}): nothing in it is carried over",
+                  file=sys.stderr)
+    plan_owner = a.plan_owner
+    op = old.get("plan_owner") if isinstance(old, dict) else None
+    if op and not plan_owner:        # like the per-fork values below: kept with --keep-existing, else warned about
+        warns.append(f"the existing {CONFIG} has plan_owner {op}, which this run "
+                     + ("keeps (--keep-existing)" if a.keep_existing else f"drops: re-pass --plan-owner {op}, or rerun "
+                                                                           "with --keep-existing"))
+        plan_owner = op if a.keep_existing else None
+    if not plan_owner and not otype:
         try:
             otype = info(forks[0]["repo"])["owner"]["type"]
         except Exception as e:
             raise Fail(f"cannot tell whether {forks[0]['repo']} is owned by a user or an organization ({e}): pass "
                        "--plan-owner LOGIN (the person running setup), or --owner-type user")
     try:
-        k.resolve_owner(a.plan_owner, owner_login, otype or "")
+        k.resolve_owner(plan_owner, owner_login, otype or "")
     except k.Invalid as e:
         raise Fail(f"REFUSED: {e}")
     mrepo = a.migrator_repo or migrator_repo()
@@ -429,18 +443,12 @@ def install(a, say=print, repo_info=None):
              "depends_on": per_fork(a.depends_on, forks, "--depends-on")}
 
     def build(fl, allow):
-        return make_config(copy.deepcopy(forks), a.plan_owner, a.budget, mrepo, allow=allow, replace_tasks=a.replace_task
+        return make_config(copy.deepcopy(forks), plan_owner, a.budget, mrepo, allow=allow, replace_tasks=a.replace_task
                            or [], migrator_sha=sha, **fl)
     allow = a.allow or []
     if (repo / CONFIG).is_file():
-        try:
-            old = json.loads((repo / CONFIG).read_text(encoding="utf-8"))
-        except ValueError as e:
-            old = None
-            print(f"weekly-plan: warning: the existing {CONFIG} is not JSON ({e}): nothing in it is carried over",
-                  file=sys.stderr)
-        warns, allow = carried_over(old, forks, flags, allow, build, keep=a.keep_existing)
-        for w in warns:
+        more, allow = carried_over(old, forks, flags, allow, build, keep=a.keep_existing)
+        for w in warns + more:
             print(f"weekly-plan: warning: {w}", file=sys.stderr)
     cfg = build(flags, allow)
     cfg_text = json.dumps(cfg, indent=2, sort_keys=True) + "\n"
@@ -487,7 +495,7 @@ def install(a, say=print, repo_info=None):
     if also:
         c = commit_to(repo, also, {WORKFLOW: wf}, msg)
         say(f"weekly-plan: {WORKFLOW} on {also}: " + (f"committed {c[:12]}" if c else "unchanged"))
-    say(f"weekly-plan: plan issues go to {k.mention(k.resolve_owner(a.plan_owner, owner_login, otype or ''))} on "
+    say(f"weekly-plan: plan issues go to {k.mention(k.resolve_owner(plan_owner, owner_login, otype or ''))} on "
         f"{forks[0]['repo']}; the round: {cfg['round']['cron']}. Push: git push origin {head}" + (f" {also}" if also else ""))
     for f in forks:
         if f.get("upstream_source"):
@@ -1311,6 +1319,16 @@ def self_check():
                and c6["forks"][2]["depends_on"] == ["o/lib", "o/mid"]
                and "drops" not in o and o.count("keeps (--keep-existing)") == 2,
                f"--keep-existing: the old values the flags leave out are kept, a flag given still wins: {o}")
+        # plan_owner too (weekly round 2026-10-31: --keep-existing without --plan-owner fell back to the repo's owner)
+        argv4 = [x for x in argv3 if x not in ("--plan-owner", "someone")]
+        rc, o = inst("--keep-existing", *full_flags, argv=argv4)
+        c7 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
+        expect(rc == 0 and c7.get("plan_owner") == "someone" and "plan_owner someone, which this run keeps" in o
+               and "@someone" in o, f"--keep-existing keeps the existing plan_owner: {rc} {c7.get('plan_owner')} {o}")
+        rc, o = inst(*full_flags, argv=argv4, otype="User")
+        c8 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
+        expect(rc == 0 and "plan_owner" not in c8 and "re-pass --plan-owner someone" in o,
+               f"without --keep-existing it is dropped as before, and the warning names the flag: {rc} {o}")
 
         # the steps, offline: a library fork with a version branch is too big a fixture here (fork-branches'
         # own self-check covers cascade --plan); a single-version fork set of two, upstream with new commits
@@ -1689,7 +1707,7 @@ def build_parser():
     p.add_argument("--default-branch-too", action="store_true",
                    help="also commit the workflow to the default branch when that is not the head branch")
     p.add_argument("--keep-existing", action="store_true",
-                   help="keep the existing config's allow, ledger_issues and depends_on this run's flags "
+                   help="keep the existing config's allow, plan_owner, ledger_issues and depends_on this run's flags "
                         "do not set (without it, each one dropped is warned about on stderr)")
     p.add_argument("--no-commit", action="store_true"); p.add_argument("--print", action="store_true")
     p = sub.add_parser("round-task", help="the Wednesday round's scheduled task, as JSON")

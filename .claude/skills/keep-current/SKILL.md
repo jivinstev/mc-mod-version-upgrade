@@ -853,8 +853,8 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    never a default -- with none the round asks before every push, pre-release and merge. `automerge` follows
    `merge-fork-prs`. A dependent depends on the library unless `--depends-on` says otherwise. Moving from an old fleet
    file: pass its `upstream` and `ledger_issues` values as these flags, once; after that the config is
-   the only source. **Re-running setup rebuilds the config from the flags alone:** for each `allow`, `ledger_issues`,
-   or `depends_on` the existing config holds and the new flags leave out, `install` warns on stderr and
+   the only source. **Re-running setup rebuilds the config from the flags alone:** for each `allow`, `plan_owner`,
+   `ledger_issues` or `depends_on` the existing config holds and the new flags leave out, `install` warns on stderr and
    names the flag to re-pass; re-pass it, or add `--keep-existing` to keep every such value (a flag given still wins).
    Read the warnings before pushing. An agent passes its session's attribution trailers with `--trailer` (one per line), so the commit
    carries them; without it, amend the commit's message before pushing. It commits `.github/workflows/weekly-plan.yml`

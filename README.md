@@ -359,8 +359,8 @@ listed ledger issues are always allowed (that is how the round reports), nothing
 ever is, and anything else it asks on the plan issue. Its closing comment ends with a `### Lessons for the migrator` table -- one row per candidate lesson (version, symptom, the fork's fix commit, why any port to that version would meet it), for single-version and version-branch forks alike; text in the comment, not something the tools do. A later session with write access here runs `python3 tools/propose-learnings.py --from-plan owner/repo#N [--out FILE]`, which turns that block into a checklist (evidence links, the catalogue entries each symptom already matches) and writes nothing to this repository: the curator verifies each row and writes the catalogue entries. The plan workflow runs this repository's tools pinned at a
 commit (`migrator_sha` in the config), so a plan is reproducible; the round clones current main, so it gets the
 tools' fixes. Both are installed, and re-installed, only by keep-current's setup (`> Set up the weekly round`); a
-re-install rebuilds the config from its flags and warns, naming the flag, for each value it would drop
-(`--keep-existing` keeps them).
+re-install rebuilds the config from its flags and warns, naming the flag, for each value it would drop -- `plan_owner`
+included (`--keep-existing` keeps them).
 
 | Skill | In Claude Code | From the command line |
 |---|---|---|
