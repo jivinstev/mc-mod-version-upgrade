@@ -963,7 +963,9 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    The environment needs the build hosts in its allowed domains (`cloud/allowed-domains.txt`), and what the round's
    gates run on: JDK 21 and JDK 25 (every 26.x version builds and boots on 25), `libegl1` (the 26.3 client) and an
    `XDG_RUNTIME_DIR`, in the environment's setup script; `python3 tools/round-preflight.py --fork <owner/repo>=<clone> ...`
-   says what is missing (the round runs it first).
+   says what is missing (the round runs it first). The round's tools never prompt for credentials (they read origin
+   with `GIT_TERMINAL_PROMPT=0`; preflight's fetch is bounded, `MMVU_FETCH_TIMEOUT` seconds, default 1800): a clone
+   over HTTPS needs a credential helper or a token git can use, or each read of origin fails instead of waiting.
 
 ## Evidence that this is needed (and the mistake it prevents)
 

@@ -114,31 +114,67 @@ def fork_versions(repo, heads=origin_heads):
 
 
 LIST_TIMEOUT = 60           # git ls-remote: the preflight's one read of origin before (origin_heads)
-FETCH_TIMEOUT = 1800        # a whole fetch (an unshallow of a large fork); a stalled transfer ends sooner (lowSpeed*)
+FETCH_TIMEOUT = 1800        # a whole fetch (an unshallow of a large fork); a stalled transfer ends sooner (lowSpeed*,
+                            # HTTPS only: ssh ignores it). MMVU_FETCH_TIMEOUT (seconds) overrides it
+FETCH_TRIES = 5             # a fetch another process's ref lock refused is tried again (round.py's git(), 7b60750e)
+# another git process holds the ref, index or shallow lock: tried again, never a failure (tools/round.py's git() too)
+LOCKED_REF = re.compile(r"cannot lock ref|index\.lock|Unable to create .*\.lock|shallow file has changed", re.I)
 
 
-def net_git(repo, args, timeout):
+def fetch_timeout(env=None):
+    """MMVU_FETCH_TIMEOUT (whole seconds, above 0), else FETCH_TIMEOUT."""
+    v = (os.environ if env is None else env).get("MMVU_FETCH_TIMEOUT", "")
+    return int(v) if v.strip().isdigit() and int(v) > 0 else FETCH_TIMEOUT
+
+
+def bounded(cmd, timeout, grace=10, **kw):
+    """(rc, how) of cmd run to its end, or stopped after `timeout` s: asked to end (terminate: SIGTERM, which lets git
+    remove its own .lock files; TerminateProcess on Windows), killed after `grace` s more. how: None (it ended),
+    "terminated" or "killed"; rc None when stopped."""
+    pr = subprocess.Popen(cmd, **kw)
+    try:
+        return pr.wait(timeout=timeout), None
+    except subprocess.TimeoutExpired:
+        pr.terminate()
+        try:
+            pr.wait(timeout=grace)
+            return None, "terminated"
+        except subprocess.TimeoutExpired:
+            pr.kill()
+            pr.wait()
+            return None, "killed"
+
+
+def lock_files(repo):
+    """The *.lock files under the clone's git directory (a git stopped mid-fetch may leave them), relative, sorted."""
+    rc, gd = git(repo, "rev-parse", "--absolute-git-dir")
+    g = pathlib.Path(gd.strip()) if rc == 0 and gd.strip() else None
+    return sorted(x.relative_to(g).as_posix() for x in g.rglob("*.lock")) if g and g.is_dir() else []
+
+
+def net_git(repo, args, timeout, grace=10):
     """(rc, stdout, stderr) of a git command that talks to origin: no prompt (GIT_TERMINAL_PROMPT=0), a stalled
-    transfer ended by git itself (http.lowSpeedLimit/Time), the whole bounded by `timeout`; its output through files,
-    never pipes (Windows: a killed git leaves git-remote-https holding a pipe, and the timeout would wait on it)."""
+    transfer ended by git itself (http.lowSpeedLimit/Time), the whole bounded by `timeout` (bounded(): asked to end,
+    then killed); its output through files, never pipes (Windows: a killed git leaves git-remote-https holding a pipe,
+    and the wait would hang on it). Stopped, the message says so and names any .lock file left in the clone."""
     import tempfile
     with tempfile.TemporaryFile() as o, tempfile.TemporaryFile() as e:
         try:
-            rc = subprocess.run(["git", "-C", str(repo), "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=30", *args],
-                                stdin=subprocess.DEVNULL, stdout=o, stderr=e, timeout=timeout,
-                                env=dict(os.environ, GIT_TERMINAL_PROMPT="0")).returncode
-        except subprocess.TimeoutExpired:
-            rc = None
+            rc, how = bounded(["git", "-C", str(repo), "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=30", *args],
+                              timeout, grace, stdin=subprocess.DEVNULL, stdout=o, stderr=e,
+                              env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
         except OSError as x:
             return 1, "", str(x)
         o.seek(0); e.seek(0)
         out, err = (f.read().decode("utf-8", "replace") for f in (o, e))
-    if rc is None:
-        return 1, out, (err.strip() + f" (no answer in {timeout} s)").strip()
+    if how:
+        left = lock_files(repo)
+        return 1, out, (err.strip() + f" (no answer in {timeout} s: {how})" + (
+            f"; left behind in its .git: {', '.join(left)} -- remove them once no git runs there" if left else "")).strip()
     return rc, out, err
 
 
-def make_whole(repo, say=None):
+def make_whole(repo, say=None, sleep=time.sleep):
     """None, or why the clone cannot be made whole -- the one implementation tools/round.py init runs too
     (fetch_version_branches), run here first so the checks read what the round will (weekly round 2026-10-31: a
     dependent's clone of its default branch held no 26.x branch, so no JDK 25 line, and its 26.1.2 measure stopped on
@@ -146,7 +182,8 @@ def make_whole(repo, say=None):
     single-branch clone has none of origin's neoforge-<v> branches, so a version-branch fork would read as
     single-version: origin's neoforge-* branches are fetched whole as remote-tracking refs (the clone made whole when it
     is shallow; a single-branch clone's fetch refspec gains neoforge-*) when one is missing, and nothing is fetched when
-    none is. say(what) is told what was fetched."""
+    none is; a fetch another process's ref lock refuses is tried again (FETCH_TRIES). say(what) is told what was
+    fetched."""
     rc, out, err = net_git(repo, ["ls-remote", "--heads", "origin", "refs/heads/neoforge-*"], LIST_TIMEOUT)
     if rc:
         return f"cannot list origin's branches ({(err or out).strip()[-200:]}): the fork's kind is read from them"
@@ -155,11 +192,15 @@ def make_whole(repo, say=None):
     missing = [b for b in remote if git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{b}")[0]]
     if not missing and not shallow:
         return None
-    rc, out, err = net_git(repo, ["fetch", "-q", *(["--unshallow"] if shallow else []), "origin",
-                                  *[f"+refs/heads/{b}:refs/remotes/origin/{b}" for b in remote]], FETCH_TIMEOUT)
+    for n in range(FETCH_TRIES):       # another process's ref lock: tried again, as round.py's git() did (2 + 3n s)
+        rc, out, err = net_git(repo, ["fetch", "-q", *(["--unshallow"] if shallow else []), "origin",
+                                      *[f"+refs/heads/{b}:refs/remotes/origin/{b}" for b in remote]], fetch_timeout())
+        if not (rc and LOCKED_REF.search(err or "")) or n == FETCH_TRIES - 1:
+            break
+        sleep(2 + 3 * n)
     if rc:
         return (f"a shallow or single-branch clone (missing {', '.join(missing) or 'its history'}), and fetching them "
-                f"failed: {(err or out).strip()[-200:]} -- clone the fork whole (no --depth/--single-branch)")
+                f"failed: {' '.join((err or out).split())[:300]} -- clone the fork whole (no --depth/--single-branch)")
     if missing and not any("*" in x for x in git(repo, "config", "--get-all", "remote.origin.fetch")[1].split()):
         # a single-branch clone's fetch refspec names one branch: later `git fetch origin <b>` must update origin/<b>
         git(repo, "config", "--add", "remote.origin.fetch", "+refs/heads/neoforge-*:refs/remotes/origin/neoforge-*")
@@ -527,7 +568,38 @@ def self_check():
         why_ = make_whole(ff_) or ""
         expect("and fetching them failed: " in why_ and "bogus" in why_ and "clone the fork whole" in why_,
                f"a fetch that fails: git's message in the MISSING line: {why_}")
-        if os.name != "nt":      # the ext transport runs a shell command (POSIX here)
+        # a fetch another git's ref lock refuses is tried again with round.py git()'s backoff (2 + 3n s)
+        lk_ = d / "locked"
+        subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "main", au.as_uri(), str(lk_)], check=True,
+                       capture_output=True)
+        lock_ = lk_ / ".git/refs/remotes/origin/neoforge-1.21.1.lock"
+        lock_.parent.mkdir(parents=True, exist_ok=True)
+        lock_.write_text("", encoding="utf-8")
+        slept = []
+        why_ = make_whole(lk_, sleep=lambda t: (slept.append(t), lock_.unlink()))
+        expect(why_ is None and slept == [2] and git(lk_, "rev-parse", "-q", "--verify", "refs/remotes/origin/neoforge-1.21.1")[0] == 0,
+               f"a ref lock once: tried again after 2 s, then fetched: {why_} {slept}")
+        lk2 = d / "locked-for-good"
+        subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "main", au.as_uri(), str(lk2)], check=True,
+                       capture_output=True)
+        (lk2 / ".git/refs/remotes/origin").mkdir(parents=True, exist_ok=True)
+        (lk2 / ".git/refs/remotes/origin/neoforge-1.21.1.lock").write_text("", encoding="utf-8")
+        slept = []
+        why_ = make_whole(lk2, sleep=slept.append) or ""
+        expect(slept == [2, 5, 8, 11] and "fetching them failed" in why_ and LOCKED_REF.search(why_),
+               f"a lock that stays: {FETCH_TRIES} tries, then git's message: {slept} {why_}")
+        expect(fetch_timeout({"MMVU_FETCH_TIMEOUT": "90"}) == 90 and fetch_timeout({"MMVU_FETCH_TIMEOUT": "soon"})
+               == fetch_timeout({}) == FETCH_TIMEOUT, "MMVU_FETCH_TIMEOUT: whole seconds, else the default")
+        if os.name != "nt":      # signals and the ext transport's shell command (POSIX here)
+            stub = ("import signal, sys, time\nif sys.argv[1] == 'deaf':\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    "open(sys.argv[2], 'w').close()\ntime.sleep(60)\n")
+            (d / "stub.py").write_text(stub, encoding="utf-8")
+            for kind, want in (("polite", "terminated"), ("deaf", "killed")):
+                up = d / f"{kind}.up"
+                t_ = time.time()
+                got_ = bounded([sys.executable, str(d / "stub.py"), kind, str(up)], 3, grace=1)
+                expect(got_ == (None, want) and up.exists() and time.time() - t_ < 20,
+                       f"a {kind} process past its time: asked to end, killed only if it will not: {got_}")
             ext = ["-c", "protocol.ext.allow=always", "ls-remote"]
             (d / "env.sh").write_text("echo prompt=$GIT_TERMINAL_PROMPT >&2\nexit 1\n", encoding="utf-8")
             (d / "hang.sh").write_text("sleep 20\n", encoding="utf-8")
@@ -539,9 +611,13 @@ def self_check():
                 os.environ.pop("GIT_TERMINAL_PROMPT") if env0_ is None else os.environ.update(GIT_TERMINAL_PROMPT=env0_)
             expect(rc_ != 0 and "prompt=0" in e_, f"no terminal prompt on a network read: {rc_} {e_}")
             t_ = time.time()
-            rc_, _o, e_ = net_git(au, ext + [f"ext::sh {(d / 'hang.sh').as_posix()}"], 2)
-            expect(rc_ == 1 and "no answer in 2 s" in e_ and time.time() - t_ < 15,
-                   f"a network read that never answers is cut off: {rc_} {e_} {time.time() - t_:.1f}s")
+            (au / ".git/shallow.lock").write_text("", encoding="utf-8")       # as a git stopped mid-fetch leaves it
+            rc_, _o, e_ = net_git(au, ext + [f"ext::sh {(d / 'hang.sh').as_posix()}"], 2, grace=2)
+            (au / ".git/shallow.lock").unlink()
+            expect(rc_ == 1 and "no answer in 2 s: terminated" in e_ and time.time() - t_ < 15
+                   and "left behind in its .git: shallow.lock" in e_,
+                   f"a network read that never answers is cut off, and a lock it left is named: {rc_} {e_} "
+                   f"{time.time() - t_:.1f}s")
         subprocess.run(["git", "-C", str(cc), "remote", "set-url", "origin", gh_url], check=True)
         seen = []
         res = checks(whole=lambda r: seen.append(pathlib.Path(r)) or None, forks=[("owner/examplelib", cc)],

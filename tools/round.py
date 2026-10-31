@@ -178,7 +178,7 @@ def now():
 
 
 _NET_LOCKS, _NET_LOCKS_GUARD = {}, threading.Lock()
-LOCKED_REF = re.compile(r"cannot lock ref|index\.lock|Unable to create .*\.lock|shallow file has changed", re.I)
+LOCKED_REF = mod("rp").LOCKED_REF          # another git holds the lock: git() tries a fetch or push again
 
 
 _REPO_KEYS = {}
