@@ -2306,18 +2306,21 @@ def t_gates(st, it, log):
     au = seg_item(st, it, "authors")
     up = au["extra"].get("upstream_commit") if au else None
     gated, at = head(d), time.time()
-    # the jars the head's Port CI installs before it builds (its workflow's --dep-jar steps) into ~/.m2, sha256-checked
-    # (a version branch's pins go in through fork-port.py); a head whose workflow pins nothing is untouched
-    for ok_, m_ in mod("ld").install_workflow_pins(d):
-        if not ok_:
-            raise StepError(f"a pinned jar could not be put into mavenLocal before the gates: {m_}")
-        say_to(log)("round: pins:" + (" WARNING" if "REPLACED" in m_ else ""), m_)
+    def pins():
+        # the jars the head's Port CI installs before it builds (its workflow's --dep-jar steps) into ~/.m2,
+        # sha256-checked (a version branch's pins go in through fork-port.py); a workflow pinning nothing: untouched
+        for ok_, m_ in mod("ld").install_workflow_pins(d):
+            if not ok_:
+                raise StepError(f"a pinned jar could not be put into mavenLocal before the gates: {m_}")
+            say_to(log)("round: pins:" + (" WARNING" if "REPLACED" in m_ else ""), m_)
     if ci_record(d):                # the PR's CI is the gate of record (both kinds): build and Gate A/B here
+        pins()                      # no lock here, as for the build itself: every dependent gate has its own mavenLocal
         for cmd in sv_gate_cmds(d, up, gatec=""):
             sh(st, it, cmd, log)
         return "ci-gates build and Gate A/B green (full and minimal); Gate C is the PR's CI (the gate of record)", {
             "gated_head": gated, "gated_at": at, "head_after": head(d), "ci_record": True}
     with full_gate_lock(it["id"], say_to(log)) as lk:
+        pins()
         for cmd in sv_gate_cmds(d, up):
             sh(st, it, cmd, log, hold=lk)
     c = None
@@ -2463,11 +2466,15 @@ def t_depgate(st, it, log):
         git(dep["dir"], "worktree", "remove", "--force", str(work))
         shutil.rmtree(work, ignore_errors=True)
     git(dep["dir"], "worktree", "add", "-q", "--detach", str(work), f"origin/neoforge-{v}", check=True)
+    m2 = st.rdir / "round/work" / f"depgate-{dep['name']}-{v}-m2"
     try:
         wt_head = head(work)
         with full_gate_lock(it["id"], say_to(log)) as lk:
+            # a PRIVATE mavenLocal, as depgate_head's: layer-deps' --port-checkout puts the candidate jar there (at the
+            # release pin's coordinate) and every Gradle call of the run reads it there, so a pinned-jar install by any
+            # other build on this machine (fork-port's, round's) cannot overwrite the candidate mid-run
             r = sh(st, it, gate_run_cmd(work, v, "setup", st.data["frozen"], "--port-checkout", f"{it['fork']}={lco}",
-                                        "--allow-undone-library"), log, ok=range(0, 256), hold=lk)
+                                        "--allow-undone-library"), log, ok=range(0, 256), hold=lk, env=private_env(m2))
         for f in ("GATES.md", "GATES-RED.md", "RESIDUE.md", "DEPS.md"):
             q_ = work / ".port" / v / f
             if q_.is_file():
@@ -2481,6 +2488,7 @@ def t_depgate(st, it, log):
     finally:
         git(dep["dir"], "worktree", "remove", "--force", str(work))
         shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(m2, ignore_errors=True)
         git(dep["dir"], "worktree", "prune")
     return f"{it['extra']['dependent']} {v} Gate C green against the candidate jar", {"evidence": str(evid),
                                                                                        "library_head": head(lco)}
@@ -2506,6 +2514,17 @@ def private_m2(dest, cands):
                                           f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar"
                                           "</packaging></project>\n", encoding="utf-8")
     return dest
+
+
+def private_env(m2, cands=None):
+    """The environment of a dependent gate run against a private mavenLocal: private_m2(m2, cands), MMVU_M2_REPO
+    pointing layer-deps' installs at it, and -Dmaven.repo.local=<it> in PORT_GRADLE_ARGS, which every Gradle call of
+    a gate run carries (tools/port_gates.py, tools/fork-port.py). ~/.m2 is only read."""
+    private_m2(m2, cands or {})
+    env = dict(os.environ, MMVU_M2_REPO=str(m2))
+    env["PORT_GRADLE_ARGS"] = "\n".join(x for x in (env.get("PORT_GRADLE_ARGS", ""), f"-Dmaven.repo.local={m2}")
+                                        if x.strip())
+    return env
 
 
 CI_RECORD_INPUTS = ("from_run:", "dep_override:")
@@ -2702,10 +2721,7 @@ def depgate_head(st, it, lib, dep, v, lco, jars, log):
             raise StepError(f"{it['extra']['dependent']}'s {PORT_CI_WF} cannot be read back: {e}")
         rcs = []
         with full_gate_lock(it["id"], say_to(log)) as lk:
-            private_m2(m2, cands)
-            env = dict(os.environ)
-            env["PORT_GRADLE_ARGS"] = "\n".join(x for x in (env.get("PORT_GRADLE_ARGS", ""),
-                                                              f"-Dmaven.repo.local={m2}") if x.strip())
+            env = private_env(m2, cands)
             for cmd in gate_cmds:
                 rcs.append(sh(st, it, cmd, log, cwd=work, ok=range(0, 256), hold=lk, env=env).returncode)
         for f_ in (work / "build").glob("round-gates-*.md"):
@@ -5399,11 +5415,22 @@ def self_check():
             expect("older than its gate run" in str(e), f"a stale jar is refused: {e}")
         setres("examplelib@1.21.4:gates", gated_head=g0, gated_at=time.time() - 5)
         seen = {}
+        # a temporary home: the dependent gate copies ~/.m2 into its private mavenLocal, and must never write it
+        dg_home = tmp / "dg-home"
+        (dg_home / ".m2/repository/com/example/examplelib/1.0").mkdir(parents=True)
+        (dg_home / ".m2/repository/com/example/examplelib/1.0/examplelib-1.0.jar").write_bytes(b"released")
+        dg_env_keep = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
+        os.environ["HOME"] = os.environ["USERPROFILE"] = str(dg_home)
 
-        def fake_sh(st_, it_, cmd, log, cwd=None, ok=(0,), hold=None):
+        def fake_sh(st_, it_, cmd, log, cwd=None, ok=(0,), hold=None, env=None):
             """fork-port.py on the dependent's worktree: writes the GATES.md the case asks for, exits 18."""
             w = pathlib.Path(cmd[cmd.index("--repo") + 1])
             seen["held"] = hold is not None
+            pm_ = pathlib.Path((env or {}).get("MMVU_M2_REPO") or "/nonexistent-m2")
+            seen["m2"] = (str(pm_), (pm_ / "com/example/examplelib/1.0/examplelib-1.0.jar").is_file(),
+                          (env or {}).get("PORT_GRADLE_ARGS", "").splitlines())
+            if pm_.is_dir():               # layer-deps' --port-checkout installs the candidate into the private copy
+                (pm_ / "com/example/examplelib/1.0/examplelib-1.0.jar").write_bytes(b"candidate")
             (w / ".port/1.21.4").mkdir(parents=True, exist_ok=True)
             (w / ".port/1.21.4/GATES.md").write_text(seen["gates"].format(head=head(w)), encoding="utf-8")
             return subprocess.CompletedProcess(cmd, 18, "", "")
@@ -5426,6 +5453,12 @@ def self_check():
         note, r_ = step(dg)
         expect("green against the candidate jar" in note and seen.get("held"),
                f"the dependent gate: green with its GATES.md, the gate lock held by the run: {note}")
+        pm_, copied_, gargs_ = seen.get("m2", ("", False, []))
+        expect("depgate-" in pm_ and pm_.endswith("-1.21.4-m2") and copied_ and f"-Dmaven.repo.local={pm_}" in gargs_
+               and not pathlib.Path(pm_).exists()
+               and (dg_home / ".m2/repository/com/example/examplelib/1.0/examplelib-1.0.jar").read_bytes() == b"released",
+               f"the version-branch dependent gate runs on a private mavenLocal (a copy of ~/.m2; MMVU_M2_REPO and "
+               f"-Dmaven.repo.local point at it), ~/.m2 is never written and the copy is removed: {seen.get('m2')}")
         commit(lco, "Main.java", "class Main { int y; }\n")
         try:
             step(dg)
@@ -5433,6 +5466,11 @@ def self_check():
         except Reset as e:
             expect(e.ids == ["examplelib@1.21.4:gates"], f"a moved library checkout sends its gates back: {e}")
         sh = real_sh
+        for k_, v_ in dg_env_keep.items():
+            if v_ is None:
+                os.environ.pop(k_, None)
+            else:
+                os.environ[k_] = v_
         # S2-1: nothing new against origin: no PR (and no CI, merge or release)
         dco = pathlib.Path(vco(State(rs, json.loads(pathlib.Path(rs).read_text(encoding="utf-8"))), DEP, "1.21.4"))
         setres("examplemod@1.21.4:gates", gated_head=head(dco), gated_at=time.time())

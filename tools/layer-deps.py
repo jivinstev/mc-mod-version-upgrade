@@ -298,12 +298,28 @@ def _get(url, headers=None):
         return r.read()
 
 
+def m2_root():
+    """The local Maven repository jars are installed into: $MMVU_M2_REPO when set (round.py's version-branch dependent
+    gate gives each run a private one, Gradle pointed at it with -Dmaven.repo.local, so no install elsewhere touches
+    its candidate jar), else ~/.m2/repository."""
+    d = os.environ.get("MMVU_M2_REPO")
+    return pathlib.Path(d) if d else pathlib.Path.home() / ".m2/repository"
+
+
+def _write_atomic(path, data):
+    """Write `data` (bytes) to `path` through a temporary file beside it and os.replace: a build reading the jar
+    concurrently sees the old file or the new one, never half of one."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
 def install_pin(ga, ver, value):
     """Install a port_jar pin ("<url> <sha256>") into ~/.m2 as ga:ver, the download checked against the sha256; a jar
     already there with that sha256 is not fetched again. -> (ok, message)."""
     url, sha = value.split()
     g, a = ga.split(":")
-    have = pathlib.Path.home() / ".m2/repository" / g.replace(".", "/") / a / ver / f"{a}-{ver}.jar"
+    have = m2_root() / g.replace(".", "/") / a / ver / f"{a}-{ver}.jar"
     old = hashlib.sha256(have.read_bytes()).hexdigest() if have.is_file() else None
     if old == sha:
         return True, f"{ga}:{ver} already in mavenLocal (sha256 ok)"
@@ -321,14 +337,15 @@ def install_pin(ga, ver, value):
 
 
 def install_m2(ga, ver, data):
-    """Put a jar into ~/.m2 as group:artifact:ver (with a minimal POM), the way port-ci's --dep-jar step does."""
+    """Put a jar into the local Maven repository (m2_root) as group:artifact:ver (with a minimal POM), the way
+    port-ci's --dep-jar step does; each file written atomically."""
     g, a = ga.split(":")
-    dest = pathlib.Path.home() / ".m2/repository" / g.replace(".", "/") / a / ver
+    dest = m2_root() / g.replace(".", "/") / a / ver
     dest.mkdir(parents=True, exist_ok=True)
-    (dest / f"{a}-{ver}.jar").write_bytes(data)
-    (dest / f"{a}-{ver}.pom").write_text(f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
-                                         f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar</packaging>"
-                                         f"</project>\n", encoding="utf-8")
+    _write_atomic(dest / f"{a}-{ver}.jar", data)
+    _write_atomic(dest / f"{a}-{ver}.pom", (f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
+                                            f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar"
+                                            f"</packaging></project>\n").encode("utf-8"))
 
 
 def install_pins(repo, target, pin_jar=None):
@@ -2099,6 +2116,22 @@ def _check_install_pins(expect):
             (head_ / ".github/workflows/port-ci.yml").write_text("jobs: {}\n", encoding="utf-8")
             expect(install_workflow_pins(head_) == [] and install_workflow_pins(pathlib.Path(td) / "nofile") == [],
                    "a workflow with no --dep-jar step, or none, installs nothing")
+            # a private repository (MMVU_M2_REPO, round.py's version-branch dependent gate): installs go there, ~/.m2
+            # is not touched; each file is written through a temporary file, none left behind
+            priv, keep_m2 = pathlib.Path(td) / "private-m2", os.environ.get("MMVU_M2_REPO")
+            os.environ["MMVU_M2_REPO"] = str(priv)
+            try:
+                before_ = sorted(str(p) for p in home.rglob("*"))
+                install_m2("com.example:cand", "1.0-mc1.21.4", b"the candidate")
+                pj = priv / "com/example/cand/1.0-mc1.21.4/cand-1.0-mc1.21.4.jar"
+                expect(pj.is_file() and pj.read_bytes() == b"the candidate" and sorted(str(p) for p in home.rglob("*")) == before_
+                       and not [p for p in priv.rglob("*.tmp")] and pj.with_suffix(".pom").is_file()
+                       and m2_root() == priv,
+                       "MMVU_M2_REPO: an install goes into the private repository, atomically, ~/.m2 untouched")
+            finally:
+                os.environ.pop("MMVU_M2_REPO", None)
+                if keep_m2 is not None:
+                    os.environ["MMVU_M2_REPO"] = keep_m2
             none_ = pathlib.Path(td) / "nopins"
             (none_ / ".port/1.21.1").mkdir(parents=True)
             (none_ / ".port/1.21.1/branch.properties").write_text("upstream_commit=abc\n", encoding="utf-8")
@@ -2145,12 +2178,12 @@ def sibling_jars(repo, target, home=None):
     """The sibling ports' jars for this version in mavenLocal (what a resolve installed) for its sibling substitutes:
     what a version branch's shipped-jar gate boots beside the built jar, as port-ci's `shipped jars`
     job passes the --dep-jar jars on the port branch. A jar not in mavenLocal is left out (shipped-gate then names the
-    missing mod)."""
-    home = pathlib.Path(home) if home else pathlib.Path.home()
+    missing mod). `home`: a home whose ~/.m2 to read, else m2_root()."""
+    m2 = pathlib.Path(home) / ".m2/repository" if home else m2_root()
     out = []
     for ga, coord in sibling_substitutes(repo, target).items():
         g, a, ver = coord.split(":", 2)
-        jar = home / ".m2/repository" / g.replace(".", "/") / a / ver / f"{a}-{ver}.jar"
+        jar = m2 / g.replace(".", "/") / a / ver / f"{a}-{ver}.jar"
         if jar.is_file():
             out.append(str(jar))
     return out

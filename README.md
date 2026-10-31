@@ -346,8 +346,8 @@ version branch of a version-branch dependent to a single-version library: `round
 library releases this round and the branch pins it, and otherwise the close names the branch to re-pin by hand. Each library version
 -- a version-branch library's version, and a single-version library's head -- merges only after each dependent at that
 version passed its gates against the candidate jar (a version branch: Gate C through `fork-port.py --port-checkout`; a
-dependent's head: `ci-gates.py` full and minimal against a private copy of mavenLocal, `-Dmaven.repo.local`, holding
-the jar where its Port CI pins the library; `~/.m2` is never written), so a library crash is a finding before the merge, not a re-release after it; a set of
+dependent's head: `ci-gates.py` full and minimal; each against a private copy of mavenLocal, `-Dmaven.repo.local`,
+holding the jar where its Port CI pins the library; `~/.m2` is never written), so a library crash is a finding before the merge, not a re-release after it; a set of
 version-branch forks only keeps its head without that gate. With no
 answer the defaults apply; a round that did not run is carried into the next week's issue. Only the library's (first
 fork's) repository gets the workflow and the config (`weekly-plan.json`, under `.github` on its head branch), which is

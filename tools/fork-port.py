@@ -1490,6 +1490,13 @@ def gradle_env(env):
     return env
 
 
+def gradle_args(env):
+    """PORT_GRADLE_ARGS (newline-separated, as tools/port_gates.py reads it): the extra arguments every Gradle call of
+    the run carries -- round.py's version-branch dependent gate passes -Dmaven.repo.local=<its private repository>, so
+    this run's builds resolve the library's candidate jar from there and never from ~/.m2."""
+    return [x.strip() for x in env.get("PORT_GRADLE_ARGS", "").splitlines() if x.strip()]
+
+
 GRADLE_MAINS = re.compile(r"(?:^|[./])(GradleDaemon|GradleWorkerMain|GradleMain|KotlinCompileDaemon|GradleStart\w*)$")
 
 
@@ -1869,7 +1876,8 @@ class Run:
     def gradle(self, tasks, log):
         init = [str(x) for x in ("--init-script", ROOT / "tools/maxerrs.init.gradle",
                                  "--init-script", ROOT / "tools/central-mirror.init.gradle")]
-        return self.sh([BASH, "gradlew", *tasks, "--continue", "--console=plain", *init, "-Dorg.gradle.jvmargs=-Xmx6g"], log)
+        return self.sh([BASH, "gradlew", *tasks, "--continue", "--console=plain", *init, "-Dorg.gradle.jvmargs=-Xmx6g",
+                        *gradle_args(self.env)], log)
 
     def artifacts(self, root=None):
         d = (root or self.repo) / "build" / "moddev" / "artifacts"
@@ -1984,7 +1992,8 @@ class Run:
                     "choices": [f"stage it by hand: git worktree add <dir> {fb.branch_name(pv)} && ./gradlew createMinecraftArtifacts"]}
         old = self.artifacts(work)[0]
         if not old:
-            self.sh([BASH, "gradlew", "createMinecraftArtifacts", "--console=plain"], self.work / "stage-prev.log", cwd=work)
+            self.sh([BASH, "gradlew", "createMinecraftArtifacts", "--console=plain", *gradle_args(self.env)],
+                    self.work / "stage-prev.log", cwd=work)
             old = self.artifacts(work)[0]
         new, _ = self.artifacts()
         if not old or not new:
@@ -2172,7 +2181,7 @@ class Run:
         plain ./gradlew. Never rebuilt by hand (CATALOG X25b-ii)."""
         self.work.mkdir(parents=True, exist_ok=True)
         cmd = [BASH, "gradlew", "-I", str(ROOT / "tools/qtc-init.gradle"), "-I", str(ROOT / "tools/central-mirror.init.gradle"),
-               "-q", "qtcClasspath", "--console=plain"]
+               "-q", "qtcClasspath", "--console=plain", *gradle_args(self.env)]
         r = subprocess.run(cmd, cwd=self.repo, capture_output=True, text=True, encoding="utf-8", errors="replace", env=self.env)
         m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", r.stdout or "", re.S)
         jars = [l.strip() for l in m.group(1).splitlines() if l.strip()] if m else []
@@ -2867,6 +2876,17 @@ def self_check():
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+    # ---- PORT_GRADLE_ARGS reaches every Gradle call of the run (the version-branch dependent gate's private repository)
+    with tempfile.TemporaryDirectory() as d:
+        a_ = argparse.Namespace(repo=d, target="1.21.4", json=None, budget=0.0, gates="ab", modid="m", base="x",
+                                direct=False, from_stage="measure", max_errors=None, confirm_spend=False)
+        run = Run(a_)
+        run.env = dict(run.env, PORT_GRADLE_ARGS="-Dmaven.repo.local=/private/m2\n")
+        seen_ = []
+        run.sh = lambda cmd, log=None, cwd=None: (seen_.append(cmd), CompletedProcess(cmd, 0, "", ""))[1]
+        run.gradle(["compileJava"], pathlib.Path(d) / "x.log")
+        expect(seen_ and seen_[-1][-1] == "-Dmaven.repo.local=/private/m2" and gradle_args({}) == [],
+               f"PORT_GRADLE_ARGS reaches the run's Gradle calls: {seen_}")
     # ---- spend guard and the skipped-shared warning
     expect(spend_guard(900, 15) is None and spend_guard(1501, 15) and spend_guard(1501, 15, confirm=True) is None
            and spend_guard(50, 0.1) and spend_guard(50, 0.1, max_errors=60) is None, "spend guard thresholds")
