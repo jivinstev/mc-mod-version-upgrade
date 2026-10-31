@@ -98,7 +98,8 @@ forks already on the current shared library, builds nothing but the close):
   the ledger step blocks for the owner, as before. A `regrade:` line re-grades a reproduced one. A job given only
   confirmed fixes reads as before. Every agent job on a head checkout gets the head workflow's --dep-jar pins in
   ~/.m2 first (head_pins). During a round the driver is the only writer of the head's ledger: a branch about to go out
-  as a PR with any other commit touching a ledger blocks for the owner (ledger_guard).
+  as a PR with any other commit touching a ledger blocks for the owner (ledger_guard), unless on the head's branch it
+  only appends confirmed open findings (ledger_appends_only).
 
 DISPATCH. A `tool` item runs here (`drive`, `run`). An `agent` item is printed as a job: a fresh worker (the session's
 Agent/Task subagent, never the orchestrator itself) gets the one-line prompt "Read <job file> and do exactly what it
@@ -3072,10 +3073,13 @@ def ledger_guard(st, it, d, base, local):
     each commit recorded in its result's `ledger_commits`). A branch about to go out as a PR -- the head's work branch,
     or a version branch, which never carries the ledger -- with any other commit touching a ledger blocks for the owner,
     naming it: a worker's commit could otherwise give itself a disproval or a grade. `retry --allow` lets one PR through
-    once the owner has read it."""
+    once the owner has read it. On the head's branch a worker may only APPEND confirmed open findings (the job texts
+    tell it to grade a new finding with known-issues.py add): ledger_appends_only."""
     r = git(d, "rev-list", f"origin/{base}..{local}", "--", *LEDGER_PATHS)
     mine = {c for x in st.items for c in (x.get("result") or {}).get("ledger_commits", [])}
     bad = [c for c in r.stdout.split() if c not in mine]
+    if bad and not is_vb(st, it) and ledger_appends_only(d, f"origin/{base}", local):
+        return
     if bad and not it.get("allow_once"):
         subj = [git(d, "log", "-1", "--format=%h %s", c).stdout.strip() for c in bad[:5]]
         diff = git(d, "diff", "--stat", f"origin/{base}...{local}", "--", *LEDGER_PATHS).stdout.strip().splitlines()
@@ -3083,6 +3087,37 @@ def ledger_guard(st, it, d, base, local):
                       f"{diff[-1] if diff else 'see git diff'}): during a round only the driver writes it. The owner "
                       f"reads it: revert it on {local} and `round.py retry {it.get('id', '<this item>')}`, or keep it with "
                       f"`round.py retry {it.get('id', '<this item>')} --allow`")
+
+
+def ledger_appends_only(d, base, local):
+    """Does `local` change the ledgers only by adding entries -- every entry the merge-base with `base` has kept exactly
+    (none removed or changed), the result valid, and each new one confirmed (no `confidence`), never disproved, and
+    open (or n/a) at every version it names, i.e. a new finding as a worker grades it?"""
+    ki = mod("ki")
+    mb = git(d, "merge-base", base, local).stdout.strip() or base
+    changed = git(d, "diff", "--name-only", mb, local, "--", *LEDGER_PATHS).stdout.split()
+
+    def load(ref, path):
+        r = git(d, "show", f"{ref}:{path}")
+        return json.loads(r.stdout) if r.returncode == 0 else ki.empty()
+    try:
+        for path in changed:
+            old, new = load(mb, path), load(local, path)
+            ki.validate(new)
+            before = {e["id"]: e for e in old.get("issues", [])}
+            after = {e["id"]: e for e in new["issues"]}
+            if any(i not in after or after[i] != e for i, e in before.items()):
+                return False
+            for i, e in after.items():
+                if i not in before and (e.get("confidence") or "disproved" in e
+                                        or any(s_ not in ("open", "n/a") for s_ in e["status"].values())):
+                    return False
+            if {k: v for k, v in new.items() if k != "issues"} != {k: v for k, v in old.items() if k != "issues"} \
+                    and old.get("issues"):
+                return False
+    except (ValueError, ki.Invalid):
+        return False
+    return True
 
 
 def t_pr(st, it, log):
@@ -4654,6 +4689,42 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         want(bk["status"] == "blocked" and any(x_.startswith(f"- {SU} SU-5 at 1.21.1") and "held back with the blocked job"
                                                in x_ for x_ in pre),
              f"N6: a valid disproval of a job another line blocked is said to be held back with it: {pre}")
+        # F3: a worker commit that only APPENDS confirmed open findings to the head's ledger goes out (the job texts tell
+        # workers to grade new findings with known-issues.py add); a suspected or closed new entry, or any change to an
+        # existing one, stops the PR; on a version branch any ledger commit does
+        class _Gst:
+            items = []
+
+            def __init__(self, kind):
+                self.kind = kind
+
+            def fork(self, _):
+                return {"kind": self.kind, "base": "1.21.1", "head": "neoforge-1.21.1"}
+
+        def guard(extra, kind="single", version="1.21.1"):
+            git(su, "checkout", "-q", "-B", "guard-x", "origin/neoforge-1.21.1", check=True)
+            for args_ in extra:
+                subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), *args_[:1], "--repo", str(su),
+                                *args_[1:]], capture_output=True, check=True)
+            git(su, "commit", "-qam", "a worker's ledger edit", check=True)
+            try:
+                ledger_guard(_Gst(kind), {"id": "x@1.21.1:pr", "fork": SU, "version": version}, su, "neoforge-1.21.1", "guard-x")
+                out_ = "ok"
+            except Blocked as e_:
+                out_ = str(e_)
+            git(su, "checkout", "-q", "neoforge-1.21.1", check=True)
+            return out_
+        newf = ["add", "--title", "a new crash on load", "--failure", "crash", "--visibility", "common", "--reach",
+                "normal", "--workaround", "no", "--lowest", "1.21.1"]
+        g_ok = guard([newf])
+        g_sus = guard([newf + ["--suspected"]])
+        g_closed = guard([newf[:-1] + ["1.21.1", "--status", "1.21.1=fixed@abcdef1"]])
+        g_chg = guard([["status", "SU-2", "--set", "1.21.1=wontfix:not ours"]])
+        g_vb = guard([newf], kind="branches", version="1.21.4")
+        want(g_ok == "ok" and "outside the driver" in g_sus and "outside the driver" in g_closed
+             and "outside the driver" in g_chg and "outside the driver" in g_vb,
+             f"F3: an appended confirmed open finding goes out; a suspected or closed one, a changed entry, or a "
+             f"version branch's ledger commit stops the PR: {g_ok} | {g_sus[:80]} | {g_closed[:80]} | {g_chg[:80]} | {g_vb[:80]}")
         # N7: a citation is looked for on origin's head, the job's branch and the authors' branch only
         git(su, "checkout", "-q", "-b", "elsewhere", check=True)
         (su / "Other.java").write_text("class Other {}\n", encoding="utf-8")
@@ -5241,8 +5312,9 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         want(r_.get("pr") == 4, f"this very commit's PR already merged (a resume): taken, not opened again: {note} {r_}")
         # F3: a commit on the work branch that touches the ledger is not the driver's: the PR step stops for the owner;
         # the driver's own ledger commit (recorded in its step's result) goes out
-        led_f = sl / ".port/KNOWN-ISSUES.json"
-        led_f.write_text('{"issues": [], "schema": 1}\n', encoding="utf-8")
+        subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "add", "--repo", str(sl), "--title", "a tint may be "
+                        "off", "--failure", "cosmetic", "--visibility", "rare", "--reach", "normal", "--workaround", "no",
+                        "--lowest", "1.21.1", "--suspected"], capture_output=True, check=True)
         led_sha = commit_paths(sl, [".port/KNOWN-ISSUES.json"], "Known issues: the round's fixes (keep-current round)")
         try:
             step(sa2, "examplesvlib@1.21.1:pr")

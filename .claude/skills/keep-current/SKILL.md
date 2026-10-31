@@ -683,7 +683,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      on a disproval or regrade it may not make says what the owner can do; `round.py retry` of that step then leaves
      what it refused as it is and goes on. During a round the driver is the only writer of the head's ledger: a branch
      about to go out as a PR (the head's work branch, or a version branch) with any other commit touching a ledger
-     blocks for the owner, naming the commit (`round.py retry <pr item> --allow` lets it through once read). **To reopen** a closed one for good:
+     blocks for the owner, naming the commit (`round.py retry <pr item> --allow` lets it through once read) -- except,
+     on the head's work branch, a worker's commit that only appends new confirmed findings, open (or n/a) at every
+     version (a finding graded with `known-issues.py add`, as the jobs say); every existing entry must be unchanged. **To reopen** a closed one for good:
      `known-issues.py status <ID> --set <v>=open` and `confirm <ID>`; a round never closes a version twice. Before
      any agent job on a head checkout (a single-version fork's, or a version-branch fork's head) the driver installs the
      head workflow's `--dep-jar` pins into `~/.m2`, sha256-checked (a REPLACED jar is warned about), so the worker's
