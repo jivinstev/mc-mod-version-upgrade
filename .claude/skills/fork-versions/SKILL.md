@@ -461,7 +461,12 @@ regressing line, a failing gate or test, or a reproduction is a confirmed findin
 evidence appended to notes). `disprove` closes a suspected entry whose grade (the override's when there is one) is S3
 or S4, with evidence citing a commit sha, a `path:line` or a test name: each named version (open there; `--set`'s list
 and range syntax) becomes `wontfix:not a defect (disproved, <kind>): <evidence>` and the record goes into the entry's
-`disproved` list; a confirmed entry, an S1/S2 or vague evidence is refused (exit 2), and `--check` writes nothing.
+`disproved` list; a confirmed entry, an S1/S2, vague evidence or a version disproved once before is refused (exit 2),
+and `--check` writes nothing. With `--repo` at least one citation must exist in the clone (a sha that resolves, a
+`path:line` with that many lines at some branch, a test name in some branch's tree): that proves the citation exists,
+not the conclusion -- every closure a round makes is listed for the owner in its closing comment. A disproval at one
+version leaves the entry's other versions as they were. **To reopen** a closed one for good: `status --set <v>=open`
+and `confirm ID` (no longer suspected, so no round closes it again; `disprove` also refuses a version it closed once).
 
 `select` is the default choice of what a run takes: every open S1, then S2s lowest affected version first up to
 `--budget`, then any S3 in a file the run already touches; the owner's `--add` / `--remove` apply last and the output

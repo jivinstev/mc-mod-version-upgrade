@@ -108,8 +108,13 @@ that cites something concrete -- a commit sha, a `path:line` or a test name -- a
 original never had the behaviour), api-unchanged (the target version's API does not change it) or test-passes (a test
 of the behaviour passes): each named version (open there; --version takes --set's list and range syntax) becomes
 `wontfix:not a defect (disproved, K): TEXT`, the record is appended to `disproved`, and the entry is otherwise kept.
-A confirmed entry, an S1/S2 or vague evidence is refused (exit 2); `--check` says whether it would be accepted and
-writes nothing (it reads `--ref` too).
+A confirmed entry, an S1/S2, vague evidence or a version disproved once before (the owner reopened it) is refused
+(exit 2); `--check` says whether it would be accepted and writes nothing (it reads `--ref` too). With a git clone
+(`--repo`), at least one citation must exist there -- a sha that resolves to a commit (the authors' remote included), a
+path:line whose file has that many lines at some branch, or a test name some branch's tree holds: that proves the
+citation exists, never the conclusion; every closure the round makes is listed for the owner in its closing comment.
+A disproval at one version leaves the entry's other versions as they were (open stays open). To reopen a closed one for
+good: `status --set <v>=open` and `confirm ID` (no longer suspected, so no round closes it again).
 
 ONLY S1 GOES BACK. A finding at a version that is already done reopens it only when it is an S1 (`reopens` answers
 yes, exit 0); any other finding goes into the ledger at its lowest affected version (exit 1).
@@ -181,8 +186,10 @@ SUSPECTED = "suspected"                      # the one `confidence` value (absen
 DISPROOF_KINDS = ("no-regression", "api-unchanged", "test-passes")
 # concrete evidence: a commit sha (7-40 hex with a digit and a letter: not a word, not a number), a path:line, or a test
 # name (FooTest, FooTest#bar, testBar, test_bar)
-EVIDENCE_RE = re.compile(r"(?<![0-9A-Za-z])(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9A-Za-z])|[\w./-]+\.\w+:\d+"
-                         r"|\b[A-Z]\w*Tests?\b|\btest(?:_\w+|[A-Z]\w*)")
+SHA_RE = r"(?<![0-9A-Za-z])(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9A-Za-z])"
+PATH_LINE_RE = r"([\w./-]+\.\w+):(\d+)"
+TEST_RE = r"\b[A-Z]\w*Tests?\b|\btest(?:_\w+|[A-Z]\w*)"
+EVIDENCE_RE = re.compile(f"{SHA_RE}|{PATH_LINE_RE}|{TEST_RE}")
 
 
 class Invalid(Exception):
@@ -1519,9 +1526,41 @@ def suspected(e):
     return e.get("confidence") == SUSPECTED
 
 
-def disprove(e, version, kind, evidence, date):
+def is_git(repo):
+    return repo is not None and subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-dir"], capture_output=True,
+                                               text=True, encoding="utf-8").returncode == 0
+
+
+def verify_citation(repo, ev):
+    """Does at least one citation of the evidence exist in the fork's clone (its branches, origin's and the authors'
+    remote's included)? A commit sha that resolves to a commit, a path:line whose file has that many lines at some ref,
+    or a test name that some ref's tree holds. It proves the citation exists, never the conclusion. -> what verified it,
+    or None."""
+    g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace")
+    for sha in re.findall(SHA_RE, ev):
+        if g("cat-file", "-e", f"{sha}^{{commit}}").returncode == 0:
+            return f"commit {sha}"
+    refs = ["HEAD"] + sorted(set(g("for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes").stdout.split())
+                             - {r for r in g("for-each-ref", "--format=%(refname)", "refs/remotes").stdout.split()
+                                if r.endswith("/HEAD")})
+    for path, line in re.findall(PATH_LINE_RE, ev):
+        for ref in refs:
+            r = g("show", f"{ref}:{path}")
+            if r.returncode == 0 and len(r.stdout.splitlines()) >= int(line) > 0:
+                return f"{path}:{line} at {ref}"
+    for name in sorted(set(re.findall(TEST_RE, ev))):
+        word = re.split(r"[#.]", name)[0]
+        for ref in refs:
+            if g("grep", "-q", "-w", "-F", "-e", word, ref).returncode == 0:
+                return f"test {word} at {ref}"
+    return None
+
+
+def disprove(e, version, kind, evidence, date, repo=None):
     """SUSPECTED ENTRIES: close a suspected S3/S4 as not a defect at `version` (--set's list or range syntax), with
-    concrete evidence. Changes `e` in place -> the versions closed; raises Invalid, `e` untouched, when refused."""
+    concrete evidence -- with `repo` (a git clone of the fork), at least one citation of it must exist there
+    (verify_citation). Changes `e` in place -> the versions closed; raises Invalid, `e` untouched, when refused."""
     if not suspected(e):
         raise Invalid(f"disprove {e['id']}: only a suspected entry may be disproved; {e['id']} is confirmed (fix it, or "
                       "the owner closes it: `status --set <v>=wontfix:<reason>`)")
@@ -1539,6 +1578,14 @@ def disprove(e, version, kind, evidence, date):
     if shut:
         raise Invalid(f"disprove {e['id']}: not open at {', '.join(shut)} (" + ", ".join(
             f"{v}={e['status'].get(v, 'not affected')}" for v in shut) + ")")
+    again = [v for v in vs if any(v in x["versions"] for x in e.get("disproved", []))]
+    if again:
+        raise Invalid(f"disprove {e['id']}: already disproved once at {', '.join(again)} and open again -- reopened by the "
+                      "owner, so it is not the round's to close (to reopen one for good: `status --set <v>=open` and "
+                      f"`confirm {e['id']}`)")
+    if repo is not None and not verify_citation(repo, ev):
+        raise Invalid(f"disprove {e['id']}: no citation of --evidence {ev!r} exists in {repo}: a commit sha that "
+                      "resolves, a path:line with that many lines at a branch, or a test name in a branch's tree")
     for v in vs:
         e["status"][v] = f"wontfix:not a defect (disproved, {kind}): {ev}"
     e["disproved"] = e.get("disproved", []) + [{"kind": kind, "evidence": ev, "versions": vs, "date": date}]
@@ -1744,7 +1791,7 @@ def run(argv):
         return 0
     if a.cmd == "disprove":
         e = find(data, a.id)
-        vs = disprove(e, a.version, a.kind, a.evidence, today())
+        vs = disprove(e, a.version, a.kind, a.evidence, today(), repo if a.repo and is_git(repo) else None)
         validate(data)
         if a.check:
             out(f"{e['id']}: would be disproved at {', '.join(vs)} ({a.kind}): accepted, nothing written")
@@ -2561,6 +2608,35 @@ def suspected_selfcheck(expect, cli):
                 expect(False, f"validate refuses a bad {why}")
             except Invalid as e_:
                 expect(why in str(e_), f"validate names {why}: {e_}")
+        # an owner's reopen (status --set <v>=open) is never undone by a later disproval
+        cli("status", *L, "KI-1", "--set", "1.21.4=open")
+        rc, o = cli("disprove", *L, "KI-1", "--version", "1.21.4", "--kind", "no-regression", "--evidence", ev)
+        expect(rc == 2 and "already disproved once at 1.21.4" in o and find(led(), "KI-1")["status"]["1.21.4"] == "open",
+               f"a version disproved once and reopened is refused: {rc} {o}")
+        # with --repo (a git clone): at least one citation must exist there
+        g = lambda *a_: subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                        "-c", "core.autocrlf=false", *a_], capture_output=True, text=True,
+                                       encoding="utf-8", check=True).stdout.strip()
+        g("init", "-q", "-b", "neoforge-1.21.1")
+        src = pathlib.Path(d, "src/Tint.java")
+        src.parent.mkdir()
+        src.write_text("class Tint {\n  int a;\n}\n", encoding="utf-8")
+        pathlib.Path(d, "src/TintTest.java").write_text("class TintTest {}\n", encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "port")
+        real = g("rev-parse", "--short=10", "HEAD")
+        cli("add", "--repo", d, "--id", "KI-20", "--title", "a tint may be off", "--failure", "cosmetic", *base,
+            "--lowest", "1.21.1", "--suspected")
+        R = ("--repo", d)
+        for evid, ok_, what in (("abcdef1234 never tinted it", False, "a sha that does not resolve"),
+                                ("src/Tint.java:9 does not tint", False, "a path:line past the end of the file"),
+                                ("NoSuchThingTest passes", False, "a test name no tree holds"),
+                                (f"{real} never tinted it", True, "a sha that resolves"),
+                                ("src/Tint.java:3 has no tint", True, "a path:line that exists"),
+                                ("TintTest passes", True, "a test name in the tree")):
+            rc, o = cli("disprove", *R, "KI-20", "--version", "1.21.1", "--kind", "no-regression", "--evidence", evid,
+                        "--check")
+            expect((rc == 0) == ok_ and (ok_ or "no citation" in o), f"--repo: {what} -> {'accepted' if ok_ else 'refused'}: "
+                                                                      f"{rc} {o}")
         # the plan issue says (suspected) on a suspected row only
         expect(sus({"suspected": True}) == " (suspected)" and sus({"id": "KI-4"}) == ""
                and sus({"confidence": SUSPECTED}) == " (suspected)", "the plan's marker")
