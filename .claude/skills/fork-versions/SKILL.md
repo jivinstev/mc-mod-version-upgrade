@@ -457,7 +457,11 @@ the entry lists between them).
 **Suspected entries.** A finding added without a reproduction or a version comparison (a lesson harvest's or a
 reader's suspicion) is added with `--suspected`: `"confidence": "suspected"` (absent: confirmed, every entry before it),
 shown `S3?` by `list` and "(suspected)" in the pinned issue and the plan issue. A reviewer who can point at the
-regressing line, a failing gate or test, or a reproduction is a confirmed finding. `confirm` removes the marker (the
+regressing line, a failing gate or test, or a reproduction is a confirmed finding. **The fork's own pinned tools must
+read the new key**: its weekly plan workflow runs `known-issues.py` at its config's `migrator_sha`, and Port CI's
+publish job at the kit its workflow pins, both strict about unknown keys -- a suspected entry added by hand on a fork
+pinned older breaks its plan issue and its publishing until it is re-pinned (`weekly-plan.py install --keep-existing`,
+a Port CI kit release). The round checks that before it writes one; `add --suspected` does not. `confirm` removes the marker (the
 evidence appended to notes). `disprove` closes a suspected entry whose grade (the override's when there is one) is S3
 or S4, with evidence citing a commit sha, a `path:line` or a test name: each named version (open there; `--set`'s list
 and range syntax) becomes `wontfix:not a defect (disproved, <kind>): <evidence>` and the record goes into the entry's

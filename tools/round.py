@@ -688,28 +688,56 @@ def reader_accepts(text):
     return bool(m) and all(f'"{k}"' in m.group(1) for k in LEDGER_V2_KEYS)
 
 
+MIGRATOR_FETCH_TIMEOUT = 60
+KIT_URL = re.compile(r"github\.com/([\w.-]+/[\w.-]+?)/releases/download/port-ci-kit-v(\d+)/")
+
+
 def migrator_file(rev, path="tools/known-issues.py"):
-    """`path` at a migrator commit or kit tag, fetched from the migrator's origin when the clone lacks it. -> text or None."""
+    """`path` at a migrator commit or kit tag, fetched from the migrator's origin when the clone lacks it -- that one
+    commit (--depth 1, never its history), bounded (a network that never answers fails fast: not readable). -> text or
+    None."""
     r = git(MIGRATOR, "show", f"{rev}:{path}")
     if r.returncode:
         spec = f"refs/tags/{rev}:refs/tags/{rev}" if rev.startswith("port-ci-kit-v") else rev
-        git(MIGRATOR, "fetch", "-q", "--no-tags", "origin", spec)
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            subprocess.run(["git", "-C", str(MIGRATOR), "fetch", "-q", "--depth", "1", "--no-tags", "origin", spec],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=MIGRATOR_FETCH_TIMEOUT)
         r = git(MIGRATOR, "show", f"{rev}:{path}")
     return r.stdout if r.returncode == 0 else None
 
 
+def migrator_slug():
+    """owner/repo of the round's migrator clone's origin (its configured URL, before any insteadOf), lower-cased."""
+    url = git(MIGRATOR, "config", "--get", "remote.origin.url").stdout.strip()
+    m = re.search(r"github\.com[/:]([\w.-]+/[\w.-]+?)(?:\.git)?/?$", url)
+    return m.group(1).lower() if m else None
+
+
 def ledger_readers(cfg, F):
     """B1: do the fork's pinned ledger readers accept suspected entries? The weekly plan's migrator_sha (cfg) and every
-    Port CI kit the head's and the version branches' workflows pin (origin's). A pin that cannot be read counts as not
-    accepting. -> {"ok": bool, "why": what does not}."""
-    pins = [("the weekly plan's pinned tools", cfg["migrator_sha"])] if (cfg or {}).get("migrator_sha") else []
+    Port CI kit the head's and the version branches' workflows pin (origin's), each read from the round's migrator
+    clone -- only when the fork pins THAT repository (the config's migrator_repo, each kit URL's owner/repo: another
+    migrator's commit or kit number says nothing about this one's). A pin that cannot be read counts as not accepting.
+    -> {"ok": bool, "why": what does not}."""
+    mine = migrator_slug()
+    pins = []
+    if (cfg or {}).get("migrator_sha"):
+        pins.append(("the weekly plan's pinned tools", cfg["migrator_sha"], str(cfg.get("migrator_repo") or "").lower()))
     texts = []
     for br in [F["head"]] + [f"neoforge-{v}" for v in (F.get("ladder") or F.get("versions") or [])]:
         r = git(F["dir"], "show", f"origin/{br}:.github/workflows/port-ci.yml")
         texts.append(r.stdout if r.returncode == 0 else "")
-    pins += [(f"Port CI kit v{k}", f"port-ci-kit-v{k}") for k in mod("pc").pinned_kits(texts)]
+    for k in mod("pc").pinned_kits(texts):
+        repos = sorted({m.group(1).lower() for t in texts for m in KIT_URL.finditer(t) if m.group(2) == str(k)}) or [""]
+        pins += [(f"Port CI kit v{k}", f"port-ci-kit-v{k}", rp) for rp in repos]
     bad = []
-    for what, rev in pins:
+    for what, rev, repo in pins:
+        if not mine or repo != mine:
+            bad.append(f"{what} ({rev if rev.startswith('port-ci-kit-') else rev[:12]}) is pinned to "
+                       f"{repo or 'an unnamed repository'}, not this round's migrator ({mine or 'no GitHub origin'}): "
+                       "could not be read")
+            continue
         t = migrator_file(rev)
         if t is None or not reader_accepts(t):
             bad.append(f"{what} ({rev if rev.startswith('port-ci-kit-') else rev[:12]}) " + ("could not be read" if t is None else "predates suspected entries"))
@@ -898,6 +926,8 @@ def disproved_lines(st):
             rows.append(f"- {x['fork']} {ident} at {x['version']}: {kind}: {ev} -- "
                         + ("closed in the ledger (wontfix: not a defect)" if (ident, x["version"]) in done else
                            f"NOT closed: {w} -- the owner's to decide" if w else
+                           "NOT closed: held back with the blocked job (another of its lines needs the owner; a retry "
+                           "of the job, once answered, brings it again)" if x["status"] == "blocked" else
                            "NOT closed in the ledger (the ledger step did not run: its note says why)"))
     if not rows:
         return []
@@ -3269,6 +3299,8 @@ def t_ledger(st, it, log):
     d = checkout(d, F["head"])
     ff_local(d, F["head"])
     sets, refused, found_new, disproved, blocked_ = 0, [], [], [], []
+    # N5: what this step refused before and the owner retried it over: left as it is, never a stop again
+    held, refusing = set(it.get("result", {}).get("refused_disproofs", [])), set()
     if (pathlib.Path(d) / ".port/KNOWN-ISSUES.json").is_file():
         # LOWEST FIRST's findings: open at the lower versions, `lowest` moved down -- before the fixed@ statuses
         late = late_lowest(st, it["fork"])
@@ -3303,6 +3335,22 @@ def t_ledger(st, it, log):
                     before = None
                 if ident not in given or ident not in (F.get("suspected") or {}) or before is None:
                     refused.append(f"regrade {ident} (not a suspected entry this job was given)")
+                    continue
+                if any(w.startswith(f"regrade {ident} ") for w in x["result"].get("not_disproved", [])):
+                    refused.append(f"regrade {ident} (held back with the blocked job)")
+                    continue
+                e_ = ki_.find(ki_.read_ledger(led_path), ident)
+                new_ = (e_.get("override") or {}).get("severity") or (
+                    ki_.derive({"failure": fa, "visibility": vi, "reach": re_, "workaround": wk == "yes"})
+                    if fa in ki_.FAILURES and vi in ki_.VISIBILITY and re_ in ki_.REACH else before)
+                worst = min([before, F["suspected"][ident]], key=ki_.sev_rank)
+                if ki_.sev_rank(new_) > ki_.sev_rank(worst):      # N1: never lowered but by the owner's /grade
+                    if f"regrade {ident}@{x['version']}" in held:
+                        refused.append(f"regrade {ident} not applied (refused before; the owner retried this step)")
+                        continue
+                    refusing.add(f"regrade {ident}@{x['version']}")
+                    blocked_.append(f"regrade {ident} would lower it {worst} -> {new_}: only the owner lowers a grade "
+                                    f"(`/grade {ident} {new_} <reason>` on the plan issue); not applied")
                     continue
                 r = sh(st, it, [sys.executable, TOOLS / "known-issues.py", "grade", ident, "--repo", d, "--failure", fa,
                                 "--visibility", vi, "--reach", re_, "--workaround", wk], log, ok=(0, 2))
@@ -3417,7 +3465,12 @@ def t_ledger(st, it, log):
             for ident, kind, ev in x["result"].get("disproved", []):
                 # bound by init's snapshot of origin's ledger (the plan's /grade applied), never by what a worker's
                 # commits may have made of the ledger since: a suspected S3/S4 the job was given, readers that accept it
+                if f"{ident}@{x['version']}" in held:
+                    refused.append(f"disproved {ident} at {x['version']} left open (refused before; the owner retried "
+                                   "this step)")
+                    continue
                 if ident not in given or ident in done or sus.get(ident) not in ("S3", "S4") or not readers_of(st, F)["ok"]:
+                    refusing.add(f"{ident}@{x['version']}")
                     blocked_.append(f"disproved {ident} (" + (
                         "not one this job was given)" if ident not in given else "it also has a fix: kept as fixed)"
                         if ident in done else f"not a suspected S3/S4 at the round's start: {sus.get(ident) or 'confirmed'})"
@@ -3434,8 +3487,10 @@ def t_ledger(st, it, log):
                     disproved.append({"id": ident, "version": x["version"], "kind": kind, "evidence": ev})
                     continue
                 r = sh(st, it, [sys.executable, TOOLS / "known-issues.py", "disprove", ident, "--repo", d, "--version",
-                                x["version"], "--kind", kind, "--evidence", ev], log, ok=(0, 2))
+                                x["version"], "--kind", kind, "--evidence", ev,
+                                *sum([["--cite-ref", r_] for r_ in cite_refs(st, x, F)], [])], log, ok=(0, 2))
                 if r.returncode:
+                    refusing.add(f"{ident}@{x['version']}")
                     blocked_.append(f"disproved {ident}: known-issues.py disprove refused it ({tail(log, 1)})"[:400])
                     continue
                 sets += 1
@@ -3477,8 +3532,12 @@ def t_ledger(st, it, log):
             + (f"; refused: {'; '.join(refused)}" if refused else ""))
     res = {"unmerged": unmerged, "refused": refused, "added": found_new, **({"disproved": disproved} if disproved else {})}
     if blocked_:          # S4: a disproval the round may not make is the owner's (everything else is committed and pushed)
-        raise Blocked(f"{note}; NOT closed, the owner's to decide: {'; '.join(blocked_)}",
-                      res=dict(res, not_disproved=blocked_))
+        raise Blocked(f"{note}; NOT done, the owner's to decide: {'; '.join(blocked_)}. The owner can: close it or "
+                      f"re-grade it by hand on {F['head']} (`known-issues.py disprove <ID> --repo {d} --version <v> --kind "
+                      "<kind> --evidence <text>`, `status <ID> --set <v>=wontfix:<reason>`, `/grade` on the plan issue), "
+                      f"or leave it open; then `round.py retry {it.get('id', '<the ledger item>')}` (a retry leaves what this step refused as it "
+                      "is and goes on), or `round.py close-anyway`",
+                      res=dict(res, not_disproved=blocked_, refused_disproofs=sorted(held | refusing)))
     return note, res
 
 
@@ -3615,8 +3674,11 @@ NO_BUILD_JOBS = ("close", "lowest", "decisions")
 def head_pins(st, it, log):
     """L1: before an agent job on a head checkout (a single-version fork's, or a version-branch fork's head), the jars
     its Port CI workflow's --dep-jar steps pin go into ~/.m2, sha256-checked, as the gates step does (a version branch
-    gets its own through fork-port.py): a worker's ci-gates.py build then finds them. Once per workflow text per round;
-    a jar that cannot be put there is logged, and the job runs (it may need the jar by hand)."""
+    gets its own through fork-port.py): a worker's ci-gates.py build then finds them. Tried once per workflow text per
+    round, whatever the outcome (it runs inside the state's lock: a pin that cannot be fetched is logged once, never
+    retried at every dispatch), and the job runs (it may need the jar by hand). A jar at a pin's coordinate that
+    differs from it is not replaced while a full gate run holds the machine's lock (that run may be building with
+    it): warned about and left."""
     F = st.fork(it["fork"]) if it["fork"] else None
     if not F or it["step"] in NO_BUILD_JOBS or (F["kind"] == "branches" and it["version"] != F["base"]):
         return
@@ -3636,13 +3698,36 @@ def head_pins(st, it, log):
         wf = pathlib.Path(td) / ".github/workflows/port-ci.yml"
         wf.parent.mkdir(parents=True)
         wf.write_text(text, encoding="utf-8")
-        got = mod("ld").install_workflow_pins(td, pin_jar=PIN_JAR)
+        got = mod("ld").install_workflow_pins(td, pin_jar=guarded_pin)
+    F["pins_installed"] = key
     for ok_, m_ in got:
         say_to(log)("round: pins:" + ("" if ok_ else " FAILED") + (" WARNING" if "REPLACED" in m_ else ""), m_)
         if not ok_ or "REPLACED" in m_:
             print(f"round: pins: {'WARNING' if ok_ else 'FAILED'} {it['id']}: {m_}", file=sys.stderr)
-    if all(ok_ for ok_, _m in got):
-        F["pins_installed"] = key
+
+
+def gate_lock_busy():
+    """Does a run hold the machine's full-gate lock right now? (A probe: taken and given back at once when free.)"""
+    p = gate_lock_path()
+    if not p.is_file():
+        return False
+    with open(p, "a+", encoding="utf-8") as fh:
+        if _flock(fh, block=False):
+            _funlock(fh)
+            return False
+        return True
+
+
+def guarded_pin(ga, ver, val):
+    """install_pin (PIN_JAR in the self-check), but never replacing a differing jar under a full gate run (head_pins)."""
+    ld = mod("ld")
+    url, sha = val.split()
+    g_, a_ = ga.split(":")
+    have = ld.m2_root() / g_.replace(".", "/") / a_ / ver / f"{a_}-{ver}.jar"
+    if have.is_file() and hashlib.sha256(have.read_bytes()).hexdigest() != sha and gate_lock_busy():
+        return False, (f"{ga}:{ver}: NOT REPLACED -- {have.as_posix()} differs from the pin ({sha[:12]}) and a full gate "
+                       "run holds the machine's lock; the jar there is left (the gates step installs the pin)")
+    return (PIN_JAR or ld.install_pin)(ga, ver, val)
 
 
 def dispatch_agent(st, it):
@@ -3924,12 +4009,34 @@ def parse_summary(text):
 POST_GATE = ("depgate", "freeze", "pr", "ci")
 
 
+def cite_refs(st, it, F):
+    """N7: where a disproval's path:line or test name is looked for -- origin's head, the job's own branch (and origin's
+    copy of a version branch) and the authors' tracked branch -- never every ref of the clone."""
+    refs = [f"origin/{F['head']}"]
+    if it["version"] != F["base"]:         # a version branch: its own branch, whatever where() can resolve now
+        refs += [f"neoforge-{it['version']}", f"origin/neoforge-{it['version']}"]
+    with contextlib.suppress(StepError, KeyError):
+        br = where(st, it)[1]
+        refs += [br] + ([f"origin/{br}"] if br.startswith("neoforge-") else [])
+    try:
+        fz = next((f for f in json.loads(pathlib.Path(st.data["frozen"]).read_text(encoding="utf-8"))["forks"]
+                   if f["repo"] == it["fork"]), {})
+    except (OSError, ValueError, KeyError):
+        fz = {}
+    rem = authors_remote(F["dir"], fz.get("upstream") or "") if fz.get("upstream") else None
+    if rem and fz.get("upstream_branch"):
+        refs.append(f"{rem}/{fz['upstream_branch']}")
+    ok_ = [r_ for r_ in dict.fromkeys(refs) if git(F["dir"], "rev-parse", "--verify", "--quiet", f"{r_}^{{commit}}").returncode == 0]
+    return ok_ or [f"origin/{F['head']}"]
+
+
 def backlog_checks(st, it, parsed):
     """A backlog summary's `disproved:` and `regrade:` lines, judged when they are recorded. A disproval counts only for
     a suspected entry the job was given, graded S3/S4 at init (the plan's /grade applied), on a fork whose pinned ledger
     readers accept it (B1), that `known-issues.py disprove --check` accepts against the head's ledger (its evidence's
     citation checked in the clone); anything else blocks the job for the owner, as before. A regrade to S1/S2 of an
-    issue the job did not fix blocks this version like any S1/S2 finding. -> (extra `blocking:` lines, why not)."""
+    issue the job did not fix blocks this version like any S1/S2 finding; a regrade never lowers a grade (only the owner's
+    /grade does): one that would blocks the job and is not applied. -> (extra `blocking:` lines, why not)."""
     F = st.fork(it["fork"])
     ki = mod("ki")
     given = {x["id"] for x in it["extra"].get("fixes", [])}
@@ -3947,7 +4054,8 @@ def backlog_checks(st, it, parsed):
             continue
         r = subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "disprove", ident, "--repo", F["dir"],
                             "--ref", f"origin/{F['head']}", "--version", it["version"], "--kind", kind, "--evidence", ev,
-                            "--check"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                            "--check", *sum([["--cite-ref", r_] for r_ in cite_refs(st, it, F)], [])],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode:
             why.append(f"disproved {ident}: refused -- " + ((r.stderr or r.stdout).strip().splitlines() or ["?"])[-1])
     more = []
@@ -3962,6 +4070,11 @@ def backlog_checks(st, it, parsed):
             continue                             # the ledger step names it refused
         sev = (e.get("override") or {}).get("severity") or ki.derive(
             {"failure": fa, "visibility": vi, "reach": re_, "workaround": wk == "yes"})
+        old = sus.get(ident) or ki.effective(e)
+        if ki.sev_rank(sev) > ki.sev_rank(old):
+            why.append(f"regrade {ident} would lower it {old} -> {sev} ({fa}, {vi}, {re_}, workaround {wk}): only the "
+                       f"owner lowers a grade (`/grade {ident} {sev} <reason>` on the plan issue); not applied")
+            continue
         if sev in ("S1", "S2") and ident not in fixed:
             more.append(f"{ident} {sev} re-graded on reproduction ({fa}, {vi}, {re_}, workaround {wk}) and not fixed here")
     return more, why
@@ -4201,7 +4314,8 @@ def cmd_retry(a, out=print):
         # its last outcome goes (a stale `blocking` would block the merge again); a release keeps its dispatch marks,
         # so a retried release waits for a run it already started instead of dispatching a second one
         it["result"] = {k: v for k, v in it.get("result", {}).items() if k in ("dispatching_at", "dispatched_at",
-                                                                                         "dispatched_for", "pre_push")}
+                                                                                         "dispatched_for", "pre_push",
+                                                                                         "refused_disproofs")}
         it.pop("fixing", None)
         if a.allow:
             it["allow_once"] = True
@@ -4368,6 +4482,13 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         (mig / "tools/known-issues.py").write_text(new_ki, encoding="utf-8")
         gm("add", "-A"); gm("commit", "-qm", "new"); gm("tag", "port-ci-kit-v20")
         new_sha = gm("rev-parse", "HEAD")
+        gm("clone", "-q", "--bare", str(mig), str(tmp / "migrator.git"))
+        gm("remote", "add", "origin", "https://github.com/owner/migrator.git")   # N4: its identity; fetched offline
+        gm("config", f"url.{(tmp / 'migrator.git').as_posix()}.insteadOf", "https://github.com/owner/migrator.git")
+        swf = su / PORT_CI_WF                  # the kit pinned by its full URL, as port-ci.py renders it
+        swf.write_text(swf.read_text(encoding="utf-8").replace(
+            ".../port-ci-kit-v20.tar.gz", "https://github.com/owner/migrator/releases/download/port-ci-kit-v20/"
+            "port-ci-kit-v20.tar.gz"), encoding="utf-8")
         mig0 = globals()["MIGRATOR"]
         globals()["MIGRATOR"] = mig
         want(old_ki != new_ki and not reader_accepts(old_ki) and reader_accepts(new_ki),
@@ -4497,22 +4618,93 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         want(bk["status"] == "blocked" and "SU-5 S1 re-graded on reproduction" in (bk.get("note") or "")
              and any("disproved SU-3: not a suspected S3/S4" in w for w in bk["result"].get("not_disproved", [])),
              f"a disproval the round may not make, and an unfixed S1 found on reproduction, block the job: {bk}")
+        rc, o, bk, pre = su_record(f"RESULT: ok\ndisproved: SU-3 no-regression {ev_}\ndisproved: SU-5 no-regression {ev_}\n")
+        want(bk["status"] == "blocked" and any(x_.startswith(f"- {SU} SU-5 at 1.21.1") and "held back with the blocked job"
+                                               in x_ for x_ in pre),
+             f"N6: a valid disproval of a job another line blocked is said to be held back with it: {pre}")
+        # N7: a citation is looked for on origin's head, the job's branch and the authors' branch only
+        git(su, "checkout", "-q", "-b", "elsewhere", check=True)
+        (su / "Other.java").write_text("class Other {}\n", encoding="utf-8")
+        git(su, "add", "Other.java", check=True); git(su, "commit", "-qm", "elsewhere", check=True)
+        git(su, "checkout", "-q", "neoforge-1.21.1", check=True)
+        rc, o, bk, _p = su_record("RESULT: ok\ndisproved: SU-5 no-regression Other.java:1 never had it\n")
+        with State.tx(stA, write=False) as st_:
+            crefs = cite_refs(st_, st_.item(bid), st_.fork(SU))
+        want(bk["status"] == "blocked" and "no citation" in (bk.get("note") or "") and "elsewhere" not in crefs
+             and crefs[0] == "origin/neoforge-1.21.1" and "authors/main" in crefs,
+             f"N7: a path only on an unrelated branch is no citation: {crefs} {bk.get('note')}")
         rc, o, bk, _p = su_record("RESULT: ok\ndisproved: SU-5 no-regression abcdef1234 never had it\n")
         want(bk["status"] == "blocked" and "no citation" in (bk.get("note") or ""),
              f"a disproval whose citation does not exist in the clone blocks the job: {bk.get('note')}")
+        # N1: a regrade never lowers a grade: a suspected S1 regraded to S3 without a fix blocks the job, and the ledger
+        # step neither applies it then nor from a result that skipped the record's check
+        rc, o, bk, _p = su_record("RESULT: ok\nregrade: SU-3 cosmetic rare normal no\n")
+        status_, note, res_, close, led_ = su_ledger()
+        want(bk["status"] == "blocked" and "regrade SU-3 would lower it S1 -> S3" in (bk.get("note") or "")
+             and led_["SU-3"]["severity"] == "S1" and "regrade SU-3 (held back with the blocked job)" in note,
+             f"N1: a lowering regrade blocks the job and is not applied: {bk.get('note')} {note} {led_['SU-3']['severity']}")
+        with State.tx(stA) as st_:
+            st_.item(bid).update(status="ok", result={"regrade": [["SU-3", "cosmetic", "rare", "normal", "no"]]})
+        status_, note, res_, close, led_ = su_ledger()
+        want(status_ == "blocked" and "regrade SU-3 would lower it S1 -> S3" in note and led_["SU-3"]["severity"] == "S1",
+             f"N1: the ledger step refuses a lowering regrade by itself too (blocked, S1 kept): {status_} {note}")
+        # N5: the stop says what the owner can do; a retry of the step goes on without what it refused
+        rc, o = q(cmd_retry, argparse.Namespace(state=stA, id=lid, why=None, allow=False))
+        status2, note2, res2, close, led_ = su_ledger()
+        want("The owner can: close it or re-grade it by hand" in note and f"`round.py retry {lid}`" in note
+             and rc == 0 and status2 == "ok" and "regrade SU-3 not applied (refused before; the owner retried this step)"
+             in note2 and led_["SU-3"]["severity"] == "S1",
+             f"N5: the stop names the owner's ways out; a retried ledger step goes on: {o} {status2} {note2}")
         # B1: the fork's pinned readers decide whether the round writes the new keys
         with State.tx(stA) as st_:
             F_ = st_.fork(SU)
-            r_new, r_kit = ledger_readers({"migrator_sha": new_sha}, F_), ledger_readers({}, F_)
-            r_old = ledger_readers({"migrator_sha": old_sha}, F_)
+            OM = "owner/migrator"
+            r_new, r_kit = ledger_readers({"migrator_sha": new_sha, "migrator_repo": OM}, F_), ledger_readers({}, F_)
+            r_old = ledger_readers({"migrator_sha": old_sha, "migrator_repo": OM}, F_)
             gm("tag", "-f", "port-ci-kit-v20", old_sha)
-            r_oldkit = ledger_readers({"migrator_sha": new_sha}, F_)
+            r_oldkit = ledger_readers({"migrator_sha": new_sha, "migrator_repo": OM}, F_)
             gm("tag", "-f", "port-ci-kit-v20", new_sha)
-            r_gone = ledger_readers({"migrator_sha": "f" * 40}, F_)
+            t0_ = time.monotonic()
+            r_gone = ledger_readers({"migrator_sha": "f" * 40, "migrator_repo": OM}, F_)
+            gone_s = time.monotonic() - t0_
+            r_other = ledger_readers({"migrator_sha": new_sha, "migrator_repo": "someone/other-migrator"}, F_)
+            git(su, "checkout", "-q", "neoforge-1.21.1", check=True)
+            swf.write_text(swf.read_text(encoding="utf-8").replace("github.com/owner/migrator/", "github.com/fork/mmvu/"),
+                           encoding="utf-8")
+            git(su, "commit", "-qam", "a kit from another migrator", check=True)
+            git(su, "push", "-q", "origin", "neoforge-1.21.1", check=True)
+            r_otherkit = ledger_readers({}, F_)
+            git(su, "reset", "-q", "--hard", "HEAD~1", check=True)
+            git(su, "push", "-q", "-f", "origin", "neoforge-1.21.1", check=True)
         want(r_new["ok"] and r_kit["ok"] and not r_old["ok"] and "the weekly plan's pinned tools" in r_old["why"]
              and not r_oldkit["ok"] and "Port CI kit v20 (port-ci-kit-v20) predates suspected entries" in r_oldkit["why"]
-             and not r_gone["ok"] and "could not be read" in r_gone["why"],
-             f"B1: the plan's migrator_sha and the pinned kit are both read: {r_new} {r_old} {r_oldkit} {r_gone}")
+             and not r_gone["ok"] and "could not be read" in r_gone["why"] and gone_s < MIGRATOR_FETCH_TIMEOUT
+             and not r_other["ok"] and "pinned to someone/other-migrator, not this round's migrator (owner/migrator)"
+             in r_other["why"] and not r_otherkit["ok"] and "Port CI kit v20 (port-ci-kit-v20) is pinned to fork/mmvu"
+             in r_otherkit["why"],
+             f"B1: the plan's migrator_sha and the pinned kit are both read, from this migrator only: {r_new} {r_old} "
+             f"{r_oldkit} {r_gone} {r_other} {r_otherkit}")
+        # N3: a commit the clone lacks is fetched alone (--depth 1), bounded by a timeout
+        side = tmp / "migrator-side"
+        git(tmp, "clone", "-q", str(tmp / "migrator.git"), str(side), check=True)
+        (side / "tools/known-issues.py").write_text(new_ki + "# later\n", encoding="utf-8")
+        git(side, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qam", "later", check=True)
+        later = git(side, "rev-parse", "HEAD").stdout.strip()
+        git(side, "push", "-q", "origin", "HEAD:refs/heads/later", check=True)
+        seen_fetch, run0 = [], subprocess.run
+
+        def spy(cmd, *a_, **k_):
+            if "fetch" in cmd:
+                seen_fetch.append((list(cmd), k_.get("timeout")))
+            return run0(cmd, *a_, **k_)
+        subprocess.run = spy
+        try:
+            got_later = migrator_file(later)
+        finally:
+            subprocess.run = run0
+        want(got_later and got_later.endswith("# later\n") and seen_fetch and "--depth" in seen_fetch[0][0]
+             and seen_fetch[0][0][seen_fetch[0][0].index("--depth") + 1] == "1" and seen_fetch[0][1],
+             f"N3: a missing migrator commit is fetched alone, with a timeout: {seen_fetch}")
         with State.tx(stA) as st_:
             st_.fork(SU)["ledger_readers"] = r_old
             told = job_text(st_, st_.item(bid))
@@ -4575,7 +4767,37 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
             head_pins(st_, st_.item("round:close"), tmp / "susA/close.pins.log")
             again_ = list(pinned_jars)
             pk = st_.fork(SU).get("pins_installed")
+            # N2: a pin that cannot be fetched is tried once per workflow text, not at every dispatch
+            git(su, "checkout", "-q", "keep-current/2026-10-21", check=True)
+            wfp.write_text(wfp.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+            git(su, "commit", "-qam", "the workflow changed", check=True)
+            git(su, "checkout", "-q", "neoforge-1.21.1", check=True)
+            del pinned_jars[:]
+            globals()["PIN_JAR"] = lambda ga, ver, val: (pinned_jars.append(ga), (False, f"{ga}: offline (stand-in)"))[1]
+            for i_ in ("examplesvsus@1.21.1:review", "examplesvsus@1.21.1:fix"):
+                st_.item(i_)["status"] = "pending"
+                dispatch_agent(st_, st_.item(i_))
+            failed_once = list(pinned_jars)
+            # a differing jar at the coordinate is not replaced while a full gate run holds the machine's lock
+            m2, m2_0 = tmp / "m2-guard", os.environ.get("MMVU_M2_REPO")
+            os.environ["MMVU_M2_REPO"] = str(m2)
+            jar_ = m2 / "com/example/examplesvlib/1.0/examplesvlib-1.0.jar"
+            jar_.parent.mkdir(parents=True)
+            jar_.write_bytes(b"another jar")
+            del pinned_jars[:]
+            globals()["PIN_JAR"] = lambda ga, ver, val: (pinned_jars.append(ga), (True, "installed (stand-in)"))[1]
+            gate_lock_path().parent.mkdir(parents=True, exist_ok=True)
+            with open(gate_lock_path(), "a+", encoding="utf-8") as hold_:
+                _flock(hold_, block=False)
+                under = guarded_pin("com.example:examplesvlib", "1.0", "https://example.invalid/x.jar " + "a" * 64)
+                _funlock(hold_)
+            free_ = guarded_pin("com.example:examplesvlib", "1.0", "https://example.invalid/x.jar " + "a" * 64)
+            os.environ.pop("MMVU_M2_REPO", None) if m2_0 is None else os.environ.update(MMVU_M2_REPO=m2_0)
         globals()["PIN_JAR"] = pj0
+        want(failed_once == ["com.example:examplesvlib"] and not under[0] and "NOT REPLACED" in under[1]
+             and free_[0] and pinned_jars == ["com.example:examplesvlib"],
+             f"N2: a failing pin tried once; a differing jar left alone under a full gate run: {failed_once} {under} "
+             f"{free_} {pinned_jars}")
         plog = (tmp / "susA/round/logs/examplesvsus@1.21.1_review.pins.log")
         want(len(first) == 1 and first[0][:2] == ("com.example:examplesvlib", "1.0") and again_ == first and pk
              and plog.is_file() and "round: pins: com.example:examplesvlib:1.0 (stand-in)" in plog.read_text(encoding="utf-8"),

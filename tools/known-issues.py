@@ -1531,17 +1531,18 @@ def is_git(repo):
                                                text=True, encoding="utf-8").returncode == 0
 
 
-def verify_citation(repo, ev):
+def verify_citation(repo, ev, refs=None):
     """Does at least one citation of the evidence exist in the fork's clone (its branches, origin's and the authors'
     remote's included)? A commit sha that resolves to a commit, a path:line whose file has that many lines at some ref,
-    or a test name that some ref's tree holds. It proves the citation exists, never the conclusion. -> what verified it,
-    or None."""
+    or a test name that some ref's tree holds (`refs`: only these, e.g. the head, the job's branch and the authors'
+    branch -- the round's; default every branch and remote branch). It proves the citation exists, never the
+    conclusion. -> what verified it, or None."""
     g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, encoding="utf-8",
                                   errors="replace")
     for sha in re.findall(SHA_RE, ev):
         if g("cat-file", "-e", f"{sha}^{{commit}}").returncode == 0:
             return f"commit {sha}"
-    refs = ["HEAD"] + sorted(set(g("for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes").stdout.split())
+    refs = list(refs) if refs else ["HEAD"] + sorted(set(g("for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes").stdout.split())
                              - {r for r in g("for-each-ref", "--format=%(refname)", "refs/remotes").stdout.split()
                                 if r.endswith("/HEAD")})
     for path, line in re.findall(PATH_LINE_RE, ev):
@@ -1557,7 +1558,7 @@ def verify_citation(repo, ev):
     return None
 
 
-def disprove(e, version, kind, evidence, date, repo=None):
+def disprove(e, version, kind, evidence, date, repo=None, refs=None):
     """SUSPECTED ENTRIES: close a suspected S3/S4 as not a defect at `version` (--set's list or range syntax), with
     concrete evidence -- with `repo` (a git clone of the fork), at least one citation of it must exist there
     (verify_citation). Changes `e` in place -> the versions closed; raises Invalid, `e` untouched, when refused."""
@@ -1583,7 +1584,7 @@ def disprove(e, version, kind, evidence, date, repo=None):
         raise Invalid(f"disprove {e['id']}: already disproved once at {', '.join(again)} and open again -- reopened by the "
                       "owner, so it is not the round's to close (to reopen one for good: `status --set <v>=open` and "
                       f"`confirm {e['id']}`)")
-    if repo is not None and not verify_citation(repo, ev):
+    if repo is not None and not verify_citation(repo, ev, refs):
         raise Invalid(f"disprove {e['id']}: no citation of --evidence {ev!r} exists in {repo}: a commit sha that "
                       "resolves, a path:line with that many lines at a branch, or a test name in a branch's tree")
     for v in vs:
@@ -1623,7 +1624,11 @@ def build_parser():
     p.add_argument("--player", help="one line for players: the project page's words for it (page)")
     p.add_argument("--suspected", action="store_true",
                    help="added without a reproduction or a version comparison (a harvest's or a reader's suspicion): "
-                        "a round verifies it first, and may close an S3/S4 one as not a defect (disprove)")
+                        "a round verifies it first, and may close an S3/S4 one as not a defect (disprove). The fork's "
+                        "own pinned tools must read the new key: on a fork whose weekly plan's migrator_sha or Port CI "
+                        "kit predates suspected entries, a suspected entry breaks its plan issue and its publishing "
+                        "until it is re-pinned (weekly-plan.py install --keep-existing, a kit release); the round checks "
+                        "that before it writes one, this command does not")
     p = common(sub.add_parser("confirm", help="a suspected issue reproduced: remove the marker, the evidence in notes"))
     p.add_argument("id"); p.add_argument("--evidence", help="what reproduced it (appended to notes)")
     p = common(sub.add_parser("disprove", help="close a suspected S3/S4 as not a defect, with concrete evidence"))
@@ -1632,6 +1637,9 @@ def build_parser():
     p.add_argument("--kind", required=True, choices=DISPROOF_KINDS)
     p.add_argument("--evidence", required=True, help="a commit sha, a path:line or a test name, and what it shows")
     p.add_argument("--check", action="store_true", help="say whether it would be accepted; write nothing (--ref too)")
+    p.add_argument("--cite-ref", action="append", metavar="REF",
+                   help="with --repo: look for a path:line or test name only at these refs (repeatable; default every "
+                        "branch and remote branch)")
     p = common(sub.add_parser("grade", help="re-grade an issue; an owner override wins and is recorded"))
     p.add_argument("id")
     rubric_args(p, False)
@@ -1791,7 +1799,8 @@ def run(argv):
         return 0
     if a.cmd == "disprove":
         e = find(data, a.id)
-        vs = disprove(e, a.version, a.kind, a.evidence, today(), repo if a.repo and is_git(repo) else None)
+        vs = disprove(e, a.version, a.kind, a.evidence, today(), repo if a.repo and is_git(repo) else None,
+                      a.cite_ref)
         validate(data)
         if a.check:
             out(f"{e['id']}: would be disproved at {', '.join(vs)} ({a.kind}): accepted, nothing written")
@@ -2637,6 +2646,13 @@ def suspected_selfcheck(expect, cli):
                         "--check")
             expect((rc == 0) == ok_ and (ok_ or "no citation" in o), f"--repo: {what} -> {'accepted' if ok_ else 'refused'}: "
                                                                       f"{rc} {o}")
+        g("checkout", "-q", "-b", "elsewhere")
+        pathlib.Path(d, "src/Other.java").write_text("class Other {}\n", encoding="utf-8")
+        g("add", "src/Other.java"); g("commit", "-qm", "elsewhere"); g("checkout", "-q", "neoforge-1.21.1")
+        dv = ("disprove", *R, "KI-20", "--version", "1.21.1", "--kind", "no-regression", "--evidence", "src/Other.java:1",
+              "--check")
+        r1, r2 = cli(*dv), cli(*dv, "--cite-ref", "neoforge-1.21.1")
+        expect(r1[0] == 0 and r2[0] == 2, f"--cite-ref limits where a path:line is looked for: {r1} {r2}")
         # the plan issue says (suspected) on a suspected row only
         expect(sus({"suspected": True}) == " (suspected)" and sus({"id": "KI-4"}) == ""
                and sus({"confidence": SUSPECTED}) == " (suspected)", "the plan's marker")
