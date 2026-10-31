@@ -37,12 +37,15 @@ branch, not the port's head) holds none of origin's neoforge-<v> branches, so it
 26.x version (no JDK 25), no upstream freeze (no remote line) and no weekly-plan.json (it is on the head branch only).
 So first, as tools/round.py init does moments later, each clone that lacks one of origin's neoforge-* branches (or is
 shallow) gets them fetched as remote-tracking refs (refs/remotes/origin/neoforge-*; no branch or working tree moves,
-nothing when the clone already has them all); a fetch that fails is MISSING, as init then refuses. When origin cannot
+nothing when the clone already has them all; a single-branch clone's fetch refspec gains neoforge-*: the one
+implementation, make_whole, which init runs too); a fetch that fails is MISSING with git's message, as init then refuses
+(origin listed within 60 s, a stalled transfer ended, no prompt). When origin cannot
 be listed, a shallow clone's other version branches are still counted by name (git ls-remote) at their version's JDK;
 a single-version fork's origin names are not counted: its versions are as before. weekly-plan.json is read from HEAD,
-origin/HEAD, then the clone's neoforge-* branches. Writes nothing else. Standard library only.
+origin/HEAD, then the clone's neoforge-* head branches (no .port/<v>/branch.properties: the set's config lives on a
+head), then its version branches. Besides those refs and that refspec line it writes nothing. Standard library only.
 """
-import argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys
+import argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -110,29 +113,58 @@ def fork_versions(repo, heads=origin_heads):
     return out
 
 
-def make_whole(repo):
-    """None, or why the clone cannot be made whole: tools/round.py init's fetch_version_branches, run first so the
-    checks read what the round will (weekly round 2026-10-31: a dependent's clone of its default branch held no 26.x
-    branch, so no JDK 25 line, and its 26.1.2 measure stopped on the Gradle toolchain; the library's held no freeze, so
-    no line for its missing `authors` remote). origin's neoforge-* branches are fetched as remote-tracking refs (the
-    clone unshallowed when it is shallow) when one is missing; nothing is fetched when none is."""
-    r = subprocess.run(["git", "-C", str(repo), "ls-remote", "--heads", "origin", "refs/heads/neoforge-*"],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
-    if r.returncode:
-        return f"cannot list origin's branches ({(r.stderr or r.stdout).strip()[-200:]}): round.py init refuses too"
-    remote = sorted(ln.split("refs/heads/", 1)[1] for ln in r.stdout.splitlines() if "refs/heads/" in ln)
+LIST_TIMEOUT = 60           # git ls-remote: the preflight's one read of origin before (origin_heads)
+FETCH_TIMEOUT = 1800        # a whole fetch (an unshallow of a large fork); a stalled transfer ends sooner (lowSpeed*)
+
+
+def net_git(repo, args, timeout):
+    """(rc, stdout, stderr) of a git command that talks to origin: no prompt (GIT_TERMINAL_PROMPT=0), a stalled
+    transfer ended by git itself (http.lowSpeedLimit/Time), the whole bounded by `timeout`; its output through files,
+    never pipes (Windows: a killed git leaves git-remote-https holding a pipe, and the timeout would wait on it)."""
+    import tempfile
+    with tempfile.TemporaryFile() as o, tempfile.TemporaryFile() as e:
+        try:
+            rc = subprocess.run(["git", "-C", str(repo), "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=30", *args],
+                                stdin=subprocess.DEVNULL, stdout=o, stderr=e, timeout=timeout,
+                                env=dict(os.environ, GIT_TERMINAL_PROMPT="0")).returncode
+        except subprocess.TimeoutExpired:
+            rc = None
+        except OSError as x:
+            return 1, "", str(x)
+        o.seek(0); e.seek(0)
+        out, err = (f.read().decode("utf-8", "replace") for f in (o, e))
+    if rc is None:
+        return 1, out, (err.strip() + f" (no answer in {timeout} s)").strip()
+    return rc, out, err
+
+
+def make_whole(repo, say=None):
+    """None, or why the clone cannot be made whole -- the one implementation tools/round.py init runs too
+    (fetch_version_branches), run here first so the checks read what the round will (weekly round 2026-10-31: a
+    dependent's clone of its default branch held no 26.x branch, so no JDK 25 line, and its 26.1.2 measure stopped on
+    the Gradle toolchain; the library's held no freeze, so no line for its missing `authors` remote). A shallow or
+    single-branch clone has none of origin's neoforge-<v> branches, so a version-branch fork would read as
+    single-version: origin's neoforge-* branches are fetched whole as remote-tracking refs (the clone made whole when it
+    is shallow; a single-branch clone's fetch refspec gains neoforge-*) when one is missing, and nothing is fetched when
+    none is. say(what) is told what was fetched."""
+    rc, out, err = net_git(repo, ["ls-remote", "--heads", "origin", "refs/heads/neoforge-*"], LIST_TIMEOUT)
+    if rc:
+        return f"cannot list origin's branches ({(err or out).strip()[-200:]}): the fork's kind is read from them"
+    remote = sorted(ln.split("refs/heads/", 1)[1] for ln in out.splitlines() if "refs/heads/" in ln)
     shallow = git(repo, "rev-parse", "--is-shallow-repository")[1].strip() == "true"
     missing = [b for b in remote if git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{b}")[0]]
     if not missing and not shallow:
         return None
-    rc, _ = git(repo, "fetch", "-q", *(["--unshallow"] if shallow else []), "origin",
-                *[f"+refs/heads/{b}:refs/remotes/origin/{b}" for b in remote])
+    rc, out, err = net_git(repo, ["fetch", "-q", *(["--unshallow"] if shallow else []), "origin",
+                                  *[f"+refs/heads/{b}:refs/remotes/origin/{b}" for b in remote]], FETCH_TIMEOUT)
     if rc:
-        return (f"a shallow or single-branch clone (missing {', '.join(missing) or 'its history'}) and fetching them "
-                "failed: clone the fork whole (no --depth/--single-branch)")
+        return (f"a shallow or single-branch clone (missing {', '.join(missing) or 'its history'}), and fetching them "
+                f"failed: {(err or out).strip()[-200:]} -- clone the fork whole (no --depth/--single-branch)")
     if missing and not any("*" in x for x in git(repo, "config", "--get-all", "remote.origin.fetch")[1].split()):
+        # a single-branch clone's fetch refspec names one branch: later `git fetch origin <b>` must update origin/<b>
         git(repo, "config", "--add", "remote.origin.fetch", "+refs/heads/neoforge-*:refs/remotes/origin/neoforge-*")
+    if say:
+        say(", ".join(missing) if missing else "history (the clone was shallow)")
     return None
 
 
@@ -157,14 +189,15 @@ def norm_url(u):
 
 def plan_upstreams(dirs):
     """{fork slug (lower case): (the authors' repository URL, their branch)} from .github/weekly-plan.json at HEAD (else
-    origin/HEAD, else the clone's neoforge-* branches, lowest version first) of each clone given: the library's head
-    branch holds the set's config (keep-current, "The fork set"), and a clone of the GitHub default branch may not be
-    on it."""
+    origin/HEAD, else the clone's neoforge-* head branches -- no .port/<v>/branch.properties -- then its version
+    branches, lowest version first) of each clone given: the library's head branch holds the set's config
+    (keep-current, "The fork set"), and a clone of the GitHub default branch may not be on it."""
     out = {}
     for d in dirs:
         rc, refs = git(d, "for-each-ref", "--format=%(refname:short)", "refs/heads/neoforge-*",
                        "refs/remotes/origin/neoforge-*")
-        held = sorted(refs.split() if rc == 0 else [], key=lambda r: (mc_key(r.split("neoforge-", 1)[1]), r))
+        vb = lambda r: git(d, "cat-file", "-e", f"{r}:.port/{r.split('neoforge-', 1)[1]}/branch.properties")[0] == 0
+        held = sorted(refs.split() if rc == 0 else [], key=lambda r: (vb(r), mc_key(r.split("neoforge-", 1)[1]), r))
         for ref in ("HEAD", "origin/HEAD", *held):
             rc, cfg = git(d, "show", f"{ref}:.github/weekly-plan.json")
             if rc != 0:
@@ -471,6 +504,44 @@ def self_check():
                and git(cc, "rev-parse", "--abbrev-ref", "HEAD")[1].strip() == "main",
                "make_whole fetches origin's neoforge-* branches as remote-tracking refs; the checkout stays where it was")
         expect(make_whole(cc) is None, "a whole clone: nothing to fetch, no error")
+        # a version branch LOWER than the head that carries an older config: the head's config wins
+        ga("checkout", "-q", "-b", "neoforge-1.20.6", "neoforge-26.1.2"); (au / ".port/1.20.6").mkdir()
+        (au / ".port/1.20.6/branch.properties").write_text("minecraft_version=1.20.6\n", encoding="utf-8")
+        (au / ".github/weekly-plan.json").write_text(json.dumps({"forks": [{"repo": "owner/examplemod", "upstream":
+                                                     "https://github.com/stale/examplemod"}]}), encoding="utf-8")
+        cm("an older config on a version branch"); ga("checkout", "-q", "main")
+        told = []
+        expect(make_whole(cc, say=told.append) is None and told == ["neoforge-1.20.6"],
+               f"a branch origin gained is fetched, and said: {told}")
+        bad_ = d / "no-origin"
+        subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "main", au.as_uri(), str(bad_)], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(bad_), "remote", "set-url", "origin", (d / "gone.git").as_uri()], check=True)
+        why_ = make_whole(bad_) or ""
+        expect(why_.startswith("cannot list origin's branches (") and ("gone.git" in why_ or "fatal" in why_),
+               f"origin that cannot be listed: git's own message in the MISSING line: {why_}")
+        ff_ = d / "fetch-fails"         # origin lists, the fetch fails: git's message in the MISSING line
+        subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "main", au.as_uri(), str(ff_)], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(ff_), "config", "fetch.negotiationAlgorithm", "bogus"], check=True)
+        why_ = make_whole(ff_) or ""
+        expect("and fetching them failed: " in why_ and "bogus" in why_ and "clone the fork whole" in why_,
+               f"a fetch that fails: git's message in the MISSING line: {why_}")
+        if os.name != "nt":      # the ext transport runs a shell command (POSIX here)
+            ext = ["-c", "protocol.ext.allow=always", "ls-remote"]
+            (d / "env.sh").write_text("echo prompt=$GIT_TERMINAL_PROMPT >&2\nexit 1\n", encoding="utf-8")
+            (d / "hang.sh").write_text("sleep 20\n", encoding="utf-8")
+            env0_ = os.environ.get("GIT_TERMINAL_PROMPT")
+            os.environ["GIT_TERMINAL_PROMPT"] = "1"        # the caller's own setting does not matter
+            try:
+                rc_, _o, e_ = net_git(au, ext + [f"ext::sh {(d / 'env.sh').as_posix()}"], 30)
+            finally:
+                os.environ.pop("GIT_TERMINAL_PROMPT") if env0_ is None else os.environ.update(GIT_TERMINAL_PROMPT=env0_)
+            expect(rc_ != 0 and "prompt=0" in e_, f"no terminal prompt on a network read: {rc_} {e_}")
+            t_ = time.time()
+            rc_, _o, e_ = net_git(au, ext + [f"ext::sh {(d / 'hang.sh').as_posix()}"], 2)
+            expect(rc_ == 1 and "no answer in 2 s" in e_ and time.time() - t_ < 15,
+                   f"a network read that never answers is cut off: {rc_} {e_} {time.time() - t_:.1f}s")
         subprocess.run(["git", "-C", str(cc), "remote", "set-url", "origin", gh_url], check=True)
         seen = []
         res = checks(whole=lambda r: seen.append(pathlib.Path(r)) or None, forks=[("owner/examplelib", cc)],
@@ -481,7 +552,8 @@ def self_check():
         expect(not j25[0] and "26.1.2" in j25[1] and ra[0] is False and "exit 19" in ra[1] and f"authors' remote of {cc}" not in by,
                f"the whole clone: JDK 25 for 26.1.2 and the freeze's `authors` remote are missing: {by}")
         expect(plan_upstreams([cc]).get("owner/examplemod") == ("https://github.com/up/examplemod", "dev"),
-               f"weekly-plan.json read from the head branch when HEAD and origin/HEAD lack it: {plan_upstreams([cc])}")
+               f"weekly-plan.json read from the head branch (not a lower version branch) when HEAD and origin/HEAD lack "
+               f"it: {plan_upstreams([cc])}")
         res = checks(whole=lambda r: "fetching them failed", forks=[("owner/examplelib", cc)], env={"GH_TOKEN": "y"},
                      find_java=jdks.get, linux=False, heads=none)
         expect(any(ok is False and w == "version branches of owner/examplelib" and "failed" in det for ok, w, det in res),

@@ -362,25 +362,9 @@ def full_gate_lock(who, say=print):
 def fetch_version_branches(d):
     """None, or why the clone cannot tell its kind: a shallow or single-branch clone (a cloud session's) has none of
     origin's neoforge-<v> branches, so a version-branch fork would read as single-version. origin's neoforge-* branches
-    are fetched whole (and the clone made whole when it is shallow); a fetch that fails refuses."""
-    r = git(d, "ls-remote", "--heads", "origin", "refs/heads/neoforge-*")
-    if r.returncode:
-        return f"cannot list origin's branches ({(r.stderr or r.stdout).strip()[-200:]}): the fork's kind is read from them"
-    remote = sorted(ln.split("refs/heads/", 1)[1] for ln in r.stdout.splitlines() if "refs/heads/" in ln)
-    shallow = git(d, "rev-parse", "--is-shallow-repository").stdout.strip() == "true"
-    missing = [b for b in remote if git(d, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{b}").returncode]
-    if not missing and not shallow:
-        return None
-    r = git(d, "fetch", "-q", *(["--unshallow"] if shallow else []), "origin",
-            *[f"+refs/heads/{b}:refs/remotes/origin/{b}" for b in remote])
-    if r.returncode:
-        return (f"a shallow or single-branch clone (missing {', '.join(missing) or 'its history'}), and fetching them "
-                f"failed: {(r.stderr or r.stdout).strip()[-200:]} -- clone the fork whole (no --depth/--single-branch)")
-    if missing and not any("*" in x for x in git(d, "config", "--get-all", "remote.origin.fetch").stdout.split()):
-        # a single-branch clone's fetch refspec names one branch: later `git fetch origin <b>` must update origin/<b>
-        git(d, "config", "--add", "remote.origin.fetch", "+refs/heads/neoforge-*:refs/remotes/origin/neoforge-*")
-    print(f"round: {d}: fetched origin's " + (", ".join(missing) if missing else "history (the clone was shallow)"))
-    return None
+    are fetched whole (and the clone made whole when it is shallow); a fetch that fails refuses. The one implementation
+    is round-preflight.py's make_whole, which the round's preflight runs first (bounded, no prompt)."""
+    return mod("rp").make_whole(d, say=lambda what: print(f"round: {d}: fetched origin's {what}"))
 
 
 def fork_kind(d):
