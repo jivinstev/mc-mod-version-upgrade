@@ -5,7 +5,9 @@ each Minecraft version (issue #135, part 1).
 
     python3 tools/known-issues.py add     [LEDGER] --title T --failure F --visibility V --reach R --workaround yes|no
                                           --lowest MC [--status MC=STATE ...] [--id ID] [--source S] [--notes N]
-                                          [--file PATH ...] [--pattern REGEX] [--platform mr|cf ...]
+                                          [--file PATH ...] [--pattern REGEX] [--platform mr|cf ...] [--suspected]
+    python3 tools/known-issues.py confirm [LEDGER] ID [--evidence TEXT]
+    python3 tools/known-issues.py disprove [LEDGER] ID --version MC[,MC...|FROM..TO] --kind KIND --evidence TEXT [--check]
     python3 tools/known-issues.py grade   [LEDGER] ID [--failure F] [--visibility V] [--reach R] [--workaround yes|no]
                                           [--override S --reason WHY [--by WHO] | --clear-override]
     python3 tools/known-issues.py status  [LEDGER] ID [--set MC[,MC...|FROM..TO]=STATE ...] [--lowest MC] [--pattern REGEX]
@@ -62,8 +64,12 @@ THE SCHEMA (schema 1):
                "platforms": ["cf"],             # optional: only that platform's jar (mr Modrinth, cf CurseForge);
                                                 # absent: every platform
                "notes": "...",
-               "player": "..."}]}                 # optional: one line for players, in the words of the project
+               "player": "...",                 # optional: one line for players, in the words of the project
                                                 # page's "Known issues" (`page`); absent: the title
+               "confidence": "suspected",       # optional: added without a reproduction or a version comparison
+                                                # (absent: confirmed); `confirm` removes it
+               "disproved": [{"kind": "no-regression", "evidence": "...", "versions": ["1.21.1"],
+                              "date": "2026-10-31"}]}]}   # optional: `disprove`'s records
   A version missing from status is not affected. Which releases contain an issue is never stored: release-notes works
   it out from the tag (with --repo, a fixed@<commit> that is not in the tag counts as open there).
 
@@ -92,6 +98,23 @@ plan's fix_at stays; the round's `lowest` job confirms or rejects it). With no p
 holding a listed file byte-identical to the fix version's is `unchanged` ("lowest may be lower (unchecked)"), one
 holding it changed is `present`; a branch with none of the files cannot have the defect in them. With no files and no
 pattern every such branch is `unchecked`. A single-version fork has no branch below its one version: nothing to check.
+
+SUSPECTED ENTRIES. An entry added without a reproduction or a version comparison (a lesson harvest's or a reader's
+suspicion: `add --suspected`) carries `"confidence": "suspected"`; `list` shows its grade as `S3?`, render-issue and the
+plan issue as "(suspected)". A worker who reproduces it runs `confirm ID [--evidence TEXT]` (the marker removed, the
+evidence appended to notes). One who proves it is NOT a defect runs `disprove ID --version V --kind K --evidence TEXT`,
+allowed only for a suspected entry whose effective grade (the override's, when there is one) is S3 or S4, with evidence
+that cites something concrete -- a commit sha, a `path:line` or a test name -- and K one of no-regression (the
+original never had the behaviour), api-unchanged (the target version's API does not change it) or test-passes (a test
+of the behaviour passes): each named version (open there; --version takes --set's list and range syntax) becomes
+`wontfix:not a defect (disproved, K): TEXT`, the record is appended to `disproved`, and the entry is otherwise kept.
+A confirmed entry, an S1/S2, vague evidence or a version disproved once before (the owner reopened it) is refused
+(exit 2); `--check` says whether it would be accepted and writes nothing (it reads `--ref` too). With a git clone
+(`--repo`), at least one citation must exist there -- a sha that resolves to a commit (the authors' remote included), a
+path:line whose file has that many lines at some branch, or a test name some branch's tree holds: that proves the
+citation exists, never the conclusion; every closure the round makes is listed for the owner in its closing comment.
+A disproval at one version leaves the entry's other versions as they were (open stays open). To reopen a closed one for
+good: `status --set <v>=open` and `confirm ID` (no longer suspected, so no round closes it again).
 
 ONLY S1 GOES BACK. A finding at a version that is already done reopens it only when it is an S1 (`reopens` answers
 yes, exit 0); any other finding goes into the ledger at its lowest affected version (exit 1).
@@ -158,7 +181,15 @@ STATE_RE = re.compile(r"^(?:open|n/a|fixed@[0-9a-f]{7,40}|wontfix:\S.*|duplicate
 DEFAULT_BUDGET = 3
 TOP_KEYS = {"schema", "issues"}
 ISSUE_KEYS = {"id", "title", "rubric", "severity", "override", "lowest", "status", "source", "files", "pattern",
-              "platforms", "notes", "player"}
+              "platforms", "notes", "player", "confidence", "disproved"}
+SUSPECTED = "suspected"                      # the one `confidence` value (absent: confirmed)
+DISPROOF_KINDS = ("no-regression", "api-unchanged", "test-passes")
+# concrete evidence: a commit sha (7-40 hex with a digit and a letter: not a word, not a number), a path:line, or a test
+# name (FooTest, FooTest#bar, testBar, test_bar)
+SHA_RE = r"(?<![0-9A-Za-z])(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9A-Za-z])"
+PATH_LINE_RE = r"([\w./-]+\.\w+):(\d+)"
+TEST_RE = r"\b[A-Z]\w*Tests?\b|\btest(?:_\w+|[A-Z]\w*)"
+EVIDENCE_RE = re.compile(f"{SHA_RE}|{PATH_LINE_RE}|{TEST_RE}")
 
 
 class Invalid(Exception):
@@ -270,6 +301,16 @@ def validate(data):
             raise Invalid(f"{where}: notes must be text")
         if "player" in e and (not isinstance(e["player"], str) or not e["player"].strip() or "\n" in e["player"]):
             raise Invalid(f"{where}: player must be one line of text")
+        if "confidence" in e and e["confidence"] != SUSPECTED:
+            raise Invalid(f"{where}: confidence {e['confidence']!r} must be {SUSPECTED!r} (absent: confirmed)")
+        dp = e.get("disproved", [])
+        if "disproved" in e and (not isinstance(dp, list) or not dp or not all(
+                isinstance(x, dict) and set(x) == {"kind", "evidence", "versions", "date"} and x["kind"] in DISPROOF_KINDS
+                and isinstance(x["evidence"], str) and x["evidence"].strip() and isinstance(x["versions"], list)
+                and x["versions"] and all(isinstance(v, str) and MC_RE.match(v) for v in x["versions"])
+                and isinstance(x["date"], str) for x in dp)):
+            raise Invalid(f"{where}: disproved must be a non-empty list of {{kind ({', '.join(DISPROOF_KINDS)}), "
+                          "evidence, versions, date}")
     for e in issues:              # duplicate:<ID> names another issue of this ledger
         for v, s in e["status"].items():
             if s.startswith("duplicate:") and (s[10:] == e["id"] or s[10:] not in seen):
@@ -633,7 +674,8 @@ def render_issue(data):
     out.append("|---|---|---| " + " | ".join("---" for _ in vs) + " |")
     for e in issues:
         sev = e["severity"] + ("\\*" if e.get("override") else "")
-        out.append(f"| {sev} | {e['id']} | {md(e['title'] + scope(e))} | " + " | ".join(cell(e["status"].get(v)) for v in vs) + " |")
+        title = e["title"] + scope(e) + (" (suspected)" if suspected(e) else "")
+        out.append(f"| {sev} | {e['id']} | {md(title)} | " + " | ".join(cell(e["status"].get(v)) for v in vs) + " |")
     notes = [f"- {e['id']}: graded {e['override']['severity']} by {e['override'].get('by', 'owner')} "
              f"(the rubric gives {derive(e['rubric'])}): {md(e['override']['reason'])}" for e in issues if e.get("override")]
     notes += [f"- {e['id']} at {v}: won't fix: {md(s[8:])}" for e in issues
@@ -642,6 +684,8 @@ def render_issue(data):
               for v, s in sorted(e["status"].items(), key=lambda x: mc_key(x[0])) if s.startswith("duplicate:")]
     if notes:
         out += ["", "\\* an owner override.", ""] + notes
+    if any(suspected(e) for e in issues):
+        out += ["", "(suspected): recorded without a reproduction yet; the round verifies it before fixing it."]
     out += ["", "S1 crash, kick, data loss or hang (blocks publishing); S2 a core feature broken in normal play, no "
             "workaround, or a crash on a path nothing calls yet; S3 cosmetic, uncommon or with a workaround; S4 "
             "invisible or an unusual setup."]
@@ -862,6 +906,11 @@ def sv_merge_lines(f):
             "this plan does not show."]
 
 
+def sus(r):
+    """A plan row's marker for a suspected entry (weekly-plan.py's rows carry `suspected`; a ledger entry `confidence`)."""
+    return " (suspected)" if r.get("suspected") or r.get("confidence") == SUSPECTED else ""
+
+
 def render_plan(inp):
     """PLAN-INPUT (tools/weekly-plan.py) -> {"title", "body", "decision_needed"}."""
     forks = inp["forks"]
@@ -901,7 +950,7 @@ def render_plan(inp):
                 lines += [f"### New in the ledger since the last plan (#{lp['issue']})", "",
                           "Added by the round (its findings, graded by the rubric) or by hand since then; each one open "
                           "is in the lists below.", ""]
-                lines += [f"- `{e['id']}` **{e['severity']}** {md(e['title'])} (lowest {e['lowest']}; "
+                lines += [f"- `{e['id']}` **{e['severity']}** {md(e['title'])}{sus(e)} (lowest {e['lowest']}; "
                           + ", ".join(f"{v} {st}" for v, st in sorted(e.get("status", {}).items(), key=lambda x: mc_key(x[0])))
                           + ")" for e in fresh]
                 lines.append("")
@@ -942,11 +991,11 @@ def render_plan(inp):
         for r in sel:
             on = ticks.get(r["id"], True)
             lines.append(f"- [{'x' if on else ' '}] **{r['severity']}** `{_q(repo, r['id'], multi, clash)}` "
-                         f"{md(r.get('title', ''))} -- {_where(r)}; {r['why']} <!-- ki:{repo}:{r['id']} default -->")
+                         f"{md(r.get('title', ''))}{sus(r)} -- {_where(r)}; {r['why']} <!-- ki:{repo}:{r['id']} default -->")
         for r in cand:
             on = ticks.get(r["id"], False)
             lines.append(f"- [{'x' if on else ' '}] **{r['severity']}** `{_q(repo, r['id'], multi, clash)}` "
-                         f"{md(r.get('title', ''))} -- {_where(r)}; not in the default selection "
+                         f"{md(r.get('title', ''))}{sus(r)} -- {_where(r)}; not in the default selection "
                          f"<!-- ki:{repo}:{r['id']} candidate -->")
         if not sel and not cand:
             lines.append(f"No open known issues in the ledger (`.port/{LEDGER_NAME}` on `{f['head']}`).")
@@ -1367,6 +1416,11 @@ def put_block(text, block):
 
 # ---------------------------------------------------------------- the command line
 
+def today():
+    import datetime
+    return datetime.date.today().isoformat()
+
+
 def yesno(s):
     if s in ("yes", "true"):
         return True
@@ -1468,6 +1522,77 @@ def regrade(e, a):
     e["severity"] = effective(e)
 
 
+def suspected(e):
+    return e.get("confidence") == SUSPECTED
+
+
+def is_git(repo):
+    return repo is not None and subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-dir"], capture_output=True,
+                                               text=True, encoding="utf-8").returncode == 0
+
+
+def verify_citation(repo, ev, refs=None):
+    """Does at least one citation of the evidence exist in the fork's clone (its branches, origin's and the authors'
+    remote's included)? A commit sha that resolves to a commit, a path:line whose file has that many lines at some ref,
+    or a test name that some ref's tree holds (`refs`: only these, e.g. the head, the job's branch and the authors'
+    branch -- the round's; default every branch and remote branch). It proves the citation exists, never the
+    conclusion. -> what verified it, or None."""
+    g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace")
+    for sha in re.findall(SHA_RE, ev):
+        if g("cat-file", "-e", f"{sha}^{{commit}}").returncode == 0:
+            return f"commit {sha}"
+    refs = list(refs) if refs else ["HEAD"] + sorted(set(g("for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes").stdout.split())
+                             - {r for r in g("for-each-ref", "--format=%(refname)", "refs/remotes").stdout.split()
+                                if r.endswith("/HEAD")})
+    for path, line in re.findall(PATH_LINE_RE, ev):
+        for ref in refs:
+            r = g("show", f"{ref}:{path}")
+            if r.returncode == 0 and len(r.stdout.splitlines()) >= int(line) > 0:
+                return f"{path}:{line} at {ref}"
+    for name in sorted(set(re.findall(TEST_RE, ev))):
+        word = re.split(r"[#.]", name)[0]
+        for ref in refs:
+            if g("grep", "-q", "-w", "-F", "-e", word, ref).returncode == 0:
+                return f"test {word} at {ref}"
+    return None
+
+
+def disprove(e, version, kind, evidence, date, repo=None, refs=None):
+    """SUSPECTED ENTRIES: close a suspected S3/S4 as not a defect at `version` (--set's list or range syntax), with
+    concrete evidence -- with `repo` (a git clone of the fork), at least one citation of it must exist there
+    (verify_citation). Changes `e` in place -> the versions closed; raises Invalid, `e` untouched, when refused."""
+    if not suspected(e):
+        raise Invalid(f"disprove {e['id']}: only a suspected entry may be disproved; {e['id']} is confirmed (fix it, or "
+                      "the owner closes it: `status --set <v>=wontfix:<reason>`)")
+    if sev_rank(effective(e)) < sev_rank("S3"):
+        raise Invalid(f"disprove {e['id']}: it grades {effective(e)}; only an S3 or S4 is closed without the owner -- "
+                      "an S1/S2 suspicion is the owner's call (RESULT: blocked naming what to ask)")
+    if kind not in DISPROOF_KINDS:
+        raise Invalid(f"disprove --kind {kind!r}: one of {', '.join(DISPROOF_KINDS)}")
+    ev = " ".join((evidence or "").split())
+    if not ev or not EVIDENCE_RE.search(ev):
+        raise Invalid(f"disprove {e['id']}: --evidence {ev!r} cites nothing concrete: name a commit sha, a path:line "
+                      "or a test name that shows it is not a defect")
+    vs = sorted(expand_states([f"{version}=x"], e["status"]), key=mc_key)
+    shut = [v for v in vs if e["status"].get(v) != "open"]
+    if shut:
+        raise Invalid(f"disprove {e['id']}: not open at {', '.join(shut)} (" + ", ".join(
+            f"{v}={e['status'].get(v, 'not affected')}" for v in shut) + ")")
+    again = [v for v in vs if any(v in x["versions"] for x in e.get("disproved", []))]
+    if again:
+        raise Invalid(f"disprove {e['id']}: already disproved once at {', '.join(again)} and open again -- reopened by the "
+                      "owner, so it is not the round's to close (to reopen one for good: `status --set <v>=open` and "
+                      f"`confirm {e['id']}`)")
+    if repo is not None and not verify_citation(repo, ev, refs):
+        raise Invalid(f"disprove {e['id']}: no citation of --evidence {ev!r} exists in {repo}: a commit sha that "
+                      "resolves, a path:line with that many lines at a branch, or a test name in a branch's tree")
+    for v in vs:
+        e["status"][v] = f"wontfix:not a defect (disproved, {kind}): {ev}"
+    e["disproved"] = e.get("disproved", []) + [{"kind": kind, "evidence": ev, "versions": vs, "date": date}]
+    return vs
+
+
 def build_parser():
     ap = argparse.ArgumentParser(prog="known-issues.py", description="The fork port's known-issues ledger (S1-S4).")
     ap.add_argument("--self-check", action="store_true")
@@ -1497,6 +1622,24 @@ def build_parser():
     p.add_argument("--platform", action="append", dest="platforms", choices=PLATFORMS,
                    help="only this platform's jar is affected (repeatable; default: every platform)")
     p.add_argument("--player", help="one line for players: the project page's words for it (page)")
+    p.add_argument("--suspected", action="store_true",
+                   help="added without a reproduction or a version comparison (a harvest's or a reader's suspicion): "
+                        "a round verifies it first, and may close an S3/S4 one as not a defect (disprove). The fork's "
+                        "own pinned tools must read the new key: on a fork whose weekly plan's migrator_sha or Port CI "
+                        "kit predates suspected entries, a suspected entry breaks its plan issue and its publishing "
+                        "until it is re-pinned (weekly-plan.py install --keep-existing, a kit release); the round checks "
+                        "that before it writes one, this command does not")
+    p = common(sub.add_parser("confirm", help="a suspected issue reproduced: remove the marker, the evidence in notes"))
+    p.add_argument("id"); p.add_argument("--evidence", help="what reproduced it (appended to notes)")
+    p = common(sub.add_parser("disprove", help="close a suspected S3/S4 as not a defect, with concrete evidence"))
+    p.add_argument("id")
+    p.add_argument("--version", required=True, metavar="MC[,MC...|FROM..TO]", help="the version(s) it is not a defect at")
+    p.add_argument("--kind", required=True, choices=DISPROOF_KINDS)
+    p.add_argument("--evidence", required=True, help="a commit sha, a path:line or a test name, and what it shows")
+    p.add_argument("--check", action="store_true", help="say whether it would be accepted; write nothing (--ref too)")
+    p.add_argument("--cite-ref", action="append", metavar="REF",
+                   help="with --repo: look for a path:line or test name only at these refs (repeatable; default every "
+                        "branch and remote branch)")
     p = common(sub.add_parser("grade", help="re-grade an issue; an owner override wins and is recorded"))
     p.add_argument("id")
     rubric_args(p, False)
@@ -1606,11 +1749,11 @@ def run(argv):
     path = pathlib.Path(a.ledger) if a.ledger else repo / ledger_rel(a.mod)
     if a.cmd == "render-ports":
         return cmd_render_ports(a, repo, out)
-    writes = a.cmd in ("add", "grade", "status", "player")
+    writes = a.cmd in ("add", "grade", "status", "player", "confirm") or (a.cmd == "disprove" and not a.check)
     if writes and a.ref:
         raise Invalid(f"--ref is read-only: {a.cmd} writes the file on the head branch's checkout")
     data = read_ledger(path, repo, a.ref, a.mod)
-    vs = getattr(a, "version", None) or []
+    vs = (getattr(a, "version", None) if a.cmd != "disprove" else None) or []
     for v in [*([vs] if isinstance(vs, str) else vs), *([a.lowest] if getattr(a, "lowest", None) else [])]:
         if not MC_RE.match(v):
             raise Invalid(f"{v!r} is not a Minecraft version (--version, --lowest)")
@@ -1635,10 +1778,35 @@ def run(argv):
             e["platforms"] = sorted(set(a.platforms), key=PLATFORMS.index)
         if a.player:
             e["player"] = a.player.strip()
+        if a.suspected:
+            e["confidence"] = SUSPECTED
         e["severity"] = effective(e)
         data["issues"].append(e)
         write_ledger(path, data)
-        out(f"{i}: {e['severity']} ({a.failure}, {a.visibility}, {a.reach}, workaround {a.workaround}) -> {path}")
+        out(f"{i}: {e['severity']}{'?' if a.suspected else ''} ({a.failure}, {a.visibility}, {a.reach}, workaround "
+            f"{a.workaround}){' suspected' if a.suspected else ''} -> {path}")
+        return 0
+    if a.cmd == "confirm":
+        e = find(data, a.id)
+        if not suspected(e):
+            raise Invalid(f"confirm {e['id']}: it is not suspected (already confirmed)")
+        del e["confidence"]
+        ev = " ".join((a.evidence or "").split())
+        line = f"Confirmed {today()}" + (f": {ev}" if ev else ".")
+        e["notes"] = (e["notes"].rstrip() + " " if e.get("notes", "").strip() else "") + line
+        write_ledger(path, data)
+        out(f"{e['id']}: {e['severity']} confirmed" + (f" ({ev})" if ev else ""))
+        return 0
+    if a.cmd == "disprove":
+        e = find(data, a.id)
+        vs = disprove(e, a.version, a.kind, a.evidence, today(), repo if a.repo and is_git(repo) else None,
+                      a.cite_ref)
+        validate(data)
+        if a.check:
+            out(f"{e['id']}: would be disproved at {', '.join(vs)} ({a.kind}): accepted, nothing written")
+            return 0
+        write_ledger(path, data)
+        out(f"{e['id']}: disproved at {', '.join(vs)} ({a.kind}): " + ", ".join(f"{v}={e['status'][v]}" for v in vs))
         return 0
     if a.cmd == "grade":
         e = find(data, a.id)
@@ -1683,7 +1851,7 @@ def run(argv):
         for e in ([] if a.json else rows):
             st = e["status"].get(a.version) if a.version else ", ".join(
                 f"{v}={s}" for v, s in sorted(e["status"].items(), key=lambda x: mc_key(x[0])))
-            out(f"{e['id']}\t{e['severity']}{'*' if e.get('override') else ''}\tlowest {e['lowest']}\t{st}\t{e['title']}{scope(e)}")
+            out(f"{e['id']}\t{e['severity']}{'*' if e.get('override') else ''}{'?' if suspected(e) else ''}\tlowest {e['lowest']}\t{st}\t{e['title']}{scope(e)}")
         return 0
     if a.cmd == "select":
         picked = select(data, a.budget, a.touched, a.version, a.add, a.remove)
@@ -2353,11 +2521,141 @@ def self_check():
     plan_check(expect, cli)
     plan_untaken_check(expect, cli)
     lowest_selfcheck(expect, cli)
+    suspected_selfcheck(expect, cli)
     took = time.monotonic() - t0
     for b in bad:
         print("FAIL:", b)
     print(f"self-check: {'OK' if not bad else 'FAIL'} ({took:.1f} s)")
     return 0 if not bad else 1
+
+
+def suspected_selfcheck(expect, cli):
+    """SUSPECTED ENTRIES: add --suspected, confirm, disprove (allowed for a suspected S3/S4 with concrete evidence; refused
+    for a confirmed entry, an S1/S2 -- an S1 by override too -- and vague evidence), and how they are shown."""
+    base = ("--visibility", "rare", "--reach", "normal", "--workaround", "no")
+    with tempfile.TemporaryDirectory() as d:
+        L = ("--ledger", str(pathlib.Path(d) / LEDGER_NAME))
+        led = lambda: read_ledger(L[1])
+        rc, o = cli("add", *L, "--title", "a tint may no longer apply", "--failure", "cosmetic", *base, "--lowest", "1.21.1",
+                    "--status", "1.21.1=open", "--status", "1.21.4=open", "--suspected", "--notes", "Suspected; not verified")
+        expect(rc == 0 and "KI-1: S3?" in o and find(led(), "KI-1")["confidence"] == SUSPECTED, f"add --suspected: {o}")
+        cli("add", *L, "--title", "a crash may happen", "--failure", "crash", *base, "--lowest", "1.21.1", "--suspected")
+        cli("add", *L, "--title", "a menu may be unusable", "--failure", "functional", "--visibility", "common", "--reach",
+            "normal", "--workaround", "no", "--lowest", "1.21.1", "--suspected")
+        cli("add", *L, "--title", "a seam we saw", "--failure", "cosmetic", *base, "--lowest", "1.21.1")
+        cli("add", *L, "--title", "a seam we only read about", "--failure", "cosmetic", *base, "--lowest", "1.21.1", "--suspected")
+        cli("grade", *L, "KI-5", "--override", "S1", "--reason", "the owner thinks it loses data", "--by", "owner")
+        cli("add", *L, "--title", "a log line may be wrong", "--failure", "functional", "--visibility", "invisible",
+            "--reach", "normal", "--workaround", "no", "--lowest", "1.21.1", "--suspected")
+        expect([find(led(), i)["severity"] for i in ("KI-1", "KI-2", "KI-3", "KI-4", "KI-5", "KI-6")]
+               == ["S3", "S1", "S2", "S3", "S1", "S4"] and "confidence" not in find(led(), "KI-4"),
+               "the fixture: a suspected S3, S1, S2, S1 by override and S4; a confirmed S3")
+        rc, o = cli("list", *L)
+        rows = {x.split("\t")[0]: x.split("\t")[1] for x in o.splitlines()}
+        expect(rows.get("KI-1") == "S3?" and rows.get("KI-4") == "S3" and rows.get("KI-5") == "S1*?",
+               f"list marks a suspected grade with ?: {rows}")
+        ri = render_issue(led())
+        expect("| a tint may no longer apply (suspected) |" in ri and "| a seam we saw |" in ri
+               and "(suspected): recorded without a reproduction" in ri, f"render-issue marks it: {ri}")
+        expect("(suspected): recorded" not in render_issue({"schema": 1, "issues": [find(led(), "KI-4")]}),
+               "a ledger with no suspected entry renders as before")
+        # disprove: refused, nothing written
+        before = pathlib.Path(L[1]).read_text(encoding="utf-8")
+        ev = "abc1234 (the original source) never tinted it"
+        for argv, why, what in (
+                (("KI-4", "--version", "1.21.1", "--kind", "no-regression", "--evidence", ev), "is confirmed", "a confirmed entry"),
+                (("KI-2", "--version", "1.21.1", "--kind", "no-regression", "--evidence", ev), "grades S1", "an S1"),
+                (("KI-3", "--version", "1.21.1", "--kind", "no-regression", "--evidence", ev), "grades S2", "an S2"),
+                (("KI-5", "--version", "1.21.1", "--kind", "no-regression", "--evidence", ev), "grades S1", "an S1 by override"),
+                (("KI-1", "--version", "1.21.1", "--kind", "no-regression", "--evidence", "checked it, looks fine to me"),
+                 "cites nothing concrete", "vague evidence"),
+                (("KI-1", "--version", "1.21.1", "--kind", "no-regression", "--evidence", "Tested in build 20261031, defaced"),
+                 "cites nothing concrete", "a number, a hex-letter word and 'Tested' are not a sha or a test name"),
+                (("KI-1", "--version", "1.21.1", "--kind", "no-regression", "--evidence", "  "), "cites nothing", "empty evidence"),
+                (("KI-1", "--version", "1.21.5", "--kind", "no-regression", "--evidence", ev), "not open at 1.21.5", "a version it is not at")):
+            rc, o = cli("disprove", *L, *argv)
+            expect(rc == 2 and why in o and pathlib.Path(L[1]).read_text(encoding="utf-8") == before,
+                   f"disprove refuses {what} (exit 2, nothing written): {rc} {o}")
+        rc, o = cli("disprove", *L, "KI-1", "--version", "1.21.1,1.21.4", "--kind", "no-regression", "--evidence", ev, "--check")
+        expect(rc == 0 and "accepted, nothing written" in o and pathlib.Path(L[1]).read_text(encoding="utf-8") == before,
+               f"disprove --check: accepted, nothing written: {rc} {o}")
+        rc, o = cli("disprove", *L, "KI-1", "--version", "1.21.1..1.21.4", "--kind", "no-regression", "--evidence", ev)
+        e1 = find(led(), "KI-1")
+        want = f"wontfix:not a defect (disproved, no-regression): {ev}"
+        expect(rc == 0 and e1["status"] == {"1.21.1": want, "1.21.4": want} and e1["confidence"] == SUSPECTED
+               and e1["notes"] == "Suspected; not verified" and len(e1["disproved"]) == 1
+               and {k: e1["disproved"][0][k] for k in ("kind", "evidence", "versions")}
+               == {"kind": "no-regression", "evidence": ev, "versions": ["1.21.1", "1.21.4"]}
+               and not open_versions(e1) and "KI-1" not in [e["id"] for e, _w in select(led())],
+               f"disprove a suspected S3: wontfix at each version, the record kept, never selected again: {rc} {o} {e1}")
+        expect(f"KI-1 at 1.21.1: won't fix: not a defect (disproved, no-regression): {ev}" in render_issue(led()),
+               "render-issue shows the disproval")
+        for evid in ("src/main/java/com/example/mod/Log.java:42 logs it at debug", "ExampleLogTest#logsOnce passes"):
+            data = led(); e6 = find(data, "KI-6")
+            e6["status"]["1.21.1"] = "open"; e6.pop("disproved", None)
+            k = "api-unchanged" if ":" in evid else "test-passes"
+            vs = disprove(e6, "1.21.1", k, evid, "2026-10-31")
+            validate(data)
+            expect(vs == ["1.21.1"] and e6["status"]["1.21.1"].startswith(f"wontfix:not a defect (disproved, {k}): "),
+                   f"an S4 with a path:line or a test name as evidence: {e6}")
+        rc, o = cli("confirm", *L, "KI-6", "--evidence", "reproduced in a client: the line repeats")
+        e6 = find(led(), "KI-6")
+        expect(rc == 0 and "confidence" not in e6 and e6["notes"].startswith("Confirmed ")
+               and e6["notes"].endswith(": reproduced in a client: the line repeats"), f"confirm: {rc} {o} {e6}")
+        rc, o = cli("confirm", *L, "KI-6")
+        expect(rc == 2 and "already confirmed" in o, f"confirm on a confirmed entry is refused: {rc} {o}")
+        rc, o = cli("confirm", *L, "KI-3")
+        expect(rc == 0 and find(led(), "KI-3")["notes"].startswith("Confirmed ") and "confidence" not in find(led(), "KI-3"),
+               f"confirm without --evidence: {rc} {o}")
+        for mutate, why in ((lambda e: e.update(confidence="confirmed"), "confidence"),
+                            (lambda e: e.update(disproved=[{"kind": "looked", "evidence": "x", "versions": ["1.21.1"],
+                                                            "date": "d"}]), "disproved"),
+                            (lambda e: e.update(disproved=[]), "disproved")):
+            data = led(); mutate(find(data, "KI-1"))
+            try:
+                validate(data)
+                expect(False, f"validate refuses a bad {why}")
+            except Invalid as e_:
+                expect(why in str(e_), f"validate names {why}: {e_}")
+        # an owner's reopen (status --set <v>=open) is never undone by a later disproval
+        cli("status", *L, "KI-1", "--set", "1.21.4=open")
+        rc, o = cli("disprove", *L, "KI-1", "--version", "1.21.4", "--kind", "no-regression", "--evidence", ev)
+        expect(rc == 2 and "already disproved once at 1.21.4" in o and find(led(), "KI-1")["status"]["1.21.4"] == "open",
+               f"a version disproved once and reopened is refused: {rc} {o}")
+        # with --repo (a git clone): at least one citation must exist there
+        g = lambda *a_: subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                        "-c", "core.autocrlf=false", *a_], capture_output=True, text=True,
+                                       encoding="utf-8", check=True).stdout.strip()
+        g("init", "-q", "-b", "neoforge-1.21.1")
+        src = pathlib.Path(d, "src/Tint.java")
+        src.parent.mkdir()
+        src.write_text("class Tint {\n  int a;\n}\n", encoding="utf-8")
+        pathlib.Path(d, "src/TintTest.java").write_text("class TintTest {}\n", encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "port")
+        real = g("rev-parse", "--short=10", "HEAD")
+        cli("add", "--repo", d, "--id", "KI-20", "--title", "a tint may be off", "--failure", "cosmetic", *base,
+            "--lowest", "1.21.1", "--suspected")
+        R = ("--repo", d)
+        for evid, ok_, what in (("abcdef1234 never tinted it", False, "a sha that does not resolve"),
+                                ("src/Tint.java:9 does not tint", False, "a path:line past the end of the file"),
+                                ("NoSuchThingTest passes", False, "a test name no tree holds"),
+                                (f"{real} never tinted it", True, "a sha that resolves"),
+                                ("src/Tint.java:3 has no tint", True, "a path:line that exists"),
+                                ("TintTest passes", True, "a test name in the tree")):
+            rc, o = cli("disprove", *R, "KI-20", "--version", "1.21.1", "--kind", "no-regression", "--evidence", evid,
+                        "--check")
+            expect((rc == 0) == ok_ and (ok_ or "no citation" in o), f"--repo: {what} -> {'accepted' if ok_ else 'refused'}: "
+                                                                      f"{rc} {o}")
+        g("checkout", "-q", "-b", "elsewhere")
+        pathlib.Path(d, "src/Other.java").write_text("class Other {}\n", encoding="utf-8")
+        g("add", "src/Other.java"); g("commit", "-qm", "elsewhere"); g("checkout", "-q", "neoforge-1.21.1")
+        dv = ("disprove", *R, "KI-20", "--version", "1.21.1", "--kind", "no-regression", "--evidence", "src/Other.java:1",
+              "--check")
+        r1, r2 = cli(*dv), cli(*dv, "--cite-ref", "neoforge-1.21.1")
+        expect(r1[0] == 0 and r2[0] == 2, f"--cite-ref limits where a path:line is looked for: {r1} {r2}")
+        # the plan issue says (suspected) on a suspected row only
+        expect(sus({"suspected": True}) == " (suspected)" and sus({"id": "KI-4"}) == ""
+               and sus({"confidence": SUSPECTED}) == " (suspected)", "the plan's marker")
 
 
 def lowest_selfcheck(expect, cli):

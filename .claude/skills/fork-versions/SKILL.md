@@ -442,6 +442,10 @@ into the ledger at its lowest affected version and the run goes on. `known-issue
     python3 tools/known-issues.py release-notes --repo DIR --version 1.21.5 --tag <tag> [--min S3] [--platform mr|cf]
     python3 tools/known-issues.py page --repo DIR --fork owner/repo   # the project page's Known issues: open S2s, S3/S4 behind a link
     python3 tools/known-issues.py issue --repo DIR --slug owner/repo  # create/update (and pin) the Known issues issue from the ledger
+    python3 tools/known-issues.py add ... --suspected                 # no reproduction or version comparison yet
+    python3 tools/known-issues.py confirm --repo DIR KI-3 [--evidence TEXT]   # a suspected entry reproduced
+    python3 tools/known-issues.py disprove --repo DIR KI-3 --version 1.21.4 --kind no-regression|api-unchanged|test-passes \
+        --evidence TEXT [--check]                                     # a suspected S3/S4 proven not a defect
     python3 tools/known-issues.py blocks-publish --repo DIR --version 1.21.5 --platform mr|cf   # exit 1: an open S1
 
 `add` numbers a new entry in the ledger's own numbering (its most used prefix, zero-padded as it is: `EXM-025` after
@@ -449,6 +453,24 @@ into the ledger at its lowest affected version and the run goes on. `known-issue
 names the same `--file` with a similar title, or any with nearly the same title: read it, and add to that entry instead
 when it is the same defect. `status --set` takes one version, a comma list or `FROM..TO` (both ends and every version
 the entry lists between them).
+
+**Suspected entries.** A finding added without a reproduction or a version comparison (a lesson harvest's or a
+reader's suspicion) is added with `--suspected`: `"confidence": "suspected"` (absent: confirmed, every entry before it),
+shown `S3?` by `list` and "(suspected)" in the pinned issue and the plan issue. A reviewer who can point at the
+regressing line, a failing gate or test, or a reproduction is a confirmed finding. **The fork's own pinned tools must
+read the new key**: its weekly plan workflow runs `known-issues.py` at its config's `migrator_sha`, and Port CI's
+publish job at the kit its workflow pins, both strict about unknown keys -- a suspected entry added by hand on a fork
+pinned older breaks its plan issue and its publishing until it is re-pinned (`weekly-plan.py install --keep-existing`,
+a Port CI kit release). The round checks that before it writes one; `add --suspected` does not. `confirm` removes the marker (the
+evidence appended to notes). `disprove` closes a suspected entry whose grade (the override's when there is one) is S3
+or S4, with evidence citing a commit sha, a `path:line` or a test name: each named version (open there; `--set`'s list
+and range syntax) becomes `wontfix:not a defect (disproved, <kind>): <evidence>` and the record goes into the entry's
+`disproved` list; a confirmed entry, an S1/S2, vague evidence or a version disproved once before is refused (exit 2),
+and `--check` writes nothing. With `--repo` at least one citation must exist in the clone (a sha that resolves, a
+`path:line` with that many lines at some branch, a test name in some branch's tree): that proves the citation exists,
+not the conclusion -- every closure a round makes is listed for the owner in its closing comment. A disproval at one
+version leaves the entry's other versions as they were. **To reopen** a closed one for good: `status --set <v>=open`
+and `confirm ID` (no longer suspected, so no round closes it again; `disprove` also refuses a version it closed once).
 
 `select` is the default choice of what a run takes: every open S1, then S2s lowest affected version first up to
 `--budget`, then any S3 in a file the run already touches; the owner's `--add` / `--remove` apply last and the output

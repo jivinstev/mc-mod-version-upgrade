@@ -650,6 +650,47 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      into the head too, by its own PR. Work the versions in ladder order, oldest affected first.
      `fork-branches.py untaken --repo DIR --upstream <remote>/<branch>` lists, at any point, the authors' code the head
      has that a version has not taken: after a `head_cascade: false` round it must still list what the plan listed.
+   - **A selected entry that is SUSPECTED** (every kind of fork; `"confidence": "suspected"` in the ledger, `S3?` in
+     `known-issues.py list`, "(suspected)" on the plan: added without a reproduction or a version comparison, step 5) is
+     verified before it is fixed: compare the version below (a version branch), the authors' original source on their
+     branch and the target version's own API sources, or write the failing test. It reproduces: it is confirmed
+     (`known-issues.py confirm ID --evidence TEXT`), fixed as usual. An **S3 or S4** proven NOT a defect -- `no-regression`
+     (the original never had the behaviour), `api-unchanged` (the target version's API does not change it) or
+     `test-passes` (a test of the behaviour passes) -- is closed without asking the owner: `known-issues.py disprove ID
+     --version V --kind KIND --evidence TEXT` (the evidence cites a commit sha, a `path:line` or a test name; refused for
+     a confirmed entry, an S1/S2 -- an override's grade counts -- and vague evidence) sets that version
+     `wontfix:not a defect (disproved, KIND): TEXT` and records the disproval; nothing else is committed for it. An S1 or
+     S2, or one the worker cannot decide, is as any selected issue: fixed, or a stop that names what to ask. **On the
+     driver** the backlog job's text says so for each suspected entry it was given (a confirmed entry's job is as
+     before): its `fixed:` line confirms the entry (the ledger step runs `confirm`); for a disproval it runs `disprove
+     ... --ref origin/<head> --check` and writes `disproved: <ID> <kind> <evidence>` with `RESULT: ok`; the ledger step
+     runs `disprove` on the head at the job's version (a version branch's disproval closes that version only; the
+     entry's other versions stay as they were) and commits it with the round's statuses, and the closing comment lists
+     each one under `### Closed as not a defect (suspected entries)`, so the owner sees it after the fact. A disproval
+     counts only for a suspected entry the job was given and init graded S3/S4 (the plan's `/grade` applied) and only
+     when `disprove --check` accepts it against the head's ledger (its citation found in the clone); anything else
+     blocks the job (or the ledger step) for the owner, as before. **The fork's own pinned tools must read the new
+     keys:** the weekly plan's workflow runs `known-issues.py` at the config's `migrator_sha` and Port CI's publish job
+     at the kit its workflows pin, both strict about unknown keys -- so the round writes `confidence` or `disproved`
+     only when every one of them accepts them (read from the migrator's history at that commit and kit tag, one commit
+     fetched, bounded; a pin to another migrator repository than the round's own counts as not accepting). Otherwise
+     a disproval is the owner's (the job blocks, naming the evidence), a suspected finding is added confirmed with
+     "Suspected (unverified):" in its notes, and the closing comment names the re-pin: `weekly-plan.py install
+     --keep-existing` and a Port CI kit release. A job that reproduces a suspected entry with another grade writes
+     `regrade: <ID> <failure> <visibility> <reach> <yes|no>`: the ledger step re-grades it (recorded with the confirm),
+     and an S1/S2 the job did not fix blocks the version like any S1/S2 finding. A regrade only raises or keeps a
+     grade: one that would lower it blocks the job for the owner (`/grade`) and is not applied. A ledger step blocked
+     on a disproval or regrade it may not make says what the owner can do; `round.py retry` of that step then leaves
+     what it refused as it is and goes on. During a round the driver is the only writer of the head's ledger: a branch
+     about to go out as a PR (the head's work branch, or a version branch) with any other commit touching a ledger
+     blocks for the owner, naming the commit (`round.py retry <pr item> --allow` lets it through once read) -- except,
+     on the head's work branch, a worker's commit that only appends new confirmed findings, open (or n/a) at every
+     version (a finding graded with `known-issues.py add`, as the jobs say); every existing entry must be unchanged. **To reopen** a closed one for good:
+     `known-issues.py status <ID> --set <v>=open` and `confirm <ID>`; a round never closes a version twice. Before
+     any agent job on a head checkout (a single-version fork's, or a version-branch fork's head) the driver installs the
+     head workflow's `--dep-jar` pins into `~/.m2`, sha256-checked (a REPLACED jar is warned about), so the worker's
+     `ci-gates.py` build finds them -- tried once per workflow text, and a differing jar is never replaced while a
+     full gate run holds the machine's lock; a version branch's jobs get theirs through `fork-port.py`.
 4. **Per version, in ladder order**, once its code is in -- first `python3 tools/port-cost.py mark --fork <owner/repo>
    --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks; the
    driver writes it, with `--phase`, at every item boundary).
@@ -756,7 +797,11 @@ it small, so the orchestration is a tool, which replaces the four rules above:
 5. **New findings.** Grade each with `known-issues.py add` (the rubric's inputs, `--lowest` its lowest affected
    version, `--file` each file it is in, `--pattern` a text whose presence means the defect is there, so a later
    `known-issues.py lowest` finds it on other branches with git alone); a WARNING that it may repeat an entry means read that entry first and record
-   the finding there when it is the same defect. At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
+   the finding there when it is the same defect. **A finding added without a reproduction or a version comparison is
+   added with `--suspected`** (a lesson harvest's or a reader's suspicion: "may no longer ...", "not verified in a
+   client"; a later round verifies it first, step 3); one with a reproduction, a failing gate or test, a version compared,
+   or a reviewer who read the diff and can point at the regressing line is confirmed (no flag). On the driver such a
+   `finding:` line carries `"suspected": true` and the ledger step adds it with `--suspected`. At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
    reopens it (fixed at its lowest open version, only that fix cascaded, by step 3's rule: from a version branch, or
    `--port-ref fix/<ID>` at the head's version when the plan does not take the authors' code); anything else stays in the
    ledger with its lowest version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap
@@ -853,8 +898,8 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    never a default -- with none the round asks before every push, pre-release and merge. `automerge` follows
    `merge-fork-prs`. A dependent depends on the library unless `--depends-on` says otherwise. Moving from an old fleet
    file: pass its `upstream` and `ledger_issues` values as these flags, once; after that the config is
-   the only source. **Re-running setup rebuilds the config from the flags alone:** for each `allow`, `ledger_issues`,
-   or `depends_on` the existing config holds and the new flags leave out, `install` warns on stderr and
+   the only source. **Re-running setup rebuilds the config from the flags alone:** for each `allow`, `plan_owner`,
+   `ledger_issues` or `depends_on` the existing config holds and the new flags leave out, `install` warns on stderr and
    names the flag to re-pass; re-pass it, or add `--keep-existing` to keep every such value (a flag given still wins).
    Read the warnings before pushing. An agent passes its session's attribution trailers with `--trailer` (one per line), so the commit
    carries them; without it, amend the commit's message before pushing. It commits `.github/workflows/weekly-plan.yml`
