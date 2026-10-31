@@ -2050,6 +2050,19 @@ def _check_pins_and_bumps(expect):
            f"restore: a dropped dependency with a build now is an unticked restore row; one still without none: {res}")
 
 
+# port-ci.py dep_jars' rendering of one --dep-jar step, for the self-check where port-ci.py is not beside this file
+DEP_JAR_STEP = (
+    "      - name: examplelib 2.0 from the examplelib-2.0-mc1.21.1 release into mavenLocal (pinned by sha256)\n"
+    "        run: |\n"
+    "          mkdir -p \"$HOME/.m2/repository/com/example/examplelib/2.0\"\n"
+    "          curl -fsSL -o \"$HOME/.m2/repository/com/example/examplelib/2.0/examplelib-2.0.jar\" "
+    "\"https://github.com/owner/examplelib/releases/download/examplelib-2.0-mc1.21.1/examplelib-2.0.jar\"\n"
+    "          echo \"{sha}  $HOME/.m2/repository/com/example/examplelib/2.0/examplelib-2.0.jar\" | sha256sum -c -\n"
+    "          echo '<project><modelVersion>4.0.0</modelVersion><groupId>com.example</groupId><artifactId>examplelib"
+    "</artifactId><version>2.0</version><packaging>jar</packaging></project>' > "
+    "\"$HOME/.m2/repository/com/example/examplelib/2.0/examplelib-2.0.pom\"")
+
+
 def _check_install_pins(expect):
     """install_pins: the version's pins into ~/.m2 (a stand-in download, a temporary home), sha256-checked, a jar there
     with that sha256 never fetched again; a single-version fork with pins gets them, one without is untouched."""
@@ -2094,18 +2107,25 @@ def _check_install_pins(expect):
             r4 = install_pins(bad_, "1.21.1")
             expect(len(r4) == 1 and not r4[0][0] and "sha256" in r4[0][1]
                    and not (home / ".m2/repository/com/example/other").exists(), f"a sha256 mismatch installs nothing: {r4}")
-            # a single-version head pins its library in its Port CI workflow (port-ci.py --dep-jar), not in .port/
-            import importlib.util as _iu
-            _sp = _iu.spec_from_file_location("port_ci_for_layer_deps", ROOT / "tools/port-ci.py")
-            pc = _iu.module_from_spec(_sp)
-            _sp.loader.exec_module(pc)
+            # a single-version head pins its library in its Port CI workflow (port-ci.py --dep-jar), not in .port/;
+            # the step is port-ci.py's own rendering where it is beside this file, else (the Port CI kit, which does not
+            # ship port-ci.py) the copy below, which must stay what port-ci.py renders
+            pin = "owner/examplelib@examplelib-2.0-mc1.21.1/examplelib-2.0.jar=com.example:examplelib:2.0"
+            step = DEP_JAR_STEP.replace("{sha}", sha)
+            if (ROOT / "tools/port-ci.py").is_file():
+                import importlib.util as _iu
+                _sp = _iu.spec_from_file_location("port_ci_for_layer_deps", ROOT / "tools/port-ci.py")
+                pc = _iu.module_from_spec(_sp)
+                _sp.loader.exec_module(pc)
+                rendered = pc.dep_jars([pin], sha_of=lambda u: sha)
+                expect(rendered == step, "the self-check's copy of port-ci.py's --dep-jar step is what port-ci.py renders "
+                                         "(update DEP_JAR_STEP in layer-deps.py with it)")
+                step = rendered
             head_ = pathlib.Path(td) / "head"
             (head_ / ".github/workflows").mkdir(parents=True)
             (head_ / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
             (head_ / ".github/workflows/port-ci.yml").write_text(
-                "jobs:\n  gates:\n    steps:\n" + pc.dep_jars(
-                    ["owner/examplelib@examplelib-2.0-mc1.21.1/examplelib-2.0.jar=com.example:examplelib:2.0"],
-                    sha_of=lambda u: sha) + "\n", encoding="utf-8")
+                "jobs:\n  gates:\n    steps:\n" + step + "\n", encoding="utf-8")
             del fetched[:]
             w1 = install_workflow_pins(head_)
             hw = home / ".m2/repository/com/example/examplelib/2.0/examplelib-2.0.jar"
