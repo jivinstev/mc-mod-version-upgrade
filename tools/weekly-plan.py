@@ -803,12 +803,16 @@ def step_select(work):
         # the lowest version still open (the status map), where the round makes the fix -- `lowest` is the first
         # affected version, which may be fixed already
         lo = {e["id"]: min((v for v, st in e["status"].items() if st == "open"), key=k_mc, default=None) for e in every}
-        f["selection"] = [dict(s, title=title.get(s["id"], ""), lowest_open=lo.get(s["id"])) for s in sel]
+        # a suspected entry (no reproduction yet) is marked "(suspected)" on the plan; every other row is as before
+        sus = lambda i: {"suspected": True} if i in suspected else {}
+        suspected = {e["id"] for e in every if e.get("confidence") == "suspected"}
+        f["selection"] = [dict(s, title=title.get(s["id"], ""), lowest_open=lo.get(s["id"]), **sus(s["id"])) for s in sel]
         taken = {s["id"] for s in sel}
         f["candidates"] = [{"id": e["id"], "severity": e["severity"], "lowest": e["lowest"], "title": e["title"],
-                            "lowest_open": lo.get(e["id"])} for e in opened if e["id"] not in taken]
+                            "lowest_open": lo.get(e["id"]), **sus(e["id"])} for e in opened if e["id"] not in taken]
         f["ledger_ids"] = [e["id"] for e in every]
-        f["ledger_entries"] = [{k_: e.get(k_) for k_ in ("id", "severity", "title", "lowest", "status")} for e in every]
+        f["ledger_entries"] = [{**{k_: e.get(k_) for k_ in ("id", "severity", "title", "lowest", "status")}, **sus(e["id"])}
+                               for e in every]
         if f.get("cascade") is not None:
             lowest_below(f, every)       # a version-branch fork only: a single-version fork has no branch below its one
         print(f"weekly-plan: {f['repo']}: {len(sel)} known issue(s) by default, {len(f['candidates'])} other open")
@@ -1348,7 +1352,7 @@ def self_check():
         for args in (["--title", "crash on load", "--failure", "crash", "--visibility", "common", "--reach", "normal",
                       "--workaround", "no", "--lowest", "1.21.1"],
                      ["--title", "a seam", "--failure", "cosmetic", "--visibility", "rare", "--reach", "normal",
-                      "--workaround", "no", "--lowest", "1.21.1"]):
+                      "--workaround", "no", "--lowest", "1.21.1", "--suspected"]):
             with contextlib.redirect_stdout(io.StringIO()):
                 k.main(["add", "--repo", str(lib), *args])
         gq(lib, "add", "-A"); gq(lib, "commit", "-qm", "ledger")
@@ -1396,6 +1400,10 @@ def self_check():
                f"a single-version fork: no cascade; select's S1 by default, the S3 a candidate: {f0}")
         expect("untaken" not in f0 and "base_version" not in f0 and "shared" not in f0 and f0["selection"][0].get("lowest_open") == "1.21.1",
                f"a single-version fork: no untaken list (its plan renders as before): {f0}")
+        body0 = k.render_plan(dict(inp, owner={"login": "someone"}))["body"]
+        expect(f0["candidates"][0].get("suspected") is True and "suspected" not in f0["selection"][0]
+               and "`KI-2` a seam (suspected) -- " in body0 and "crash on load -- " in body0,
+               f"a suspected entry is marked on the plan, a confirmed one is not: {f0} {body0[:1500]}")
         # the smallest version-branch fork (one version, hand-made): the head merged the authors' release earlier and
         # no version took it -- nothing new upstream, yet the plan lists it (the first weekly-round dry run's bug)
         vb = d / "vbfork"
