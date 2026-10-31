@@ -794,8 +794,16 @@ def client_refs_in_common(repo, prepared):
 def zero_use_tiers(repo):
     """tools/audit-zero-uses.py over the repo's src/*/java trees (the one implementation the catalogue sweep and
     ci-gates.py's report row run too): a tier with 0 uses fed to durability(), an unbreakable tool that breaks on its
-    first hit (CATALOG 177). -> ["<file>:<line>: <what>"]. Report only."""
+    first hit (CATALOG 177). -> ["<file>:<line>: <what>"]. Report only. A hit a ModifyDefaultComponentsEvent handler
+    removing the durability components covers is not in it: zero_use_handled() has those."""
     return [f"{p}:{ln}: {what}" for p, ln, what in load("audit_zero_uses", "audit-zero-uses.py").scan(repo)]
+
+
+def zero_use_handled(repo):
+    """The 0-use tiers a ModifyDefaultComponentsEvent handler removing MAX_DAMAGE / DAMAGE covers (the audit's third
+    fix shape, CATALOG 177): ["<file>:<line>: <what> -- handled by <file>:<line>"], said in the stage line, no warning."""
+    _found, handled = load("audit_zero_uses", "audit-zero-uses.py").scan_split(repo)
+    return [f"{p}:{ln}: {what} -- handled by {by}" for p, ln, what, by in handled]
 
 
 def unreviewed_stubs(tdir):
@@ -2147,6 +2155,10 @@ class Run:
                 done["warnings"] = [f"0-use tier (CATALOG 177: breaks on its first hit unless it has no durability "
                                     f"components): {h}" for h in zero]
                 done["done"] += f"; WARNING {len(zero)} 0-use tier(s), CATALOG 177: {', '.join(zero[:4])}"
+            handled = zero_use_handled(self.repo)
+            if handled:       # not a warning: the mod removes the durability components itself (verify the items)
+                done["done"] += (f"; {len(handled)} 0-use tier(s) handled by a ModifyDefaultComponentsEvent handler "
+                                 f"(verify it covers these items): {', '.join(handled[:2])}")
             return done
         if r.returncode == 2 or any("NO TARGETS CHECKED" in l for l in lines):
             return {"stop": "the mixin audit checked no targets (wrong jar or tree?) -- not a pass", "code": 13,
@@ -3364,6 +3376,15 @@ def self_check():
         res = run.s_audit()
         expect("stop" not in res and "WARNING 3 0-use tier(s), CATALOG 177" in res.get("done", "")
                and len(res.get("warnings", [])) == 3, f"the 0-use audit is a warning, never a stop: {res}")
+        # a ModifyDefaultComponentsEvent handler removing the durability components: said in the line, no warning
+        (jt / "com/example/mod/Defaults.java").write_text(
+            "class Defaults {\n  static void on(ModifyDefaultComponentsEvent e) {\n"
+            "    e.modify(X, b -> b.remove(DataComponents.MAX_DAMAGE));\n  }\n}\n", encoding="utf-8")
+        res = run.s_audit()
+        expect("stop" not in res and "WARNING" not in res.get("done", "") and not res.get("warnings")
+               and "3 0-use tier(s) handled by a ModifyDefaultComponentsEvent handler" in res.get("done", "")
+               and "handled by src/main/java/com/example/mod/Defaults.java:3" in res.get("done", ""),
+               f"a handled 0-use tier is said in the stage line, not a warning: {res}")
     # ---- a review carries one version on when the file and every signal are the same; a changed count does not
     with tempfile.TemporaryDirectory() as d:
         mv = pathlib.Path(d); a, b = mv / "1.21.5", mv / "1.21.8"; a.mkdir(); b.mkdir()

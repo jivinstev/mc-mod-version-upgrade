@@ -423,7 +423,8 @@ static check reports on every route: `tools/audit-zero-uses.py` names a tool tie
 (`getUses()` 0, an enum tier constant, `ForgeTier` / `SimpleTier` / `ToolMaterial` with 0, `durability(0)`: an
 unbreakable tool that breaks on its first hit in survival, CATALOG 177) -- a REPORT row of `ci-gates.py` on a
 single-version fork and a version branch alike (a fork's CI from the next kit release), a hit of the catalogue sweep
-(`tools/run-catalog-scans.sh`), and a WARNING in `fork-port.py`'s audit stage line; never a red gate or a stop.
+(`tools/run-catalog-scans.sh`), and a WARNING in `fork-port.py`'s audit stage line; never a red gate or a stop. A repository whose `ModifyDefaultComponentsEvent` handler removes `MAX_DAMAGE` / `DAMAGE` gets each hit as a
+`handled by <file>:<line> (verify it covers these items)` line instead: no REPORT row, no WARNING.
 
 The shared helper library (`templates/fork-layer/shared/<version>/java`) is written next to third-party sources --
 NeoForge's sources jars, the Minecraft sources every fork build stages, GeckoLib -- so one more gate runs **only on

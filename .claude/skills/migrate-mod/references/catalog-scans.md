@@ -355,6 +355,7 @@ case "$zu_rc" in
 esac
 echo "  (^ tools/audit-zero-uses.py: a hit is fixed by giving the item no durability components (or, on 1.21.1-1.21.4,"
 echo "     DataComponents.UNBREAKABLE with new Unbreakable(false)), or marked zero-uses-ok with why. Comments are ignored.)"
+echo "     A '(handled)' line is no hit: a ModifyDefaultComponentsEvent handler removes MAX_DAMAGE/DAMAGE -- check it covers those items.)"
 
 printf '\n── sweep complete — every path above is a HIT to fix-or-explain ──\n'
 ```

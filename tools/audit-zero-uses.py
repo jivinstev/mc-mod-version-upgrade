@@ -17,10 +17,16 @@ Java sources with comments ignored:
 Known gap: a tier constructed in ANOTHER file (an enum constant or a `new Tier(...)` in a registry class, the tier
 class elsewhere) is not followed across files; only `getUses() { return 0; }` and the literal shapes above are.
 A file whose code uses `DataComponents.UNBREAKABLE` is skipped (the mod handles it), and a hit whose line or the line
-above it carries `zero-uses-ok` (a comment saying why) is left out. Report only: whether 0 meant unbreakable is the
+above it carries `zero-uses-ok` (a comment saying why) is left out. A repository with a NeoForge
+`ModifyDefaultComponentsEvent` handler (a mod-bus listener, in any file) that removes `MAX_DAMAGE` or `DAMAGE` --
+1.21.x `builder.remove(DataComponents.MAX_DAMAGE)`, 26.1.2 on `builder.set(DataComponents.MAX_DAMAGE, null)` on its
+`DataComponentMap.Builder` -- has fixed the trap the third way: its hits are not findings but are still printed, each
+as `audit-zero-uses (handled): <file>:<line>: <what> -- handled by <file>:<line> (verify it covers these items)`;
+which items the handler matches is not followed. Report only: whether 0 meant unbreakable is the
 mod's intent. One implementation for every route: the catalogue sweep (catalog-scans.md), ci-gates.py's report row
 (every kind of fork, and its Port CI) and fork-port.py's audit stage (version branches) all run this.
-Output: `audit-zero-uses: <file>:<line>: <what>` per hit, then `audit-zero-uses: N finding(s)`.
+Output: `audit-zero-uses: <file>:<line>: <what>` per hit, the handled lines, then `audit-zero-uses: N finding(s)`
+(with `; M handled by a ModifyDefaultComponentsEvent handler (verify it covers them)` when there are any).
 Exit: 0 nothing found, 1 findings, 2 no Java sources. Standard library only.
 """
 import pathlib, re, sys
@@ -32,6 +38,11 @@ NEW_TIER = re.compile(r"\bnew\s+(ForgeTier|SimpleTier|ToolMaterial)\s*\(")
 DURABILITY = re.compile(r"\.durability\s*\(")
 ENUM = re.compile(r"\benum\s+(\w+)[^{;]*\{")
 UNBREAKABLE = re.compile(r"\bDataComponents\s*\.\s*UNBREAKABLE\b")
+DEFAULTS_EVENT = re.compile(r"\bModifyDefaultComponentsEvent\b")
+# a durability component removed from a default-components builder: 1.21.x DataComponentPatch.Builder.remove(type),
+# 26.1.2 on DataComponentMap.Builder.set(type, null) (it has no remove(); a null value removes the entry)
+_DUR = r"(?:DataComponents\s*\.\s*)?(?:MAX_DAMAGE|DAMAGE)"
+REMOVES_DURABILITY = re.compile(r"\.\s*remove\s*\(\s*" + _DUR + r"\s*\)|\.\s*set\s*\(\s*" + _DUR + r"\s*,\s*null\s*\)")
 
 
 def blank_comments(text):
@@ -166,22 +177,54 @@ def record_hits(code, field, zero):
     return out
 
 
-def scan(root):
-    """[(path relative to root, line, what)] over the Java sources under `root` (its src/*/java trees when it is a
-    repository, else every .java below it), sorted; a hit marked `zero-uses-ok` on its line or the one above is left out."""
-    root = pathlib.Path(root)
+def java_files(root):
+    """The Java sources under `root`: its src/*/java trees when it is a repository, else every .java below it; sorted."""
     trees = sorted(p for p in root.glob("src/*/java") if p.is_dir()) or [root]
+    return [f for tree in trees for f in sorted(tree.rglob("*.java"))]
+
+
+def durability_handlers(root):
+    """["<file>:<line>"] of the `ModifyDefaultComponentsEvent` handlers under `root` that remove MAX_DAMAGE or DAMAGE
+    (the file names the event; the line is the removal's), sorted. A handler removing any other component is none."""
+    root = pathlib.Path(root)
     out = []
-    for tree in trees:
-        for f in sorted(tree.rglob("*.java")):
-            text = f.read_text(encoding="utf-8", errors="replace")
-            lines = text.splitlines()
-            for off, what in scan_text(text):
-                ln = text.count("\n", 0, off) + 1
-                near = lines[max(0, ln - 2):ln]
-                if any(MARK in x for x in near):
-                    continue
-                out.append((f.relative_to(root).as_posix(), ln, what))
+    for f in java_files(root):
+        code = blank_comments(f.read_text(encoding="utf-8", errors="replace"))
+        if DEFAULTS_EVENT.search(code):
+            out += [f"{f.relative_to(root).as_posix()}:{ln}"
+                    for ln in sorted({code.count(chr(10), 0, m.start()) + 1 for m in REMOVES_DURABILITY.finditer(code)})]
+    return out
+
+
+def scan_split(root):
+    """(findings, handled): scan()'s hits, or -- when the repository has a durability_handlers() handler -- none, and
+    every hit in `handled` as (path, line, what, "<handler file>:<line>")."""
+    hits, handlers = scan_all(root), durability_handlers(root)
+    if not handlers:
+        return hits, []
+    return [], [(p, ln, what, handlers[0]) for p, ln, what in hits]
+
+
+def scan(root):
+    """The findings: [(path relative to root, line, what)], sorted; the hits a durability handler covers are not in
+    it (scan_split() has them)."""
+    return scan_split(root)[0]
+
+
+def scan_all(root):
+    """[(path relative to root, line, what)] over the Java sources under `root` (java_files()), sorted; a hit marked
+    `zero-uses-ok` on its line or the one above is left out."""
+    root = pathlib.Path(root)
+    out = []
+    for f in java_files(root):
+        text = f.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        for off, what in scan_text(text):
+            ln = text.count("\n", 0, off) + 1
+            near = lines[max(0, ln - 2):ln]
+            if any(MARK in x for x in near):
+                continue
+            out.append((f.relative_to(root).as_posix(), ln, what))
     return out
 
 
@@ -234,6 +277,50 @@ def self_check():
             f.write_text(src, encoding="utf-8")
             got = [ln for _p, ln, _w in scan(f.parents[6])]
             expect(got == want, f"{name}: lines {got}, want {want}")
+        tier = "class Tool extends Item {\n  public int getUses() { return 0; }\n}\n"
+        handlers = {
+            "1.21.x modify + remove, in another file (the tool base class)": (
+                "class ExampleItems {\n  @SubscribeEvent\n  static void defaults(ModifyDefaultComponentsEvent event) {\n"
+                "    event.modify(INF_SWORD.get(), b -> b.remove(DataComponents.MAX_DAMAGE).remove(DataComponents.DAMAGE));\n"
+                "  }\n}\n", ["src/main/java/com/example/mod/Base.java:4"]),
+            "26.1.2 modifyMatching + set(type, null)": (
+                "class Base {\n  static void defaults(ModifyDefaultComponentsEvent event) {\n"
+                "    event.modifyMatching((item, components) -> item instanceof Tool, (builder, context, key) -> {\n"
+                "      builder.set(DataComponents.MAX_DAMAGE, null);\n      builder.set(DataComponents.DAMAGE, null);\n"
+                "    });\n  }\n}\n", ["src/main/java/com/example/mod/Base.java:4", "src/main/java/com/example/mod/Base.java:5"]),
+            "a handler removing another component": (
+                "class Base {\n  static void defaults(ModifyDefaultComponentsEvent event) {\n"
+                "    event.modify(Items.APPLE, b -> b.remove(DataComponents.FOOD).set(DataComponents.MAX_DAMAGE, 0));\n"
+                "  }\n}\n", []),
+            "a removal with no event": ("class Base {\n  void f(DataComponentPatch.Builder b) { b.remove(DataComponents.MAX_DAMAGE); }\n}\n", []),
+            "the event in a comment only": (
+                "class Base {\n  // ModifyDefaultComponentsEvent\n  void f(DataComponentPatch.Builder b) { b.remove(DataComponents.MAX_DAMAGE); }\n}\n", []),
+        }
+        for i, (name, (src, want)) in enumerate(sorted(handlers.items())):
+            repo = root / f"handler{i}"
+            for rel, body in (("Tool.java", tier), ("Base.java", src)):
+                f = repo / "src/main/java/com/example/mod" / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(body, encoding="utf-8")
+            expect(durability_handlers(repo) == want, f"{name}: handlers {durability_handlers(repo)}, want {want}")
+            found, handled = scan_split(repo)
+            if want:
+                expect(found == [] and [(p, ln, by) for p, ln, _w, by in handled]
+                       == [("src/main/java/com/example/mod/Tool.java", 2, want[0])],
+                       f"{name}: the hit is handled, not a finding: {found} {handled}")
+            else:
+                expect([(p, ln) for p, ln, _w in found] == [("src/main/java/com/example/mod/Tool.java", 2)]
+                       and handled == [], f"{name}: still a finding: {found} {handled}")
+        import contextlib, io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main([str(root / "handler0")])
+        out = buf.getvalue().splitlines()
+        expect(rc == 0 and out[:1] == ["audit-zero-uses (handled): src/main/java/com/example/mod/Tool.java:2: getUses() "
+                                       "returns 0 -- handled by src/main/java/com/example/mod/Base.java:4 (verify it covers "
+                                       "these items)"]
+               and out[-1].startswith("audit-zero-uses: 0 finding(s); 1 handled by a ModifyDefaultComponentsEvent"),
+               f"a handled hit: exit 0, one handled line, no finding line: {rc} {out}")
         hits = scan(root / "case0")
         expect(all(p.startswith("src/main/java/") for p, _l, _w in hits), f"paths relative to the repository: {hits}")
         expect(main([str(root / "nothing-here")]) == 2, "no Java sources: exit 2")
@@ -247,18 +334,23 @@ def main(argv):
     if not argv:
         print(__doc__.split("\n\n")[1])
         return 2
-    found, any_java = [], False
+    found, handled, any_java = [], [], False
     for a in argv:
         root = pathlib.Path(a)
         any_java |= root.is_dir() and any(root.rglob("*.java"))
-        found += scan(root) if root.is_dir() else []
+        f, h = scan_split(root) if root.is_dir() else ([], [])
+        found, handled = found + f, handled + h
     if not any_java:
         print("audit-zero-uses: no Java sources")
         return 2
     for p, ln, what in found:
         print(f"audit-zero-uses: {p}:{ln}: {what} -- breaks on its first hit unless it is unbreakable or has no "
               "durability components (CATALOG 177)")
-    print(f"audit-zero-uses: {len(found)} finding(s)")
+    for p, ln, what, by in handled:     # not a finding (no `audit-zero-uses:` prefix), never dropped
+        print(f"audit-zero-uses (handled): {p}:{ln}: {what} -- handled by {by} (verify it covers these items)")
+    tail = (f"; {len(handled)} handled by a ModifyDefaultComponentsEvent handler (verify it covers them)"
+            if handled else "")
+    print(f"audit-zero-uses: {len(found)} finding(s){tail}")
     return 1 if found else 0
 
 

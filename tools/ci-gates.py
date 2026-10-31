@@ -661,6 +661,12 @@ def self_check():
         row = zero_uses_row(r, d)
         ok &= branch_version(r) is None and bool(row) and f"| {ZERO_USES_ROW} | REPORT | 1 to read: " in row \
             and "src/main/java/com/example/mod/InfTier.java:2" in row and "FAIL" not in row
+        # a mod-bus ModifyDefaultComponentsEvent handler removing MAX_DAMAGE covers it: no row, the log still says it
+        (r / "src/main/java/com/example/mod/Defaults.java").write_text(
+            "class Defaults {\n  static void on(ModifyDefaultComponentsEvent e) {\n"
+            "    e.modify(X, b -> b.remove(DataComponents.MAX_DAMAGE));\n  }\n}\n", encoding="utf-8")
+        ok &= zero_uses_row(r, d) is None and "audit-zero-uses (handled): src/main/java/com/example/mod/InfTier.java:2" \
+            in (pathlib.Path(d) / "audit-zero-uses.log").read_text(encoding="utf-8")
         tier.write_text("class InfTier implements Tier {\n  public int getUses() { return 512; }\n}\n", encoding="utf-8")
         ok &= zero_uses_row(r, d) is None
     print("self-check:", "OK" if ok else "FAIL")
