@@ -12,7 +12,10 @@ Java sources with comments ignored:
   - an enum tier's constant whose uses argument is 0 (`INF(4, 0, 9f, ...)`, `getUses()` returning the field the
     constructor sets from that parameter);
   - `new ForgeTier(level, 0, ...)`, `new SimpleTier(tag, 0, ...)`, `new ToolMaterial(tag, 0, ...)`;
+  - a record tier constructed with 0 uses in the same file (`record R(int uses) implements Tier` + `new R(0)`);
   - `durability(0)` (or a 0 constant).
+Known gap: a tier constructed in ANOTHER file (an enum constant or a `new Tier(...)` in a registry class, the tier
+class elsewhere) is not followed across files; only `getUses() { return 0; }` and the literal shapes above are.
 A file whose code uses `DataComponents.UNBREAKABLE` is skipped (the mod handles it), and a hit whose line or the line
 above it carries `zero-uses-ok` (a comment saying why) is left out. Report only: whether 0 meant unbreakable is the
 mod's intent. One implementation for every route: the catalogue sweep (catalog-scans.md), ci-gates.py's report row
@@ -99,7 +102,7 @@ def scan_text(text):
             continue
         field = re.fullmatch(r"(?:this\.)?([A-Za-z_]\w*)", m.group(1).strip())
         if field:
-            hits += enum_hits(code, field.group(1), zero)
+            hits += enum_hits(code, field.group(1), zero) + record_hits(code, field.group(1), zero)
     for m in NEW_TIER.finditer(code):
         args, _ = call_args(code, m.end() - 1)
         if args and len(args) > 1 and zero(args[1]):
@@ -147,6 +150,22 @@ def enum_hits(code, field, zero):
     return out
 
 
+def record_hits(code, field, zero):
+    """A record tier whose getUses() returns its component `field`: each `new <Record>(...)` in the same file whose
+    argument for that component is 0."""
+    out = []
+    for r in re.finditer(r"\brecord\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^()]*)\)", code):
+        params = [p.strip().split()[-1] for p in r.group(2).split(",") if p.strip()]
+        if field not in params:
+            continue
+        idx = params.index(field)
+        for m in re.finditer(r"\bnew\s+" + re.escape(r.group(1)) + r"\s*\(", code):
+            args, _ = call_args(code, m.end() - 1)
+            if args and len(args) > idx and zero(args[idx]):
+                out.append((m.start(), f"new {r.group(1)}(...): 0 uses"))
+    return out
+
+
 def scan(root):
     """[(path relative to root, line, what)] over the Java sources under `root` (its src/*/java trees when it is a
     repository, else every .java below it), sorted; a hit marked `zero-uses-ok` on its line or the one above is left out."""
@@ -189,6 +208,9 @@ def self_check():
         "new ToolMaterial, a nested first argument": (
             "class A {\n  static final ToolMaterial M = new ToolMaterial(TagKey.create(Registries.BLOCK,\n"
             "      ResourceLocation.parse(\"a:b\")), 0, 9f, 4f, 15, ItemTags.X);\n}\n", [2]),
+        "a record tier": ("record InfTier(int level, int uses) implements Tier {\n  public int getUses() { return uses; }\n"
+                          "  static final InfTier INF = new InfTier(4, 0);\n  static final InfTier IRON = new InfTier(2, 250);\n}\n",
+                          [3]),
         "durability(0)": ("class A {\n  Item.Properties p = new Item.Properties().durability(0);\n}\n", [2]),
         "512 uses": ("class A implements Tier {\n  public int getUses() { return 512; }\n  static final int USES = 512;\n"
                      "  Tier t = new ForgeTier(4, USES, 9f, 4f, 15, BlockTags.X, () -> Ingredient.EMPTY);\n"
@@ -234,8 +256,8 @@ def main(argv):
         print("audit-zero-uses: no Java sources")
         return 2
     for p, ln, what in found:
-        print(f"audit-zero-uses: {p}:{ln}: {what} -- breaks on its first hit unless it has no durability components "
-              "(CATALOG 177)")
+        print(f"audit-zero-uses: {p}:{ln}: {what} -- breaks on its first hit unless it is unbreakable or has no "
+              "durability components (CATALOG 177)")
     print(f"audit-zero-uses: {len(found)} finding(s)")
     return 1 if found else 0
 

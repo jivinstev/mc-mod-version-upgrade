@@ -86,6 +86,12 @@ printf 'class IronTier implements Tier {\n  public int getUses() { return 512; }
 out="$(bash tools/run-catalog-scans.sh "$P2" 2>&1)"
 grep -q 'audit-zero-uses: src/main/java/com/example/mod/InfTier.java:2: getUses() returns 0' <<<"$out" && ! grep -q 'IronTier' <<<"$out" \
   && ok "the sweep names a 0-use tier (tools/audit-zero-uses.py), not a 512-use one or a comment" || bad "0-use tier sweep: $(grep -A3 '#177' <<<"$out")"
+# a sweep whose audit cannot run says so, never a silent clean section (a layout without the tool)
+FK="$T/fake-kit"; mkdir -p "$FK/tools" "$FK/.claude/skills/migrate-mod/references"
+cp tools/run-catalog-scans.sh "$FK/tools/"; cp .claude/skills/migrate-mod/references/catalog-scans.md "$FK/.claude/skills/migrate-mod/references/"
+out="$(bash "$FK/tools/run-catalog-scans.sh" "$P2" 2>&1)"
+grep -q 'audit-zero-uses: did not run (exit 2)' <<<"$out" && grep -q 'sweep complete' <<<"$out" \
+  && ok "the sweep says the 0-use audit did not run when it cannot, and goes on" || bad "0-use audit crash hidden: $(grep -A2 '#177' <<<"$out")"
 rm -f "$P2/src/main/java/com/example/mod/InfTier.java" "$P2/src/main/java/com/example/mod/IronTier.java"
 bash tools/run-catalog-scans.sh "$T/nosrc" >/dev/null 2>&1; [ $? = 2 ] && ok "a directory that is not a port is refused (exit 2)" || bad "non-port not refused"
 

@@ -348,7 +348,11 @@ echo "     should read the running game's number (SharedConstants…getPackVersi
 echo "     Measured on a ~840-file content mod's 1.21.4 port: two writers said 48 and an install-time rewrite hid both.)"
 
 hit "§G/#177  a 0-use tool tier fed to durability() — an UNBREAKABLE sword/tool that breaks on its first hit in survival"
-python3 "${MMVU_TOOLS:-../../tools}/audit-zero-uses.py" . 2>/dev/null | grep -v -e ' finding(s)$' -e 'no Java sources$'
+zu_out="$(python3 "${MMVU_TOOLS:-../../tools}/audit-zero-uses.py" . 2>&1)"; zu_rc=$?
+case "$zu_rc" in
+  0|1) printf '%s\n' "$zu_out" | grep -v -e ' finding(s)$' ;;
+  *) printf '%s\n' "$zu_out" | grep -q 'no Java sources$' || echo "  audit-zero-uses: did not run (exit $zu_rc): $(printf '%s\n' "$zu_out" | tail -1)" ;;
+esac
 echo "  (^ tools/audit-zero-uses.py: a hit is fixed by giving the item no durability components (or, on 1.21.1-1.21.4,"
 echo "     DataComponents.UNBREAKABLE with new Unbreakable(false)), or marked zero-uses-ok with why. Comments are ignored.)"
 
