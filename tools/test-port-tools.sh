@@ -79,6 +79,14 @@ out="$(bash tools/run-catalog-scans.sh "$P2" 2>&1)"; code=$?
 [ $code = 0 ] && ! grep -qiE 'syntax error|command not found' <<<"$out" && ok "the sweep runs as valid shell (exit 0, no shell errors)" || bad "sweep exit $code"
 grep -q 'sweep complete' <<<"$out" && ok "the sweep runs to its end" || bad "sweep did not complete"
 grep -qx '#forge:ores' <<<"$out" && ! grep -qx 'forge:add_spawns' <<<"$out" && ok "#forge: refs are found, neoforge: ids are not" || bad "forge regex wrong"
+# a 0-use tier (CATALOG 177) is born at the 1.20.1 -> 1.21.1 port, the single-version route: the sweep names it
+mkdir -p "$P2/src/main/java/com/example/mod"
+printf 'class InfTier implements Tier {\n  public int getUses() { return 0; }\n}\n' > "$P2/src/main/java/com/example/mod/InfTier.java"
+printf 'class IronTier implements Tier {\n  public int getUses() { return 512; } // return 0;\n}\n' > "$P2/src/main/java/com/example/mod/IronTier.java"
+out="$(bash tools/run-catalog-scans.sh "$P2" 2>&1)"
+grep -q 'audit-zero-uses: src/main/java/com/example/mod/InfTier.java:2: getUses() returns 0' <<<"$out" && ! grep -q 'IronTier' <<<"$out" \
+  && ok "the sweep names a 0-use tier (tools/audit-zero-uses.py), not a 512-use one or a comment" || bad "0-use tier sweep: $(grep -A3 '#177' <<<"$out")"
+rm -f "$P2/src/main/java/com/example/mod/InfTier.java" "$P2/src/main/java/com/example/mod/IronTier.java"
 bash tools/run-catalog-scans.sh "$T/nosrc" >/dev/null 2>&1; [ $? = 2 ] && ok "a directory that is not a port is refused (exit 2)" || bad "non-port not refused"
 
 echo "3. ResourceIntegrityTest.java.template (compiled against stub JUnit, run on fixtures)"
@@ -358,6 +366,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-valueio.py|convert-valueio: scalar entity/block-entity save-load onto ValueInput/ValueOutput, hurt onto hurtServer; the rest refused" \
             "audit-unit-codecs.py|audit-unit-codecs: a field-less payload class behind StreamCodec.unit is caught; a record is not" \
             "audit-wiring.py|audit-wiring: a dropped @EventBusSubscriber or register call, an unregistered Forge capability, a lost registration and a null-side provider are reported; a clean port is not" \
+            "audit-zero-uses.py|audit-zero-uses: a 0-use tier (getUses() 0, a 0 constant, an enum tier constant, new ForgeTier/SimpleTier/ToolMaterial with 0 uses, durability(0)) is reported; 512 uses, comments, strings, a file using DataComponents.UNBREAKABLE and a zero-uses-ok line are not" \
             "audit-descriptors.py|audit-descriptors: a removed method, a changed signature and a moved class in a transformer's strings are reported; a supertype's method, a mod's own names, comments and mixin files are not" \
             "convert-override-signatures.py|convert-override-signatures: a hook whose signature changed after 1.21.1 keeps its body in a private 1.21.1-shaped copy; --crossing FROM..TO runs only the rows landing in that hop (1.21.2 / 1.21.5), idempotent, and the hops add up to the one-step era run" \
             "port-derive.py|port-derive: a dev-branch port replayed onto the release, unreleased files and their port-only handlers dropped" \

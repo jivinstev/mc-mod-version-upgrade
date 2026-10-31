@@ -416,10 +416,13 @@ classpath, no `javap`, a timeout (300 s for the classpath, 600 s per audit run),
 audit cannot read (Kotlin, or outside a `mixin/` or `mixins/` package) -- its row says `skipped: <why>`, and an audit
 that crashes writes no row. On a version branch,
 `fork-port.py`'s audit stage still gates on both before its gates stage runs `ci-gates.py`, so there a row appears only
-when that stage was skipped or the branch's own Port CI runs the gates; that stage also reports a 0-use tool tier
-(`getUses()` 0, `durability(0)`, a 0-durability `ToolMaterial`: an unbreakable tool that breaks on its first hit,
-CATALOG M92) as a WARNING in its line and summary, never a stop (version branches only; ci-gates.py has no such row). A fork's CI gets these two rows from the next
-Port CI kit release (the kit now ships `tools/audit-event-listeners.py` and `tools/qtc-init.gradle` again).
+when that stage was skipped or the branch's own Port CI runs the gates. A fork's CI gets these two rows from the next
+Port CI kit release (the kit now ships `tools/audit-event-listeners.py` and `tools/qtc-init.gradle` again). One more
+static check reports on every route: `tools/audit-zero-uses.py` names a tool tier with 0 uses fed to `durability()`
+(`getUses()` 0, an enum tier constant, `ForgeTier` / `SimpleTier` / `ToolMaterial` with 0, `durability(0)`: an
+unbreakable tool that breaks on its first hit in survival, CATALOG 177) -- a REPORT row of `ci-gates.py` on a
+single-version fork and a version branch alike (a fork's CI from the next kit release), a hit of the catalogue sweep
+(`tools/run-catalog-scans.sh`), and a WARNING in `fork-port.py`'s audit stage line; never a red gate or a stop.
 
 The shared helper library (`templates/fork-layer/shared/<version>/java`) is written next to third-party sources --
 NeoForge's sources jars, the Minecraft sources every fork build stages, GeckoLib -- so one more gate runs **only on

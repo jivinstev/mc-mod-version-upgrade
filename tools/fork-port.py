@@ -46,7 +46,7 @@ Stages, each logged as one line and skipped with a reason when it does not apply
   loop     file-loop.py --budget N on the branch's source (its kept rows land in .port/<t>/renames.tsv)
   audit    audit-mixin-targets.py against the version's sources jar, then audit-event-listeners.py (abstract events)
            over every source tree against the branch's resolved classpath (only at 0 errors); a 0-use tier
-           (`getUses()` 0, `durability(0)`, a 0-durability ToolMaterial: CATALOG M92) is a WARNING in its line, never a stop
+           (tools/audit-zero-uses.py: CATALOG 177) is a WARNING in its line, never a stop
   gates    ci-gates.py --mc <t>: none = skip; ab = author build, Gate A, Gate B; full = + Gate C phases. After a green run, the
            mod's own log files (harness/run/logs, minus vanilla's) are compared with the parent version's last gate run: a file
            it wrote there and not here is residue (exit 11) -- a subsystem stopped running (CATALOG X47)
@@ -790,22 +790,11 @@ def client_refs_in_common(repo, prepared):
     return out
 
 
-ZERO_USES = re.compile(r"\bgetUses\s*\(\s*\)\s*\{\s*return\s+0\s*;|\.durability\s*\(\s*0\s*\)"
-                       r"|\bnew\s+ToolMaterial\s*\(\s*[^,;()]+(?:\([^()]*\))?\s*,\s*0\s*,")
-
-
 def zero_use_tiers(repo):
-    """A tier with 0 uses was unbreakable on 1.20.1; from 1.21.1 it reaches Item.Properties.durability(0) (TieredItem,
-    or a ToolMaterial port), which makes the stack damageable and the first hit breaks it (CATALOG M92). -> ["<file>:
-    <line>"] (relative to the repo) for each `getUses() { return 0; }`, `durability(0)` or `new ToolMaterial(<tag>, 0,
-    ...)` in its src/*/java trees, comments ignored. Report only: whether 0 meant unbreakable is the mod's intent."""
-    repo, out = pathlib.Path(repo), []
-    for tree in sorted(p for p in repo.glob("src/*/java") if p.is_dir()):
-        for f in sorted(tree.rglob("*.java")):
-            text = blank_comments(f.read_text(encoding="utf-8", errors="replace"))
-            rel = f.relative_to(repo).as_posix()
-            out += [f"{rel}:{text.count(chr(10), 0, m.start()) + 1}" for m in ZERO_USES.finditer(text)]
-    return out
+    """tools/audit-zero-uses.py over the repo's src/*/java trees (the one implementation the catalogue sweep and
+    ci-gates.py's report row run too): a tier with 0 uses fed to durability(), an unbreakable tool that breaks on its
+    first hit (CATALOG 177). -> ["<file>:<line>: <what>"]. Report only."""
+    return [f"{p}:{ln}: {what}" for p, ln, what in load("audit_zero_uses", "audit-zero-uses.py").scan(repo)]
 
 
 def unreviewed_stubs(tdir):
@@ -2142,10 +2131,10 @@ class Run:
                 return ev
             done = {"done": ((lines[-1] if lines else "all targets match")[:120] + "; " + ev["done"])[:200]}
             zero = zero_use_tiers(self.repo)
-            if zero:          # report only (CATALOG M92): a warning in the stage line and the summary, never a stop
-                done["warnings"] = [f"0-use tier (CATALOG M92: breaks on its first hit unless it has no durability "
+            if zero:          # report only (CATALOG 177): a warning in the stage line and the summary, never a stop
+                done["warnings"] = [f"0-use tier (CATALOG 177: breaks on its first hit unless it has no durability "
                                     f"components): {h}" for h in zero]
-                done["done"] += f"; WARNING {len(zero)} 0-use tier(s), CATALOG M92: {', '.join(zero[:4])}"
+                done["done"] += f"; WARNING {len(zero)} 0-use tier(s), CATALOG 177: {', '.join(zero[:4])}"
             return done
         if r.returncode == 2 or any("NO TARGETS CHECKED" in l for l in lines):
             return {"stop": "the mixin audit checked no targets (wrong jar or tree?) -- not a pass", "code": 13,
@@ -3309,7 +3298,7 @@ def self_check():
         hits = client_refs_in_common(repo, repo / "build/mc1.21.8/mv/java")
         expect(hits == ["m/Doc.java:7", "m/EnMixin.java:3", "m/Item.java:3"],
                f"client lookups in common classes (comments and javadoc ignored, a string with /* kept as code): {hits}")
-    # ---- a 0-use tier is reported (CATALOG M92), a real one and a comment are not; report only
+    # ---- a 0-use tier is reported (CATALOG 177), a real one and a comment are not; report only
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); jt = repo / "src/main/java"; (jt / "com/example/mod").mkdir(parents=True)
         (jt / "com/example/mod/Infinite.java").write_text(
@@ -3321,7 +3310,7 @@ def self_check():
             "class Mat {\n  static final ToolMaterial M = new ToolMaterial(BlockTags.INCORRECT_FOR_NETHERITE_TOOL,\n"
             "      0, 9.0F, 4.0F, 15, Tags.Items.INGOTS);\n  Item.Properties p = new Item.Properties().durability(0);\n}\n",
             encoding="utf-8")
-        hits = zero_use_tiers(repo)
+        hits = [h.split(": ", 1)[0] for h in zero_use_tiers(repo)]
         expect(hits == ["src/main/java/com/example/mod/Infinite.java:3", "src/main/java/com/example/mod/Mat.java:2",
                         "src/main/java/com/example/mod/Mat.java:4"],
                f"0-use tiers: getUses() 0, a 0-durability ToolMaterial and durability(0); 512 and comments not: {hits}")
@@ -3335,7 +3324,7 @@ def self_check():
         run.sh = lambda cmd, log=None, cwd=None: CompletedProcess(cmd, 0, "all targets match\n", "")
         run.audit_event_listeners = lambda: {"done": "listeners ok"}
         res = run.s_audit()
-        expect("stop" not in res and "WARNING 3 0-use tier(s), CATALOG M92" in res.get("done", "")
+        expect("stop" not in res and "WARNING 3 0-use tier(s), CATALOG 177" in res.get("done", "")
                and len(res.get("warnings", [])) == 3, f"the 0-use audit is a warning, never a stop: {res}")
     # ---- a review carries one version on when the file and every signal are the same; a changed count does not
     with tempfile.TemporaryDirectory() as d:

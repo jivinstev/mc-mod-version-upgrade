@@ -347,6 +347,11 @@ echo "  (^ a hit is a CANDIDATE: a fixture pack in a test may pin a number on pu
 echo "     should read the running game's number (SharedConstants…getPackVersion) or take the target in."
 echo "     Measured on a ~840-file content mod's 1.21.4 port: two writers said 48 and an install-time rewrite hid both.)"
 
+hit "§G/#177  a 0-use tool tier fed to durability() — an UNBREAKABLE sword/tool that breaks on its first hit in survival"
+python3 "${MMVU_TOOLS:-../../tools}/audit-zero-uses.py" . 2>/dev/null | grep -v -e ' finding(s)$' -e 'no Java sources$'
+echo "  (^ tools/audit-zero-uses.py: a hit is fixed by giving the item no durability components (or, on 1.21.1-1.21.4,"
+echo "     DataComponents.UNBREAKABLE with new Unbreakable(false)), or marked zero-uses-ok with why. Comments are ignored.)"
+
 printf '\n── sweep complete — every path above is a HIT to fix-or-explain ──\n'
 ```
 
