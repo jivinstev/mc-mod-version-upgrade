@@ -664,8 +664,24 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      driver** the backlog job's text says so for each suspected entry it was given (a confirmed entry's job is as
      before): its `fixed:` line confirms the entry (the ledger step runs `confirm`); for a disproval it runs `disprove
      ... --ref origin/<head> --check` and writes `disproved: <ID> <kind> <evidence>` with `RESULT: ok`; the ledger step
-     runs `disprove` on the head at the job's version and commits it with the round's statuses, and the closing comment
-     lists each one under `### Closed as not a defect (suspected entries)`, so the owner sees it after the fact.
+     runs `disprove` on the head at the job's version (a version branch's disproval closes that version only; the
+     entry's other versions stay as they were) and commits it with the round's statuses, and the closing comment lists
+     each one under `### Closed as not a defect (suspected entries)`, so the owner sees it after the fact. A disproval
+     counts only for a suspected entry the job was given and init graded S3/S4 (the plan's `/grade` applied) and only
+     when `disprove --check` accepts it against the head's ledger (its citation found in the clone); anything else
+     blocks the job (or the ledger step) for the owner, as before. **The fork's own pinned tools must read the new
+     keys:** the weekly plan's workflow runs `known-issues.py` at the config's `migrator_sha` and Port CI's publish job
+     at the kit its workflows pin, both strict about unknown keys -- so the round writes `confidence` or `disproved`
+     only when every one of them accepts them (read from the migrator's history at that commit and kit tag). Otherwise
+     a disproval is the owner's (the job blocks, naming the evidence), a suspected finding is added confirmed with
+     "Suspected (unverified):" in its notes, and the closing comment names the re-pin: `weekly-plan.py install
+     --keep-existing` and a Port CI kit release. A job that reproduces a suspected entry with another grade writes
+     `regrade: <ID> <failure> <visibility> <reach> <yes|no>`: the ledger step re-grades it (recorded with the confirm),
+     and an S1/S2 the job did not fix blocks the version like any S1/S2 finding. **To reopen** a closed one for good:
+     `known-issues.py status <ID> --set <v>=open` and `confirm <ID>`; a round never closes a version twice. Before
+     any agent job on a head checkout (a single-version fork's, or a version-branch fork's head) the driver installs the
+     head workflow's `--dep-jar` pins into `~/.m2`, sha256-checked (a REPLACED jar is warned about), so the worker's
+     `ci-gates.py` build finds them; a version branch's jobs get theirs through `fork-port.py`.
 4. **Per version, in ladder order**, once its code is in -- first `python3 tools/port-cost.py mark --fork <owner/repo>
    --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks; the
    driver writes it, with `--phase`, at every item boundary).
