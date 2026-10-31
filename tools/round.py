@@ -112,7 +112,7 @@ Exit codes: 0 ok (drive: progress made or the round done); 3 nothing can run (bl
 Standard library only.
 """
 import argparse, concurrent.futures, contextlib, datetime, hashlib, importlib.util, io, json, os, pathlib, re, shlex
-import shutil, subprocess, sys, tempfile, threading, time
+import shutil, stat, subprocess, sys, tempfile, threading, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
@@ -2466,7 +2466,7 @@ def t_depgate(st, it, log):
         git(dep["dir"], "worktree", "remove", "--force", str(work))
         shutil.rmtree(work, ignore_errors=True)
     git(dep["dir"], "worktree", "add", "-q", "--detach", str(work), f"origin/neoforge-{v}", check=True)
-    m2 = st.rdir / "round/work" / f"depgate-{dep['name']}-{v}-m2"
+    m2 = private_dir(st, f"depgate-{dep['name']}-{v}-m2")
     try:
         wt_head = head(work)
         with full_gate_lock(it["id"], say_to(log)) as lk:
@@ -2488,31 +2488,71 @@ def t_depgate(st, it, log):
     finally:
         git(dep["dir"], "worktree", "remove", "--force", str(work))
         shutil.rmtree(work, ignore_errors=True)
-        shutil.rmtree(m2, ignore_errors=True)
+        remove_tree(m2, say_to(log))
         git(dep["dir"], "worktree", "prune")
     return f"{it['extra']['dependent']} {v} Gate C green against the candidate jar", {"evidence": str(evid),
                                                                                        "library_head": head(lco)}
 
 
+def private_dir(st, name):
+    """A new directory path under round/work for one run (`name`, the pid and a timestamp): a copy a run could not
+    remove (a jar held open on Windows) never meets the next run's copy, which always starts from nothing."""
+    base = st.rdir / "round/work" / f"{name}-{os.getpid()}-{int(time.time() * 1000)}"
+    d, n = base, 1
+    while d.exists():
+        d, n = base.with_name(f"{base.name}-{n}"), n + 1
+    return d
+
+
+def remove_tree(d, say=None):
+    """Remove a run's directory: a read-only file (git objects, a jar on Windows) has its write bit set and is tried
+    again; what still cannot go is said (a leaked copy is named, never silent). -> True when it is gone."""
+    def again(fn, path, _exc):
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            fn(path)
+        except OSError:
+            pass
+    d = pathlib.Path(d)
+    if d.exists():
+        shutil.rmtree(d, onerror=again)
+    if d.exists() and say:
+        say(f"round: WARNING could not remove {d.as_posix()} (a file still open?): remove it by hand")
+    return not d.exists()
+
+
+def link_or_copy(src, dst):
+    """copytree's copy_function for a private mavenLocal: a hard link where the file system allows one (no bytes
+    copied), else a copy. Safe because every write into the private copy replaces the file (os.replace), so nothing
+    ever writes through a link into ~/.m2."""
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+    return dst
+
+
 def private_m2(dest, cands):
-    """A private mavenLocal for one dependent gate run: a copy of ~/.m2/repository (what the dependent's build resolves
-    from mavenLocal besides the library: other sibling ports' pinned jars, --dep builds), with each candidate jar put
-    at the coordinates the dependent pins ({group:artifact: (version, bytes)}, a minimal POM beside it). ~/.m2 itself is
-    only read: no kill, restart or unlocked build elsewhere ever sees the candidate there. -> dest."""
+    """A private mavenLocal for one dependent gate run: ~/.m2/repository linked file by file (link_or_copy: what the
+    dependent's build resolves from mavenLocal besides the library: other sibling ports' pinned jars, --dep builds),
+    with each candidate jar put at the coordinates the dependent pins ({group:artifact: (version, bytes)}, a minimal POM
+    beside it), written by replacing the file (layer-deps.py write_atomic) so a link to ~/.m2 is never written through.
+    `dest` must not exist yet (private_dir). ~/.m2 itself is only read: no kill, restart or unlocked build elsewhere ever
+    sees the candidate there. -> dest."""
     dest = pathlib.Path(dest)
-    shutil.rmtree(dest, ignore_errors=True)
     home = pathlib.Path.home() / ".m2/repository"
     if home.is_dir():
-        shutil.copytree(home, dest, symlinks=True)
+        shutil.copytree(home, dest, symlinks=True, copy_function=link_or_copy)
     dest.mkdir(parents=True, exist_ok=True)
+    put = mod("ld").write_atomic
     for ga, (ver, data) in cands.items():
         g, a = ga.split(":")
         d_ = dest / g.replace(".", "/") / a / ver
         d_.mkdir(parents=True, exist_ok=True)
-        (d_ / f"{a}-{ver}.jar").write_bytes(data)
-        (d_ / f"{a}-{ver}.pom").write_text(f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
-                                          f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar"
-                                          "</packaging></project>\n", encoding="utf-8")
+        put(d_ / f"{a}-{ver}.jar", data)
+        put(d_ / f"{a}-{ver}.pom", (f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
+                                   f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar"
+                                   "</packaging></project>\n").encode("utf-8"))
     return dest
 
 
@@ -2692,7 +2732,7 @@ def depgate_head(st, it, lib, dep, v, lco, jars, log):
     br = dep["head"]
     git(dep["dir"], "fetch", "-q", "origin", br, check=True)
     work = st.rdir / "round/work" / f"depgate-{dep['name']}-{v}"
-    m2 = st.rdir / "round/work" / f"depgate-{dep['name']}-{v}-m2"
+    m2 = private_dir(st, f"depgate-{dep['name']}-{v}-m2")
     evid = st.rdir / "round/logs" / job_id(it)
     evid.mkdir(parents=True, exist_ok=True)
     if work.exists():
@@ -2734,7 +2774,7 @@ def depgate_head(st, it, lib, dep, v, lco, jars, log):
     finally:
         git(dep["dir"], "worktree", "remove", "--force", str(work))
         shutil.rmtree(work, ignore_errors=True)
-        shutil.rmtree(m2, ignore_errors=True)
+        remove_tree(m2, say_to(log))
         git(dep["dir"], "worktree", "prune")
     return (f"{it['extra']['dependent']} {v} gates green against the candidate jar",
             {"evidence": str(evid), "library_head": head(lco)})
@@ -5430,7 +5470,7 @@ def self_check():
             seen["m2"] = (str(pm_), (pm_ / "com/example/examplelib/1.0/examplelib-1.0.jar").is_file(),
                           (env or {}).get("PORT_GRADLE_ARGS", "").splitlines())
             if pm_.is_dir():               # layer-deps' --port-checkout installs the candidate into the private copy
-                (pm_ / "com/example/examplelib/1.0/examplelib-1.0.jar").write_bytes(b"candidate")
+                mod("ld").write_atomic(pm_ / "com/example/examplelib/1.0/examplelib-1.0.jar", b"candidate")
             (w / ".port/1.21.4").mkdir(parents=True, exist_ok=True)
             (w / ".port/1.21.4/GATES.md").write_text(seen["gates"].format(head=head(w)), encoding="utf-8")
             return subprocess.CompletedProcess(cmd, 18, "", "")
@@ -5454,7 +5494,7 @@ def self_check():
         expect("green against the candidate jar" in note and seen.get("held"),
                f"the dependent gate: green with its GATES.md, the gate lock held by the run: {note}")
         pm_, copied_, gargs_ = seen.get("m2", ("", False, []))
-        expect("depgate-" in pm_ and pm_.endswith("-1.21.4-m2") and copied_ and f"-Dmaven.repo.local={pm_}" in gargs_
+        expect("depgate-" in pm_ and "-1.21.4-m2-" in pm_ and copied_ and f"-Dmaven.repo.local={pm_}" in gargs_
                and not pathlib.Path(pm_).exists()
                and (dg_home / ".m2/repository/com/example/examplelib/1.0/examplelib-1.0.jar").read_bytes() == b"released",
                f"the version-branch dependent gate runs on a private mavenLocal (a copy of ~/.m2; MMVU_M2_REPO and "
@@ -5465,6 +5505,63 @@ def self_check():
             expect(False, "the library checkout moved with code and the dependent gate still ran")
         except Reset as e:
             expect(e.ids == ["examplelib@1.21.4:gates"], f"a moved library checkout sends its gates back: {e}")
+        # the private copy is hard links where the file system allows them; the candidate (and any install, through
+        # layer-deps) replaces its file, so ~/.m2's bytes never change; each run's copy is a new directory, a
+        # leftover of an earlier run (not removable on Windows while a jar is open) is no crash
+        m2h_ = dg_home / ".m2/repository"
+        (m2h_ / "com/example/other/2.0").mkdir(parents=True)
+        (m2h_ / "com/example/other/2.0/other-2.0.jar").write_bytes(b"another sibling")
+        class _StP:
+            rdir = tmp / "priv-round"
+        leftover_ = private_dir(_StP(), "depgate-x-1.21.4-m2")
+        leftover_.mkdir(parents=True)
+        (leftover_ / "held.jar").write_bytes(b"held open")
+        pd_ = private_dir(_StP(), "depgate-x-1.21.4-m2")
+        private_m2(pd_, {"com.example:examplelib": ("1.0", b"candidate")})
+        keep_m2 = os.environ.get("MMVU_M2_REPO")
+        os.environ["MMVU_M2_REPO"] = str(pd_)
+        try:
+            mod("ld").install_m2("com.example:other", "2.0", b"installed over the link")
+        finally:
+            os.environ.pop("MMVU_M2_REPO", None) if keep_m2 is None else os.environ.update(MMVU_M2_REPO=keep_m2)
+        try:
+            probe_ = tmp / "link-probe"
+            probe_.write_bytes(b"x")
+            os.link(probe_, tmp / "link-probe-2")
+            links_ = True
+        except OSError:
+            links_ = False
+        copied_ = pd_ / "com/example/examplelib/1.0/examplelib-1.0.jar"
+        expect(pd_ != leftover_ and leftover_.is_dir()
+               and (m2h_ / "com/example/examplelib/1.0/examplelib-1.0.jar").read_bytes() == b"released"
+               and (m2h_ / "com/example/other/2.0/other-2.0.jar").read_bytes() == b"another sibling"
+               and copied_.read_bytes() == b"candidate"
+               and (pd_ / "com/example/other/2.0/other-2.0.jar").read_bytes() == b"installed over the link",
+               "a private mavenLocal: a new directory beside a leftover, the candidate and an install replace their "
+               "files there, ~/.m2's bytes unchanged")
+        (m2h_ / "com/example/third/3.0").mkdir(parents=True)
+        (m2h_ / "com/example/third/3.0/third-3.0.jar").write_bytes(b"untouched")
+        pd2_ = private_dir(_StP(), "depgate-x-1.21.4-m2")
+        private_m2(pd2_, {})
+        if links_:
+            expect(os.path.samefile(m2h_ / "com/example/third/3.0/third-3.0.jar", pd2_ / "com/example/third/3.0/third-3.0.jar"),
+                   "an unchanged file of the private copy is a hard link, not a copy")
+        ro_ = pd2_ / "com/example/third/3.0/third-3.0.jar"
+        os.chmod(ro_, stat.S_IREAD)                            # read-only, as git objects and held jars on Windows
+        said_ = []
+        expect(remove_tree(pd2_, said_.append) and not pd2_.exists() and not said_
+               and (m2h_ / "com/example/third/3.0/third-3.0.jar").read_bytes() == b"untouched",
+               f"remove_tree removes a copy with a read-only file, ~/.m2 kept: {said_}")
+        rm_keep = shutil.rmtree
+        shutil.rmtree = lambda *a_, **k_: None                 # a removal that cannot finish (a jar held open)
+        try:
+            gone_ = remove_tree(pd_, said_.append)
+        finally:
+            shutil.rmtree = rm_keep
+        expect(not gone_ and said_ and "could not remove" in said_[0] and pd_.as_posix() in said_[0],
+               f"a copy that cannot be removed is said, not ignored: {said_}")
+        remove_tree(pd_)
+        remove_tree(leftover_)
         sh = real_sh
         for k_, v_ in dg_env_keep.items():
             if v_ is None:

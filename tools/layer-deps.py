@@ -306,7 +306,7 @@ def m2_root():
     return pathlib.Path(d) if d else pathlib.Path.home() / ".m2/repository"
 
 
-def _write_atomic(path, data):
+def write_atomic(path, data):
     """Write `data` (bytes) to `path` through a temporary file beside it and os.replace: a build reading the jar
     concurrently sees the old file or the new one, never half of one."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -342,8 +342,8 @@ def install_m2(ga, ver, data):
     g, a = ga.split(":")
     dest = m2_root() / g.replace(".", "/") / a / ver
     dest.mkdir(parents=True, exist_ok=True)
-    _write_atomic(dest / f"{a}-{ver}.jar", data)
-    _write_atomic(dest / f"{a}-{ver}.pom", (f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
+    write_atomic(dest / f"{a}-{ver}.jar", data)
+    write_atomic(dest / f"{a}-{ver}.pom", (f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
                                             f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar"
                                             f"</packaging></project>\n").encode("utf-8"))
 
