@@ -34,6 +34,9 @@ Codemod the two-arg and colon forms; this appears hundreds of times in a big mod
   (`DataComponents.CUSTOM_DATA`) wraps a `CompoundTag` — the fastest way to port a
   mod that stored an ad-hoc tag: `stack.get(DataComponents.CUSTOM_DATA)` →
   `CustomData`, `.copyTag()` to read, `CustomData.update(type, stack, tag->…)` to write.
+- **Durability is components too:** `Item.Properties.durability(n)` sets `MAX_DAMAGE` n and `DAMAGE` 0, and a stack
+  with both is damageable even when n is 0. A 1.20.1 `Tier` with `getUses()` 0 (unbreakable there) fed to `TieredItem`
+  makes a tool that breaks on its first hit in survival: give a 0-use item no durability components (CATALOG M92).
 
 ## Enchantments / mob effects / other registry objects are `Holder<>`-wrapped
 - Enchantments are data-driven (1.20.5). `Enchantment` references become
