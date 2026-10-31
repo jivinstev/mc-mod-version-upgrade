@@ -32,6 +32,9 @@ Stages, each logged as one line and skipped with a reason when it does not apply
            checkout for its jar, --port-release its release, pinned for CI); then the data forms the version needs
            (1.21.2 recipes and item definitions, 26.2 entity predicates, 26.3 data, GeckoLib 5 asset paths) written into
            the branch's own src/main/resources
+  (pins)   before the first stage that builds (a resume --from-stage measure too): each jar .port/<t>/branch.properties
+           pins (port_jar.*, under its substitute. coordinate) into ~/.m2 as the version's Port CI does, sha256-checked,
+           one already there with that sha256 kept (layer-deps.py install_pins; a pin that cannot be installed stops, exit 10)
   stage    `./gradlew compileJava` to stage Minecraft; while createMinecraftArtifacts fails on the access transformer,
            fix-access-transformer.py --overrides-from <log> on the branch's AT (bounded: 4 rounds)
   moves    build-class-move-map.py between the parent version's staged jars and this one's -> .port/<t>/moves.generated.tsv,
@@ -1912,6 +1915,21 @@ class Run:
             did.append(f"{n} resource file(s) written in {self.t}'s data forms")
         return {"done": ", ".join(did) or "on its branch"}
 
+    def install_pins(self):
+        """The version's pinned jars (port_jar.* in .port/<t>/branch.properties) into ~/.m2, sha256-checked, as its Port
+        CI does before it builds: a run resumed past setup (--from-stage measure) never ran layer-deps.py resolve, and
+        compileClasspath could not resolve the pinned library (measured, keep-current round 2026-10-31: at every
+        dependent version from 1.21.4 up, each worker installed the jar by hand)."""
+        got = load("layer_deps", "layer-deps.py").install_pins(self.repo, self.t)
+        failed = [m for ok, m in got if not ok]
+        if failed:
+            return {"stop": "a pinned jar could not be put into mavenLocal: " + "; ".join(failed)[:500], "code": 10,
+                    "choices": [f"fix the pin in .port/{self.t}/branch.properties (layer-deps.py resolve --port-release), "
+                                "or put the jar there by hand, then resume"]}
+        for _ok, m in got:
+            self.say("pins", m)
+        return {"done": f"{len(got)} pinned jar(s) in mavenLocal"}
+
     def data_forms(self):
         """The layer's data conversions, written into the branch's own src/main/resources (convert_data)."""
         props = self.fb.read_file(self.tdir / "branch.properties")
@@ -2268,8 +2286,15 @@ def carry_over(old_stages, skipped):
 
 
 def execute(run, todo):
-    """Run the stages in order; -> the stop dict (with stage/left) of the first stage that cannot finish, or None."""
+    """Run the stages in order; -> the stop dict (with stage/left) of the first stage that cannot finish, or None.
+    Before the first stage that builds, the version's pinned jars go into mavenLocal (Run.install_pins)."""
+    pinned = False
     for s in todo:
+        if s not in ("setup", "cost") and not pinned and hasattr(run, "install_pins"):
+            pinned = True
+            res = run.install_pins()
+            if "stop" in res:
+                return dict(res, stage=s, left=res["stop"])
         res = getattr(run, "s_" + s)()
         run.summary["stages"][s] = {k: v for k, v in res.items() if k not in ("view", "esc", "stop", "choices", "code", "detail")}
         if "stop" in res:
@@ -2767,6 +2792,49 @@ def self_check():
     # the single-run (no resume) path is untouched: the measure of THIS run is used as is
     stop, n_meas, cmds, _s = resumed("setup", fresh=0)
     expect(n_meas == 1 and stop is None or (stop and stop["stage"] != "measure"), "full run: one measure, then on")
+    # ---- a resume past setup still puts the version's pinned jars into mavenLocal before it builds (keep-current round
+    # 2026-10-31: --from-stage measure stopped on compileClasspath at every dependent version); no network: one jar is
+    # already there with its sha256, the other's download is a file:// URL whose bytes do not match the pin
+    with tempfile.TemporaryDirectory() as d:
+        repo, home = pathlib.Path(d) / "vb", pathlib.Path(d) / "home"
+        (repo / ".port/1.21.4").mkdir(parents=True)
+        jar_ = b"PK a library jar"
+        have_ = home / ".m2/repository/com/example/examplelib/1.0-mc1.21.4/examplelib-1.0-mc1.21.4.jar"
+        have_.parent.mkdir(parents=True)
+        have_.write_bytes(jar_)
+        wrong_ = pathlib.Path(d) / "wrong.jar"
+        wrong_.write_bytes(b"not the pinned jar")
+        props_ = repo / ".port/1.21.4/branch.properties"
+        pin_ = ("substitute.com.example\\:examplelib=com.example:examplelib:1.0-mc1.21.4\n"
+                f"port_jar.com.example\\:examplelib=https://github.com/owner/examplelib/releases/download/t/a.jar "
+                f"{hashlib.sha256(jar_).hexdigest()}\n")
+        keep_env = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
+        os.environ["HOME"] = os.environ["USERPROFILE"] = str(home)
+        try:
+            for extra_, want_stop in (("", False), ("substitute.com.example\\:other=com.example:other:2.0\n"
+                                                    f"port_jar.com.example\\:other={wrong_.resolve().as_uri()} {'0' * 64}\n", True)):
+                props_.write_text(pin_ + extra_, encoding="utf-8")
+                a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=0.0, gates="ab", modid="m",
+                                        base="x", direct=False, from_stage="measure", max_errors=None, confirm_spend=False)
+                run = Run(a_)
+                order = []
+                run.say = lambda st_, msg: order.append((st_, msg))
+                run.s_measure = lambda: (order.append(("measure", "ran")), {"done": "0 error(s)", "errors": 0, "this_run": True})[1]
+                stop = execute(run, ["measure"])
+                if want_stop:
+                    expect(stop and stop["stage"] == "measure" and stop["code"] == 10 and "sha256" in stop["left"]
+                           and ("measure", "ran") not in order and not (home / ".m2/repository/com/example/other").exists(),
+                           f"a pin that cannot be installed stops before the build, nothing installed: {stop} {order}")
+                else:
+                    expect(stop is None and order[:2] == [("pins", "com.example:examplelib:1.0-mc1.21.4 already in mavenLocal "
+                                                                   "(sha256 ok)"), ("measure", "ran")],
+                           f"--from-stage measure: the pinned jar is checked into mavenLocal before the build: {order}")
+        finally:
+            for k, v in keep_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
     # ---- spend guard and the skipped-shared warning
     expect(spend_guard(900, 15) is None and spend_guard(1501, 15) and spend_guard(1501, 15, confirm=True) is None
            and spend_guard(50, 0.1) and spend_guard(50, 0.1, max_errors=60) is None, "spend guard thresholds")

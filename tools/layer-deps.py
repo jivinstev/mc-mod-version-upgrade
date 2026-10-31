@@ -328,6 +328,31 @@ def install_m2(ga, ver, data):
                                          f"</project>\n", encoding="utf-8")
 
 
+def install_pins(repo, target, pin_jar=None):
+    """Install the jars version `target` pins into ~/.m2 before a local build, as its Port CI's --dep-jar steps do
+    (fork-branches.py remap_ci_args): each port_jar.<g:a>=<url> <sha256> of .port/<target>/branch.properties under the
+    coordinate its substitute.<g:a> names, the download sha256-checked and a jar already there with that sha256 kept
+    (install_pin). Every kind of fork: a file with no pin, or no file, installs nothing. Without it a fresh machine's
+    compileClasspath could not resolve the pinned library at every dependent version (measured, keep-current round
+    2026-10-31: each worker installed the jar by hand and re-ran). -> [(ok, message)], one per pin."""
+    tp = props_file(repo, target)
+    text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
+    got = {}
+    for kind, k, v in PIN_LINE.findall(text):
+        got.setdefault(k.replace("\\:", ":"), {})[kind] = v
+    out = []
+    for ga in sorted(got):
+        pin, coord = got[ga].get("port_jar"), got[ga].get("substitute")
+        if not pin:
+            continue
+        if not coord or coord.count(":") < 2 or len(pin.split()) != 2:
+            out.append((False, f"{ga}: port_jar pin without a substitute.{key(ga)} coordinate or a sha256: not installed"))
+            continue
+        g, a, ver = coord.split(":", 2)
+        out.append((pin_jar or install_pin)(f"{g}:{a}", ver, pin))
+    return out
+
+
 def mr_files(project):
     vs = json.loads(_get(f"{MODRINTH}/project/{project}/version"))
     return [{"id": v["id"], "mcs": v.get("game_versions", []), "loaders": v.get("loaders", []),
@@ -1763,6 +1788,7 @@ def self_check():
     expect("port_jar.com.example\\:lib=https://github.com/owner/lib/releases/download/lib-1.0-mc1.21.1/lib-1.0_a-mc1.21.4.jar "
            + "a" * 64 in blk2, f"pin line: {blk2}")
     _check_pins_and_bumps(expect)
+    _check_install_pins(expect)
     if bad:
         print("layer-deps self-check: FAIL\n  " + "\n  ".join(bad))
         return 1
@@ -1974,6 +2000,65 @@ def _check_pins_and_bumps(expect):
            and res["checked"] == 2 and not res["unchecked"]
            and dependency_updates({"1.21.4": {}}, {"mr_files": lambda p_: rf[p_]}) == {"rows": [], "unchecked": [], "checked": 0},
            f"restore: a dropped dependency with a build now is an unticked restore row; one still without none: {res}")
+
+
+def _check_install_pins(expect):
+    """install_pins: the version's pins into ~/.m2 (a stand-in download, a temporary home), sha256-checked, a jar there
+    with that sha256 never fetched again; a single-version fork with pins gets them, one without is untouched."""
+    global _get
+    jar = b"PK\x03\x04 a library jar"
+    sha = hashlib.sha256(jar).hexdigest()
+    url = "https://github.com/owner/examplelib/releases/download/examplelib-1.0-mc1.21.1/examplelib-1.0_a.jar"
+    fetched, keep_get, keep_env = [], _get, {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
+    _get = lambda u, headers=None: (fetched.append(u), jar)[1]
+    with tempfile.TemporaryDirectory() as td:
+        home = pathlib.Path(td) / "home"
+        home.mkdir()
+        os.environ["HOME"] = os.environ["USERPROFILE"] = str(home)
+        try:
+            m2 = home / ".m2/repository/com/example/examplelib/1.0-mc1.21.1/examplelib-1.0-mc1.21.1.jar"
+            for kind, mc in (("single-version", "1.21.1"), ("version-branch", "1.21.4")):
+                repo = pathlib.Path(td) / kind
+                (repo / ".port" / mc).mkdir(parents=True)
+                (repo / "gradle.properties").write_text(f"minecraft_version={mc}\n", encoding="utf-8")
+                (repo / ".port" / mc / "branch.properties").write_text(
+                    f"{BEGIN}\nsubstitute.com.example\\:examplelib=com.example:examplelib:1.0-mc{mc}\n"
+                    f"port_jar.com.example\\:examplelib={url} {sha}\n{END}\n", encoding="utf-8")
+                want = m2.parent.parent / f"1.0-mc{mc}" / f"examplelib-1.0-mc{mc}.jar"
+                del fetched[:]
+                r1 = install_pins(repo, mc)
+                r2 = install_pins(repo, mc)
+                expect(len(r1) == 1 and r1[0][0] and want.read_bytes() == jar and want.with_suffix(".pom").is_file()
+                       and len(r2) == 1 and r2[0][0] and "already in mavenLocal" in r2[0][1] and fetched == [url],
+                       f"install_pins on a {kind} branch: installed under the substitute's coordinate, sha256-checked, "
+                       f"not fetched again: {r1} {r2} {fetched}")
+                want.parent.mkdir(parents=True, exist_ok=True)
+                want.write_bytes(b"a stale jar")
+                r3 = install_pins(repo, mc)
+                expect(r3 and r3[0][0] and want.read_bytes() == jar, f"a jar there with another sha256 is replaced: {r3}")
+            bad_ = pathlib.Path(td) / "bad"
+            (bad_ / ".port/1.21.1").mkdir(parents=True)
+            (bad_ / ".port/1.21.1/branch.properties").write_text(
+                f"substitute.com.example\\:other=com.example:other:2.0\nport_jar.com.example\\:other={url} {'0' * 64}\n",
+                encoding="utf-8")
+            r4 = install_pins(bad_, "1.21.1")
+            expect(len(r4) == 1 and not r4[0][0] and "sha256" in r4[0][1]
+                   and not (home / ".m2/repository/com/example/other").exists(), f"a sha256 mismatch installs nothing: {r4}")
+            none_ = pathlib.Path(td) / "nopins"
+            (none_ / ".port/1.21.1").mkdir(parents=True)
+            (none_ / ".port/1.21.1/branch.properties").write_text("upstream_commit=abc\n", encoding="utf-8")
+            before = sorted(str(p) for p in home.rglob("*"))
+            del fetched[:]
+            expect(install_pins(none_, "1.21.1") == [] and install_pins(pathlib.Path(td) / "nofile", "1.21.1") == []
+                   and not fetched and sorted(str(p) for p in home.rglob("*")) == before,
+                   "a single-version fork without pins (or without the file) is untouched")
+        finally:
+            _get = keep_get
+            for k, v in keep_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 PORT_JAR = re.compile(r"(?m)^port_jar\.(.+?)=(https://github\.com/[\w.-]+/[\w.-]+/releases/download/\S+\.jar) ([0-9a-f]{64})\s*$")
