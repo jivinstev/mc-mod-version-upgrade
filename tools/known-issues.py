@@ -135,7 +135,8 @@ THE WEEKLY PLAN ISSUE (issue #135, part 2a; tools/weekly-plan.py runs it as a Gi
                Minecraft version, each pinned dependency with a newer compatible build, ticked by default, unticked
                with the reason for an alpha/beta, a major-version jump, a dropped Minecraft version or a provider
                switch; a failed lookup listed as "could not check"), and grade overrides (`/grade <ID> <S1-S4> [reason]`). The
-               title starts `[decision needed]` when the plan escalates something. A previous plan issue no round
+               title starts `[decision needed]` when the plan escalates something or lists a suspected entry still
+               unresolved two weeks or more after its mark. A previous plan issue no round
                closed is carried in: its ticks and replies, with "last week's round did not run".
   read-plan    the round's first step: the issue's checkboxes and the `/decide` and `/grade` replies, frozen as JSON.
                Only replies from the resolved owner (a user, or a member of the owner team) or from users with write
@@ -913,14 +914,16 @@ def sv_merge_lines(f):
 
 def sus(r):
     """A plan row's marker for a suspected entry (weekly-plan.py's rows carry `suspected`; a ledger entry `confidence`);
-    one still suspected for STALE_PLANS plans or more (a row's `suspected_plans`) is said to need a decision."""
+    one still suspected for STALE_WEEKS weeks or more since its mark (a row's `suspected_weeks`) is said to need a
+    decision."""
     if not (r.get("suspected") or r.get("confidence") == SUSPECTED):
         return ""
-    n = r.get("suspected_plans") or 0
-    return f" (suspected, unresolved for {n} plans -- needs a decision)" if n >= STALE_PLANS else " (suspected)"
+    n = r.get("suspected_weeks") or 0
+    return f" (suspected, unresolved for {n} weeks -- needs a decision)" if n >= STALE_WEEKS else " (suspected)"
 
 
-STALE_PLANS = 2           # a suspected entry neither confirmed nor disproved over this many weekly plans goes to the owner
+STALE_WEEKS = 2           # a suspected entry neither confirmed nor disproved this many weeks after its mark goes to the
+                          # owner: the second weekly plan to show it
 
 
 def suspected_since(repo, ref, rel=None, limit=400):
@@ -946,9 +949,9 @@ def suspected_since(repo, ref, rel=None, limit=400):
     return since
 
 
-def suspected_plans(since, now):
-    """How many weekly plans have shown an entry suspected since `since` (unix time) at `now` (an ISO time, the plan's):
-    one in its first week, then one more a week."""
+def suspected_weeks(since, now):
+    """The weeks, begun, between `since` (unix time, its mark) and `now` (an ISO time, the plan's): 1 in its first week,
+    then one more a week -- weeks since the mark, not plan issues counted (a week no plan opened still counts)."""
     t = datetime.datetime.fromisoformat(str(now).replace("Z", "+00:00")).timestamp()
     return max(1, math.ceil((t - since) / (7 * 86400)))
 
@@ -1041,11 +1044,11 @@ def render_plan(inp):
                          f"<!-- ki:{repo}:{r['id']} candidate -->")
         if not sel and not cand:
             lines.append(f"No open known issues in the ledger (`.port/{LEDGER_NAME}` on `{f['head']}`).")
-        old = [r for r in sel + cand if (r.get("suspected_plans") or 0) >= STALE_PLANS]
+        old = [r for r in sel + cand if (r.get("suspected_weeks") or 0) >= STALE_WEEKS]
         if old:              # never left to sit: the owner decides (nothing here changes what the round selects)
             stale += len(old)
             lines += ["", f"**{len(old)} suspected entr{'y' if len(old) == 1 else 'ies'} neither confirmed nor disproved "
-                      f"over {STALE_PLANS} or more plans:** " + ", ".join(f"`{_q(repo, r['id'], multi, clash)}`" for r in old)
+                      f"{STALE_WEEKS} or more weeks after its mark:** " + ", ".join(f"`{_q(repo, r['id'], multi, clash)}`" for r in old)
                       + ". Tick one for this round to verify it (reproduce it, or disprove an S3/S4), `/grade` it, or "
                       "close it by hand (`known-issues.py confirm` / `disprove` / `status --set <v>=wontfix:<reason>`); "
                       "left as it is, it is listed again next week."]
@@ -2601,13 +2604,14 @@ def suspected_selfcheck(expect, cli):
                     "--status", "1.21.1=open", "--status", "1.21.4=open", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test", "--notes", "Suspected; not verified")
         expect(rc == 0 and "KI-1: S3?" in o and find(led(), "KI-1")["confidence"] == SUSPECTED, f"add --suspected: {o}")
         # a suspected entry says why it is not verified and what would verify it -- in notes, no key of its own
-        n_ = len(led()["issues"])
+        L2 = ("--ledger", str(pathlib.Path(d) / "refusals.json"))      # its own ledger: a wrong accept fails here only
         for extra, why in ((["--suspected"], "--suspected alone"),
                            (["--suspected", "--unverified", "no client here"], "no --verify-by"),
                            (["--suspected", "--unverified", " ", "--verify-by", "a client test"], "a blank --unverified"),
                            (["--unverified", "no client here", "--verify-by", "a client test"], "the reasons without --suspected")):
-            rc, o = cli("add", *L, "--title", "a refused one", "--failure", "cosmetic", *base, "--lowest", "1.21.1", *extra)
-            expect(rc == 2 and len(led()["issues"]) == n_ and ("--unverified" in o), f"{why}: refused, nothing written: {rc} {o}")
+            rc, o = cli("add", *L2, "--title", "a refused one", "--failure", "cosmetic", *base, "--lowest", "1.21.1", *extra)
+            expect(rc == 2 and not pathlib.Path(L2[1]).exists() and "--unverified" in o,
+                   f"{why}: refused, nothing written: {rc} {o}")
         e1_ = find(led(), "KI-1")
         expect(e1_["notes"] == "Suspected; not verified Unverified: not reproduced here. Verify by: a client test."
                and set(e1_) <= ISSUE_KEYS, f"the reasons in notes, no new key: {e1_}")
@@ -2826,21 +2830,21 @@ def plan_untaken_check(expect, cli):
     expect("Could not preview merging" in res["body"] and "Could not preview" not in render_plan(sv0)["body"]
            and (h(res), h(fr), h(render_plan(sv0))) == ("ce1aa9dc5af34a9c", "af5159d1b42a19c3", "9b9ceb2f13e3497b"),
            f"a single-version fork's plan and frozen input are unchanged: {(h(res), h(fr), h(render_plan(sv0)))}")
-    # B3: a suspected entry unresolved over two plans or more is marked, listed for the owner and puts
+    # B3: a suspected entry unresolved two weeks or more after its mark is marked, listed for the owner and puts
     # [decision needed] in the title; one in its first plan only says (suspected); what the round selects is unchanged
     s1 = json.loads(json.dumps(sv))
     s1["forks"][0]["candidates"][0]["suspected"] = True
     r1 = render_plan(json.loads(json.dumps(s1)))
-    s1["forks"][0]["candidates"][0]["suspected_plans"] = 2
+    s1["forks"][0]["candidates"][0]["suspected_weeks"] = 2
     r2 = render_plan(s1)
     expect("`KI-2` b (suspected) --" in r1["body"] and not r1["decision_needed"] and "neither confirmed" not in r1["body"],
            f"a suspected entry in its first plans: (suspected) only: {r1['title']}")
-    expect("`KI-2` b (suspected, unresolved for 2 plans -- needs a decision) --" in r2["body"]
-           and "**1 suspected entry neither confirmed nor disproved over 2 or more plans:** `KI-2`." in r2["body"]
+    expect("`KI-2` b (suspected, unresolved for 2 weeks -- needs a decision) --" in r2["body"]
+           and "**1 suspected entry neither confirmed nor disproved 2 or more weeks after its mark:** `KI-2`." in r2["body"]
            and r2["decision_needed"] and r2["title"].startswith("[decision needed] ")
            and plan_data(r2["body"])["forks"][0]["candidates"] == plan_data(r1["body"])["forks"][0]["candidates"] == ["KI-2"]
            and "- [ ] **S3** `KI-2`" in r2["body"],
-           f"two plans suspected: marked, listed, [decision needed]; still an unticked candidate: {r2['title']}")
+           f"two weeks suspected: marked, listed, [decision needed]; still an unticked candidate: {r2['title']}")
     # its age from the ledger's git history: since the commit that marked it, a confirm in between restarting nothing
     # (it is no longer suspected) and a mark again counting from then
     d = pathlib.Path(tempfile.mkdtemp())
@@ -2865,8 +2869,8 @@ def plan_untaken_check(expect, cli):
         expect(got == {"KI-1": t0, "KI-2": t0 + 86400, "KI-3": t0 + 10 * 86400},
                f"suspected since: the first commit of its unbroken run: {got}")
         iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).isoformat()
-        expect([suspected_plans(t0, iso(t0 + x * 86400)) for x in (0, 6, 7, 8, 13, 15)] == [1, 1, 1, 2, 2, 3]
-               and suspected_plans(t0, iso(t0 - 86400)) == 1, "one plan in its first week, one more a week")
+        expect([suspected_weeks(t0, iso(t0 + x * 86400)) for x in (0, 6, 7, 8, 13, 15)] == [1, 1, 1, 2, 2, 3]
+               and suspected_weeks(t0, iso(t0 - 86400)) == 1, "1 in its first week, one more a week")
         expect(suspected_since(d, "no-such-ref") == {}, "git cannot say: nothing")
     finally:
         shutil.rmtree(d, ignore_errors=True)

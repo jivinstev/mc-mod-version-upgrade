@@ -458,8 +458,8 @@ the entry lists between them).
 reader's suspicion) is added with `--suspected`, which needs `--unverified WHY` (why it could not be verified) and
 `--verify-by WHAT` (what would verify it), both written into its notes (no key of their own): `"confidence": "suspected"`
 (absent: confirmed, every entry before it), shown `S3?` by `list` and "(suspected)" in the pinned issue and the plan
-issue; once two weekly plans have shown it still suspected (its age from the ledger's git history: the commit that
-marked it), the plan says "(suspected, unresolved for N plans -- needs a decision)", lists it for the owner and titles
+issue; two weeks or more after its mark, still suspected (its age from the ledger's git history: the commit that
+marked it; weeks, not plan issues counted), the plan says "(suspected, unresolved for N weeks -- needs a decision)", lists it for the owner and titles
 itself `[decision needed]` (what the round selects is unchanged). A reviewer who can point at the
 regressing line, a failing gate or test, or a reproduction is a confirmed finding. **The fork's own pinned tools must
 read the new key**: its weekly plan workflow runs `known-issues.py` at its config's `migrator_sha`, and Port CI's

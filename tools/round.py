@@ -1706,7 +1706,7 @@ def job_task(st, it):
                 "-- adds `\"suspected\": true` to its line with `\"unverified\": \"<why it could not be verified "
                 "here>\"` and `\"verify_by\": \"<what would verify it: the test, the version to compare, the "
                 "reproduction>\"` (the ledger marks it suspected, both reasons in its notes: a later round verifies it "
-                "before fixing it, and the owner sees every suspected entry still unresolved after two plans); a "
+                "before fixing it, and the owner sees every suspected entry still unresolved two weeks after its mark); a "
                 "suspected line without both is recorded confirmed. Suspected is not a way around a reproduction or a "
                 "comparison you can run here: run it and file what it shows. A row whose regressing line you can name "
                 "is confirmed. The driver adds each "
@@ -3377,7 +3377,8 @@ def t_ledger(st, it, log):
     d = checkout(d, F["head"])
     ff_local(d, F["head"])
     sets, refused, found_new, disproved, blocked_, led_c = 0, [], [], [], [], None
-    found_sus, unreasoned = [], []          # the new ids filed suspected; the suspected lines with no reason (titles)
+    found_sus, unreasoned = [], []          # the new ids filed suspected (marked, or in notes on old readers); the
+                                            # suspected lines with no reason, added confirmed (titles)
     # N5: what this step refused before and the owner retried it over: left as it is, never a stop again
     held, refusing = set(it.get("result", {}).get("refused_disproofs", [])), set()
     if (pathlib.Path(d) / ".port/KNOWN-ISSUES.json").is_file():
@@ -3502,20 +3503,21 @@ def t_ledger(st, it, log):
                     cmd += [f"--{k_}", str(fd.get(k_) or "")]
                 cmd += sum([["--status", f"{v}=open"] for v in vs], [])
                 cmd += sum([["--file", str(f_)] for f_ in fd.get("files") or [] if isinstance(f_, str)], [])
-                sus_ = False
+                sus_ = unr_ = False
                 if fd.get("suspected") is True:      # no reproduction, no version compared
                     # why it could not be verified and what would: without both, it is filed as the defect it names
                     why_, how_ = (" ".join(str(fd.get(k_) or "").split()) for k_ in ("unverified", "verify_by"))
                     nt_ = cmd.index("--notes") + 1
                     if not (why_ and how_):
                         cmd[nt_] += "; filed suspected without a reason; recorded confirmed"
-                        unreasoned.append(title)
+                        unr_ = True
                     elif readers_of(st, F)["ok"]:
                         cmd += ["--suspected", "--unverified", why_, "--verify-by", how_]
                         sus_ = True
                     else:                            # B1: the fork's pinned readers would reject the key
                         cmd[nt_] = (f"Suspected (unverified): {cmd[nt_]} Unverified: {why_.rstrip('.')}. "
                                     f"Verify by: {how_.rstrip('.')}.")
+                        sus_ = True              # suspected in its notes: counted so at the close
                 try:
                     before = {e["id"] for e in ki_.read_ledger(led_path)["issues"]}
                 except ki_.Invalid:
@@ -3533,6 +3535,8 @@ def t_ledger(st, it, log):
                 found_new.append(new[0])
                 if sus_:
                     found_sus.append(new[0])
+                if unr_:                         # counted only once it is in the ledger
+                    unreasoned.append(title)
                 if fd.get("fixed"):
                     set_fixed(new[0], str(fd["fixed"]), x["version"], "finding")
         for x in st.items:
@@ -4878,7 +4882,8 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
              and unv[0]["notes"].endswith("Unverified: no client in this session. Verify by: a Gate C shot of the cursor.")
              and len(pan) == 1
              and pan[0]["status"] == {"1.21.1": f"fixed@{sha4}"} and sorted(res_["added"]) == sorted([unv[0]["id"], pan[0]["id"]])
-             and not any("refused it" in r for r in res_["refused"]) and "new in the ledger" in note,
+             and not any("refused it" in r for r in res_["refused"]) and "new in the ledger" in note
+             and res_.get("added_suspected") == [unv[0]["id"]],
              f"the real sh: findings added once, in `added`, fixed@ where fixed; a suspected one, with readers that "
              f"predate it, added confirmed and said unverified: {note} {res_} {unv} {pan}")
         with State.tx(stA) as st_:

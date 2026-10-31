@@ -804,13 +804,13 @@ def step_select(work):
         # affected version, which may be fixed already
         lo = {e["id"]: min((v for v, st in e["status"].items() if st == "open"), key=k_mc, default=None) for e in every}
         # a suspected entry (no reproduction yet) is marked "(suspected)" on the plan; every other row is as before. One
-        # suspected over two plans or more (the ledger's git history: since its mark) carries suspected_plans, and the
+        # suspected two weeks or more (the ledger's git history: since its mark) carries suspected_weeks, and the
         # plan says it needs the owner's decision
         suspected = {e["id"] for e in every if e.get("confidence") == "suspected"}
         k_ = ki() if suspected else None
         since = k_.suspected_since(f["clone"], f["head_commit"]) if suspected else {}
-        plans = {i: k_.suspected_plans(t, inp["now"]) for i, t in since.items()}
-        sus = lambda i: ({"suspected": True, **({"suspected_plans": plans[i]} if plans.get(i, 0) >= 2 else {})}
+        weeks = {i: k_.suspected_weeks(t, inp["now"]) for i, t in since.items()}
+        sus = lambda i: ({"suspected": True, **({"suspected_weeks": weeks[i]} if weeks.get(i, 0) >= k_.STALE_WEEKS else {})}
                          if i in suspected else {})
         f["selection"] = [dict(s, title=title.get(s["id"], ""), lowest_open=lo.get(s["id"]), **sus(s["id"])) for s in sel]
         taken = {s["id"] for s in sel}
@@ -1404,9 +1404,9 @@ def self_check():
         expect(f0["cascade"] is None and [s["id"] for s in f0["selection"]] == ["KI-1"]
                and [c["id"] for c in f0["candidates"]] == ["KI-2"] and f0["selection"][0]["title"] == "crash on load",
                f"a single-version fork: no cascade; select's S1 by default, the S3 a candidate: {f0}")
-        # B3: a suspected entry still suspected over two plans or more is said to need the owner's decision: its age is
+        # B3: a suspected entry still suspected two weeks or more after its mark is said to need the owner's decision: its age is
         # the ledger's git history (the commit that marked it), no key in the entry
-        expect(f0["candidates"][0].get("suspected") is True and "suspected_plans" not in f0["candidates"][0],
+        expect(f0["candidates"][0].get("suspected") is True and "suspected_weeks" not in f0["candidates"][0],
                f"a suspected entry in its first plan: marked suspected only: {f0['candidates'][0]}")
         ct_, now0_ = int(gq(lib, "log", "-1", "--format=%ct", "HEAD").strip()), inp["now"]
         inp["now"] = datetime.datetime.fromtimestamp(ct_ + 15 * 86400, datetime.timezone.utc).isoformat(timespec="seconds")
@@ -1414,7 +1414,7 @@ def self_check():
         with contextlib.redirect_stdout(io.StringIO()):
             step_select(w)
         c0_ = load_input(w)["forks"][0]["candidates"][0]
-        expect(c0_.get("suspected_plans") == 3 and k.sus(c0_) == " (suspected, unresolved for 3 plans -- needs a decision)",
+        expect(c0_.get("suspected_weeks") == 3 and k.sus(c0_) == " (suspected, unresolved for 3 weeks -- needs a decision)",
                f"three weeks suspected: the plan row says it needs a decision: {c0_}")
         inp["now"] = now0_                       # the rest of this fixture: the plan as it was
         save_input(w, inp)
