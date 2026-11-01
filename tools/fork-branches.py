@@ -3089,11 +3089,23 @@ def records_only(path, t):
         (not path.startswith(f"{REC}/{t}/") or run_output(path, t) and path.rsplit("/", 1)[-1] not in ("GATES.md", "GATES-RED.md"))
 
 
+def remerge_cleared_only(repo, c, h, t):
+    """Did .port/<t>/REMERGE.json between commits c and h only lose entries (a cascade decision cleared, the step
+    after the merge-up's gates; measured, round #129: at 6 of 8 versions)? An entry decides only the done list
+    (remerge_open: exit 18 or 0, both green to every reuse), never the build or the gates. Both forms must read."""
+    p = f"{REC}/{t}/REMERGE.json"
+    try:
+        old, new = (jload(blob_at(repo, x, p) or b"{}").get("conflicts", []) for x in (c, h))
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(old, list) and isinstance(new, list) and all(e in old for e in new)
+
+
 def ab_reusable(repo, work, t, untaken_ok, ok=(0, 17, UNDONE_EXIT)):
     """(record, None) when version t's A/B green record ({"commit", "key", "exit"}) still stands for `work`'s HEAD, else
     (None, why): MMVU_ROUND_REUSE=1; a record for t whose exit the caller accepts (ok) with the same ab_key, the authors'
     branch fetched first (the gate run's drift check fetches it); its commit an ancestor of HEAD with only records_only
-    files changed since (a merge since included)."""
+    files changed since (a merge since included; .port/<t>/REMERGE.json too when it only lost entries)."""
     if not reuse_on():
         return None, f"{REUSE_ENV} is not 1"
     try:
@@ -3116,7 +3128,8 @@ def ab_reusable(repo, work, t, untaken_ok, ok=(0, 17, UNDONE_EXIT)):
     d = git(repo, "diff", "--name-only", rec["commit"], h)
     if d.returncode:
         return None, f"cannot compare with {rec['commit'][:12]}"
-    bad = [f for f in d.stdout.splitlines() if f and not records_only(f, t)]
+    bad = [f for f in d.stdout.splitlines() if f and not records_only(f, t)
+           and not (f == f"{REC}/{t}/REMERGE.json" and remerge_cleared_only(repo, rec["commit"], h, t))]
     if bad:
         return None, f"{len(bad)} file(s) the gates read changed since the record, e.g. {bad[0]}"
     return rec, None
@@ -5471,6 +5484,25 @@ def _check_ab_reuse(expect):
                 _hand(w5, {p_: txt}, why)
                 expect(ok_() is None, f"{p_} changed since the record ({why}): no reuse")
                 git(w5, "reset", "-q", "--hard", at, check=True)
+            # REMERGE.json (round #129: a cascade decision cleared after the merge-up's gates): entries only removed is
+            # reused; an entry added or changed, or a file that does not read, is not
+            ent = {"overlay": "src/main/java/com/example/mod/Plain.java", "reason": "conflict", "since": "abc1234"}
+            rm_ = ".port/1.21.5/REMERGE.json"
+            git(w5, "reset", "-q", "--hard", at, check=True)
+            _hand(w5, {rm_: json.dumps({"conflicts": [ent, dict(ent, overlay="B.java")]})}, "two open entries")
+            note_ab_green(r, w5, "1.21.5", frozen, 0)
+            at2 = h5()
+            _hand(w5, {rm_: json.dumps({"conflicts": [ent]})}, "a decision cleared")
+            expect(ok_() == at2, "REMERGE.json lost an entry since the record (a decision cleared): reused")
+            git(w5, "reset", "-q", "--hard", at2, check=True)
+            for txt, why in ((json.dumps({"conflicts": [ent, dict(ent, overlay="C.java")]}), "an entry added"),
+                             (json.dumps({"conflicts": [dict(ent, since="def5678"), dict(ent, overlay="B.java")]}), "an entry changed"),
+                             ("{not json", "a file that does not read")):
+                _hand(w5, {rm_: txt}, why)
+                expect(ok_() is None, f"REMERGE.json: {why} since the record: no reuse")
+                git(w5, "reset", "-q", "--hard", at2, check=True)
+            git(w5, "reset", "-q", "--hard", at, check=True)
+            note_ab_green(r, w5, "1.21.5", frozen, 0)
             _hand(w5, {".port/1.21.5/COST.md": "c\n", ".port/1.21.3/X.md": "x\n", "NOTES.md": "n\n"}, "records")
             expect(ok_() == at, "its own run outputs, another version's records and a document: still reused")
             git(w5, "reset", "-q", "--hard", at, check=True)
