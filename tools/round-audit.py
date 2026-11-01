@@ -47,9 +47,11 @@ exit 1 on any FAIL or UNKNOWN):
                   the list once the head branch is deleted -- it ran on the PR's head branch) on the PR's final head,
                   every job success or skipped, at least one gates job, none skipped, each one's ci-gates step
                   ("Build and gates") success in the jobs API; the run's tested tree the merge commit's (tree hashes:
-                  the gate logs' built-tree.txt when the artifact can be read, else the PR head's tree; when that
-                  differs, "the base moved" -- the merge's first parent against the run's PR base -- and only a
-                  difference inside the allowlist passes); and Gate C in it: the workflow at the merge has a
+                  the gate logs' built-tree.txt when the artifact can be read, else the PR head's tree, else -- a
+                  head behind its base -- the run's test merge when the merge commit's parents are exactly the base
+                  as it was when the run started (the branch history) and the PR head; otherwise "the base moved"
+                  (the merge's first parent against that base) and only a difference inside the allowlist passes);
+                  and Gate C in it: the workflow at the merge has a
                   ci-gates.py command with --gatec naming at least one phase (comments stripped; `none`, empty and
                   `${{ ... }}` values are no Gate C), else the merge's .port/<v>/GATES.md record (gates_problems,
                   this checkout's and the pinned). A direct push (the round's nochange path, the ledger, a library
@@ -649,15 +651,22 @@ def gated_merge(ctx, F, v, e):
     if tested != tree(d, after):
         if bt:
             return False, ev + [f"tested tree {short(tested)} (built-tree.txt) != merged tree {short(tree(d, after))}"], None
-        rest = not_allowed(d, head, after, v)
-        base_run = next((x.get("base", {}).get("sha") for x in run.get("pull_requests") or [] if x.get("number") == p["number"]),
-                        None) or (p.get("base") or {}).get("sha")
-        moved = f"the base moved (the merge's first parent {short(out_of(d, 'rev-parse', after + '^1'))}, the run's " \
-                f"PR base {short(base_run)})"
-        if rest:
-            return False, ev + [f"{moved}: the merged tree {short(tree(d, after))} is not the PR head's tree "
-                                f"{short(tested)} the run gated; it differs in {', '.join(rest[:4])}"], None
-        how += f"; {moved}, by records only"
+        # a pull_request run tests GitHub's merge of the PR head into its base as the base was when the run started
+        # (the branch history says where): a merge commit with exactly those parents has that merge's tree
+        p1, p2 = out_of(d, "rev-parse", after + "^1"), out_of(d, "rev-parse", after + "^2")
+        base_then = None if F.history.get(v) else tip_at(F, v, ts(run.get("created_at")))
+        if base_then and p1 == base_then and p2 == head:
+            how = (f"the run's test merge: the merge's parents are the base when the run started ({short(p1)}, from the "
+                   f"branch history) and the PR head")
+            tested = tree(d, after)
+        else:
+            rest = not_allowed(d, head, after, v)
+            moved = (f"the base moved (the merge's first parent {short(p1)}, the base when the run started "
+                     f"{short(base_then) if base_then else 'unknown: the branch history cannot be trusted'})")
+            if rest:
+                return False, ev + [f"{moved}: the merged tree {short(tree(d, after))} is not the tree the run gated "
+                                    f"(the PR head's {short(tested)}); it differs in {', '.join(rest[:4])}"], None
+            how += f"; {moved}, by records only"
     phases = gatec_phases(show(d, after, PORT_CI_WF))
     if phases:
         gc = f"Gate C in the run: ci-gates.py --gatec {','.join(phases)}"
@@ -1306,7 +1315,8 @@ def audit(plan, forks_arg, state=None, since=None, until=None, keep=False, say=p
                     {k: {"status": NA, "evidence": []} for k in INVS}, I1={"status": FAIL, "evidence": [
                         f"PR #{p['number']} merged into {(p.get('base') or {}).get('ref')}, not a version branch of the "
                         "fork the audit knows" for p in stray]})})
-        rep = {"plan": plan, "window": {"start": iso(start), "end": iso(end), "closed": bool(closing),
+        rep = {"plan": plan, "window": {"start": iso(start), "end": iso(end), "closed": bool(closing) and not until,
+                                        "end_from": "--until" if until else None,
                                         "start_from": "--since" if since else "STATE.json round_start" if st and
                                         st.get("round_start") else "the plan issue's creation"},
                "forks": {F.slug: {"kind": F.kind, "library": F.library, "depends_on": F.depends_on,
@@ -1325,7 +1335,8 @@ def audit(plan, forks_arg, state=None, since=None, until=None, keep=False, say=p
 def render(rep):
     w = rep["window"]
     out = [f"round-audit: plan {rep['plan']}, window {w['start']} .. {w['end']} (start: {w['start_from']}; "
-           + ("end: the closing comment" if w["closed"] else "NOT CLOSED: end is --until or now") + ")"]
+           + ("end: the closing comment" if w["closed"] else "end: --until" if w.get("end_from") else
+              "NOT CLOSED: end is now") + ")"]
     for slug, info in rep["forks"].items():
         out.append("")
         out.append(f"## {slug} ({'version branches' if info['kind'] == 'branches' else 'single-version'}"
@@ -1434,6 +1445,8 @@ def self_check():
              pre(wf='# python3 ci-gates.py --gatec launch\nrun: python3 ci-gates.py --base x\n'), FAIL, "runs no Gate C"),
             ("I1", (LIB, "1.21.4"), "the base moved by code after the run", lambda f: f.moved_base(records=False),
              FAIL, "the base moved"),
+            ("I1", (LIB, "1.21.4"), "a PR head behind a base that did not move after the run: its test merge's parents",
+             lambda f: f.head_behind(), PASS, "the run's test merge"),
             ("I1", (LIB, "1.21.4"), "the base moved by records only (a ledger push): not a failure",
              lambda f: f.moved_base(records=True), PASS, "by records only"),
             ("I1", (LIB, "1.21.5"), "a push that is not a fast-forward", lambda f: f.non_ff(), FAIL, "not a fast-forward"),
@@ -1718,7 +1731,8 @@ class Fixture:
         self.g(d, "update-ref", f"refs/pull/{number}/head", head)
         rid = 1000 + number
         self.runs.setdefault(slug, []).append({"id": rid, "head_sha": head, "event": "pull_request", "status": "completed",
-                                               "conclusion": "success", "path": PORT_CI_WF, "created_at": when,
+                                               "conclusion": "success", "path": PORT_CI_WF,
+                                               "created_at": iso(ts(when) - datetime.timedelta(minutes=20)),
                                                "head_branch": work, "pull_requests": [{"number": number,
                                                                                        "base": {"sha": before}}]})
         self.pulls[slug].append({"number": number, "merged_at": when, "updated_at": when, "merge_commit_sha": m,
@@ -1855,8 +1869,9 @@ class Fixture:
                  out_of(d, "rev-parse", "HEAD"), out_of(d, "status", "--porcelain")) for d in (self.lib, self.dep)]
 
     # -- the mutations
-    def moved_base(self, records):
-        """A base commit lands on 1.21.4 after the PR's run: by code, or only a record (a ledger-like file)."""
+    def moved_base(self, records, when=50):
+        """A base commit lands on 1.21.4 at +when: after the PR's run (+40) by code, or only a record (a ledger-like
+        file); or before the run (the PR head behind its base, the run's test merge the merge's own parents)."""
         lib = self.lib
         self.g(lib, "checkout", "-q", "neoforge-1.21.4")
         self.g(lib, "reset", "-q", "--hard", f"{self.m_lib}^1")
@@ -1865,20 +1880,48 @@ class Fixture:
             self.w(lib, ".port/1.21.4/COST.md", "a record\n")
         else:
             self.w(lib, "src/main/java/com/example/mod/Other.java", "class Other {}\n")
-        mid = self.commit(lib, "a base commit after the run", at(50))
+        mid = self.commit(lib, "a base commit", at(when))
         m = self.merge(lib, self.g(lib, "rev-parse", f"{self.m_lib}^2"), "Merge pull request #1", at(60))
         self.write_deprec(lib, self.lib_tag, m)
         rec = self.commit(lib, "library record", at(99))
         evs = [e for e in self.activity[(self.LIB, "neoforge-1.21.4")] if not e.get("synthetic")]
         evs[0].update(before=mid)
         evs[0]["after"], evs[1]["before"], evs[1]["after"] = m, m, rec
-        self.activity[(self.LIB, "neoforge-1.21.4")] = [{"id": 2, "before": before, "after": mid, "timestamp": at(50),
+        self.activity[(self.LIB, "neoforge-1.21.4")] = [{"id": 2, "before": before, "after": mid, "timestamp": at(when),
                                                          "activity_type": "push", "ref": "refs/heads/neoforge-1.21.4"}] + evs
         for p in self.pulls[self.LIB]:
             if p["number"] == 1:
                 p["merge_commit_sha"] = m
         self.g(lib, "tag", "-f", self.lib_tag, m)
         self.releases[self.LIB][0]["target_commitish"] = m
+        self.relink_lib_15(m)
+        self.finish()
+
+    def head_behind(self):
+        """Another PR (#8, gated) lands on 1.21.4 at +10, before PR #1's run (+40): PR #1's head is behind its base,
+        and its merge has the parents of the run's test merge."""
+        lib = self.lib
+        self.g(lib, "checkout", "-q", "neoforge-1.21.4")
+        self.g(lib, "reset", "-q", "--hard", f"{self.m_lib}^1")
+        head1 = self.g(lib, "rev-parse", f"{self.m_lib}^2")
+        self.pulls[self.LIB] = [p for p in self.pulls[self.LIB] if p["number"] != 1]
+        self.runs[self.LIB] = [r for r in self.runs[self.LIB] if r["id"] not in (self.r_lib, self.r_lib + 5000)]
+        self.activity[(self.LIB, "neoforge-1.21.4")] = [e for e in self.activity[(self.LIB, "neoforge-1.21.4")]
+                                                       if e.get("synthetic")]
+        self.releases[self.LIB] = []
+        self.g(lib, "checkout", "-q", "-b", "base-change", f"{self.m_lib}^1")
+        self.w(lib, "src/main/java/com/example/mod/Other.java", "class Other {}\n")
+        self.commit(lib, "another change", at(8))
+        m8, _r8 = self.pr_merge(self.LIB, lib, "1.21.4", "base-change", 8, at(10))
+        self.g(lib, "update-ref", "refs/heads/keep-current/x-1.21.4", head1)
+        m, rid = self.pr_merge(self.LIB, lib, "1.21.4", "keep-current/x-1.21.4", 1, at(60))
+        self.release(self.LIB, lib, self.lib_tag, m, rid, at(65))
+        self.g(lib, "checkout", "-q", "neoforge-1.21.4")
+        self.write_deprec(lib, self.lib_tag, m)
+        b2 = self.tip(lib, "neoforge-1.21.4")
+        self.commit(lib, "library record", at(99))
+        self.ev(self.LIB, "neoforge-1.21.4", b2, self.tip(lib, "neoforge-1.21.4"), "push", at(100))
+        self.m_lib = m
         self.relink_lib_15(m)
         self.finish()
 
