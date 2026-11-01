@@ -86,6 +86,13 @@ printf 'class IronTier implements Tier {\n  public int getUses() { return 512; }
 out="$(bash tools/run-catalog-scans.sh "$P2" 2>&1)"
 grep -q 'audit-zero-uses: src/main/java/com/example/mod/InfTier.java:2: getUses() returns 0' <<<"$out" && ! grep -q 'IronTier' <<<"$out" \
   && ok "the sweep names a 0-use tier (tools/audit-zero-uses.py), not a 512-use one or a comment" || bad "0-use tier sweep: $(grep -A3 '#177' <<<"$out")"
+# the third fix shape: a ModifyDefaultComponentsEvent handler removing MAX_DAMAGE -- the hit is a handled line, no finding
+printf 'class Defaults {\n  static void on(ModifyDefaultComponentsEvent e) {\n    e.modify(X, b -> b.remove(DataComponents.MAX_DAMAGE));\n  }\n}\n' > "$P2/src/main/java/com/example/mod/Defaults.java"
+out="$(bash tools/run-catalog-scans.sh "$P2" 2>&1)"
+grep -q 'audit-zero-uses (handled): src/main/java/com/example/mod/InfTier.java:2: getUses() returns 0 -- handled by src/main/java/com/example/mod/Defaults.java:3' <<<"$out" \
+  && ! grep -q '^audit-zero-uses: src/main/java/com/example/mod/InfTier.java' <<<"$out" && ! grep -q 'audit-zero-uses: did not run' <<<"$out" \
+  && ok "the sweep says a 0-use tier a ModifyDefaultComponentsEvent handler covers is handled, not a hit" || bad "handled 0-use tier: $(grep -A4 '#177' <<<"$out")"
+rm -f "$P2/src/main/java/com/example/mod/Defaults.java"
 # a sweep whose audit cannot run says so, never a silent clean section (a layout without the tool)
 FK="$T/fake-kit"; mkdir -p "$FK/tools" "$FK/.claude/skills/migrate-mod/references"
 cp tools/run-catalog-scans.sh "$FK/tools/"; cp .claude/skills/migrate-mod/references/catalog-scans.md "$FK/.claude/skills/migrate-mod/references/"
@@ -372,7 +379,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-valueio.py|convert-valueio: scalar entity/block-entity save-load onto ValueInput/ValueOutput, hurt onto hurtServer; the rest refused" \
             "audit-unit-codecs.py|audit-unit-codecs: a field-less payload class behind StreamCodec.unit is caught; a record is not" \
             "audit-wiring.py|audit-wiring: a dropped @EventBusSubscriber or register call, an unregistered Forge capability, a lost registration and a null-side provider are reported; a clean port is not" \
-            "audit-zero-uses.py|audit-zero-uses: a 0-use tier (getUses() 0, a 0 constant, an enum tier constant, new ForgeTier/SimpleTier/ToolMaterial with 0 uses, durability(0)) is reported; 512 uses, comments, strings, a file using DataComponents.UNBREAKABLE and a zero-uses-ok line are not" \
+            "audit-zero-uses.py|audit-zero-uses: a 0-use tier (getUses() 0, a 0 constant, an enum tier constant, new ForgeTier/SimpleTier/ToolMaterial with 0 uses, durability(0)) is reported; 512 uses, comments, strings, a file using DataComponents.UNBREAKABLE and a zero-uses-ok line are not; a ModifyDefaultComponentsEvent handler removing MAX_DAMAGE/DAMAGE makes each hit a handled line, not a finding" \
             "audit-descriptors.py|audit-descriptors: a removed method, a changed signature and a moved class in a transformer's strings are reported; a supertype's method, a mod's own names, comments and mixin files are not" \
             "convert-override-signatures.py|convert-override-signatures: a hook whose signature changed after 1.21.1 keeps its body in a private 1.21.1-shaped copy; --crossing FROM..TO runs only the rows landing in that hop (1.21.2 / 1.21.5), idempotent, and the hops add up to the one-step era run" \
             "port-derive.py|port-derive: a dev-branch port replayed onto the release, unreleased files and their port-only handlers dropped" \

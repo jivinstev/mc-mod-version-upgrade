@@ -340,7 +340,8 @@ and version-branch forks alike:
   builds or switches provider; on a version-branch fork also each dependency a version dropped that has a build for it
   now, an unticked **restore** box -- ticked, the round pins it again with the same `--bump`, and that version's
   integration code then needs compiling, porting and review; a failed lookup is listed "could not check"), and grade overrides (`/grade <ID> <S1-S4>
-  [reason]`); its title starts `[decision needed]` when the plan escalates something. It costs no model quota, so it opens whether or not the owner has any left.
+  [reason]`); its title starts `[decision needed]` when the plan escalates something or lists a suspected known issue
+  still unresolved two weeks or more after its mark ("(suspected, unresolved for N weeks -- needs a decision)"). It costs no model quota, so it opens whether or not the owner has any left.
 - **Wednesday morning America/Los_Angeles: the round** ("The weekly round" below), a Claude scheduled task with a fresh
   session each fire, at `round.time` in `.github/weekly-plan.json` (a minute below 08:30, jittered per fork set from the
   task's name -- read it there, never assume a fixed time). It reads the plan issue once, at its start, posts progress on it and closes it with the outcome.
@@ -571,8 +572,11 @@ it small, so the orchestration is a tool, which replaces the four rules above:
    remote set-head origin -a`); on a version-branch fork, **the remote each version's upstream freeze names** (`upstream=<remote>/<branch>`: without it the gates stop
    with exit 19; it prints the fetch-only `git remote add`); on a single-version fork, **a remote fetching its authors'
    repository** as the set's `.github/weekly-plan.json` names it (`upstream`, read from the clones given, so pass the
-   library's too), which `port-sync.py` merges from (missing, with the fetch-only `git remote add`). A shallow single-branch clone of a version branch has its other version branches
-   read from origin by name (`git ls-remote`), so their JDK and libEGL are asked too. Install or set what it names that the session can (apt, an export, the git commands) and run it again; anything
+   library's too), which `port-sync.py` merges from (missing, with the fetch-only `git remote add`). First it makes each clone whole as `round.py init` does
+   later (origin's `neoforge-*` branches fetched as remote-tracking refs, the clone unshallowed; nothing when it has them
+   all): a cloud session's clone is of the fork's GitHub default branch, which can be the authors' own branch, and
+   without the port's branches it reads as an unported tree -- no 26.x JDK, no freeze remote, no `weekly-plan.json` (read
+   from HEAD, `origin/HEAD`, then the `neoforge-*` branches). A clone it cannot make whole is `MISSING`. Install or set what it names that the session can (apt, an export, the git commands) and run it again; anything
    left missing other than a clone is reported in the first comment and the versions that need it wait.
 1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out
    round/frozen.json --decisions-dir round/decisions`. It reads GitHub through `GITHUB_TOKEN` when that is set (REST), else
@@ -798,10 +802,14 @@ it small, so the orchestration is a tool, which replaces the four rules above:
    version, `--file` each file it is in, `--pattern` a text whose presence means the defect is there, so a later
    `known-issues.py lowest` finds it on other branches with git alone); a WARNING that it may repeat an entry means read that entry first and record
    the finding there when it is the same defect. **A finding added without a reproduction or a version comparison is
-   added with `--suspected`** (a lesson harvest's or a reader's suspicion: "may no longer ...", "not verified in a
-   client"; a later round verifies it first, step 3); one with a reproduction, a failing gate or test, a version compared,
+   added with `--suspected --unverified <why it could not be verified> --verify-by <what would verify it>`** (both
+   required; a lesson harvest's or a reader's suspicion: "may no longer ...", "not verified in a client"; a later round
+   verifies it first, step 3; suspected is never a way around a reproduction you can run); one with a reproduction, a failing gate or test, a version compared,
    or a reviewer who read the diff and can point at the regressing line is confirmed (no flag). On the driver such a
-   `finding:` line carries `"suspected": true` and the ledger step adds it with `--suspected`. At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
+   `finding:` line carries `"suspected": true` with `"unverified"` (why it could not be verified) and `"verify_by"` (what
+   would), and the ledger step adds it with `--suspected --unverified --verify-by`; a suspected line without both is
+   recorded confirmed (said in the step's note), and the closing comment counts each fork's findings confirmed and
+   suspected ("high suspected share" when the suspected outnumber the confirmed and are two or more). At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
    reopens it (fixed at its lowest open version, only that fix cascaded, by step 3's rule: from a version branch, or
    `--port-ref fix/<ID>` at the head's version when the plan does not take the authors' code); anything else stays in the
    ledger with its lowest version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap
@@ -955,7 +963,9 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    The environment needs the build hosts in its allowed domains (`cloud/allowed-domains.txt`), and what the round's
    gates run on: JDK 21 and JDK 25 (every 26.x version builds and boots on 25), `libegl1` (the 26.3 client) and an
    `XDG_RUNTIME_DIR`, in the environment's setup script; `python3 tools/round-preflight.py --fork <owner/repo>=<clone> ...`
-   says what is missing (the round runs it first).
+   says what is missing (the round runs it first). The round's tools never prompt for credentials (they read origin
+   with `GIT_TERMINAL_PROMPT=0`; preflight's fetch is bounded, `MMVU_FETCH_TIMEOUT` seconds, default 1800): a clone
+   over HTTPS needs a credential helper or a token git can use, or each read of origin fails instead of waiting.
 
 ## Evidence that this is needed (and the mistake it prevents)
 

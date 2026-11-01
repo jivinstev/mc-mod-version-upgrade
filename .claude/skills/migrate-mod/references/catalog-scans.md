@@ -350,11 +350,12 @@ echo "     Measured on a ~840-file content mod's 1.21.4 port: two writers said 4
 hit "§G/#177  a 0-use tool tier fed to durability() — an UNBREAKABLE sword/tool that breaks on its first hit in survival"
 zu_out="$(python3 "${MMVU_TOOLS:-../../tools}/audit-zero-uses.py" . 2>&1)"; zu_rc=$?
 case "$zu_rc" in
-  0|1) printf '%s\n' "$zu_out" | grep -v -e ' finding(s)$' ;;
+  0|1|3) printf '%s\n' "$zu_out" | grep -v -e ' finding(s)$' ;;
   *) printf '%s\n' "$zu_out" | grep -q 'no Java sources$' || echo "  audit-zero-uses: did not run (exit $zu_rc): $(printf '%s\n' "$zu_out" | tail -1)" ;;
 esac
 echo "  (^ tools/audit-zero-uses.py: a hit is fixed by giving the item no durability components (or, on 1.21.1-1.21.4,"
 echo "     DataComponents.UNBREAKABLE with new Unbreakable(false)), or marked zero-uses-ok with why. Comments are ignored.)"
+echo "     A '(handled)' line: a ModifyDefaultComponentsEvent handler's modify call removes MAX_DAMAGE/DAMAGE -- check it covers those items.)"
 
 printf '\n── sweep complete — every path above is a HIT to fix-or-explain ──\n'
 ```

@@ -803,9 +803,15 @@ def step_select(work):
         # the lowest version still open (the status map), where the round makes the fix -- `lowest` is the first
         # affected version, which may be fixed already
         lo = {e["id"]: min((v for v, st in e["status"].items() if st == "open"), key=k_mc, default=None) for e in every}
-        # a suspected entry (no reproduction yet) is marked "(suspected)" on the plan; every other row is as before
-        sus = lambda i: {"suspected": True} if i in suspected else {}
+        # a suspected entry (no reproduction yet) is marked "(suspected)" on the plan; every other row is as before. One
+        # suspected two weeks or more (the ledger's git history: since its mark) carries suspected_weeks, and the
+        # plan says it needs the owner's decision
         suspected = {e["id"] for e in every if e.get("confidence") == "suspected"}
+        k_ = ki() if suspected else None
+        since = k_.suspected_since(f["clone"], f["head_commit"]) if suspected else {}
+        weeks = {i: k_.suspected_weeks(t, inp["now"]) for i, t in since.items()}
+        sus = lambda i: ({"suspected": True, **({"suspected_weeks": weeks[i]} if weeks.get(i, 0) >= k_.STALE_WEEKS else {})}
+                         if i in suspected else {})
         f["selection"] = [dict(s, title=title.get(s["id"], ""), lowest_open=lo.get(s["id"]), **sus(s["id"])) for s in sel]
         taken = {s["id"] for s in sel}
         f["candidates"] = [{"id": e["id"], "severity": e["severity"], "lowest": e["lowest"], "title": e["title"],
@@ -1352,7 +1358,7 @@ def self_check():
         for args in (["--title", "crash on load", "--failure", "crash", "--visibility", "common", "--reach", "normal",
                       "--workaround", "no", "--lowest", "1.21.1"],
                      ["--title", "a seam", "--failure", "cosmetic", "--visibility", "rare", "--reach", "normal",
-                      "--workaround", "no", "--lowest", "1.21.1", "--suspected"]):
+                      "--workaround", "no", "--lowest", "1.21.1", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test"]):
             with contextlib.redirect_stdout(io.StringIO()):
                 k.main(["add", "--repo", str(lib), *args])
         gq(lib, "add", "-A"); gq(lib, "commit", "-qm", "ledger")
@@ -1398,6 +1404,23 @@ def self_check():
         expect(f0["cascade"] is None and [s["id"] for s in f0["selection"]] == ["KI-1"]
                and [c["id"] for c in f0["candidates"]] == ["KI-2"] and f0["selection"][0]["title"] == "crash on load",
                f"a single-version fork: no cascade; select's S1 by default, the S3 a candidate: {f0}")
+        # B3: a suspected entry still suspected two weeks or more after its mark is said to need the owner's decision: its age is
+        # the ledger's git history (the commit that marked it), no key in the entry
+        expect(f0["candidates"][0].get("suspected") is True and "suspected_weeks" not in f0["candidates"][0],
+               f"a suspected entry in its first plan: marked suspected only: {f0['candidates'][0]}")
+        ct_, now0_ = int(gq(lib, "log", "-1", "--format=%ct", "HEAD").strip()), inp["now"]
+        inp["now"] = datetime.datetime.fromtimestamp(ct_ + 15 * 86400, datetime.timezone.utc).isoformat(timespec="seconds")
+        save_input(w, inp)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_select(w)
+        c0_ = load_input(w)["forks"][0]["candidates"][0]
+        expect(c0_.get("suspected_weeks") == 3 and k.sus(c0_) == " (suspected, unresolved for 3 weeks -- needs a decision)",
+               f"three weeks suspected: the plan row says it needs a decision: {c0_}")
+        inp["now"] = now0_                       # the rest of this fixture: the plan as it was
+        save_input(w, inp)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_select(w)
+        inp = load_input(w)
         expect("untaken" not in f0 and "base_version" not in f0 and "shared" not in f0 and f0["selection"][0].get("lowest_open") == "1.21.1",
                f"a single-version fork: no untaken list (its plan renders as before): {f0}")
         body0 = k.render_plan(dict(inp, owner={"login": "someone"}))["body"]

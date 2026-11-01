@@ -5,7 +5,8 @@ each Minecraft version (issue #135, part 1).
 
     python3 tools/known-issues.py add     [LEDGER] --title T --failure F --visibility V --reach R --workaround yes|no
                                           --lowest MC [--status MC=STATE ...] [--id ID] [--source S] [--notes N]
-                                          [--file PATH ...] [--pattern REGEX] [--platform mr|cf ...] [--suspected]
+                                          [--file PATH ...] [--pattern REGEX] [--platform mr|cf ...]
+                                          [--suspected --unverified WHY --verify-by WHAT]
     python3 tools/known-issues.py confirm [LEDGER] ID [--evidence TEXT]
     python3 tools/known-issues.py disprove [LEDGER] ID --version MC[,MC...|FROM..TO] --kind KIND --evidence TEXT [--check]
     python3 tools/known-issues.py grade   [LEDGER] ID [--failure F] [--visibility V] [--reach R] [--workaround yes|no]
@@ -100,7 +101,9 @@ holding it changed is `present`; a branch with none of the files cannot have the
 pattern every such branch is `unchecked`. A single-version fork has no branch below its one version: nothing to check.
 
 SUSPECTED ENTRIES. An entry added without a reproduction or a version comparison (a lesson harvest's or a reader's
-suspicion: `add --suspected`) carries `"confidence": "suspected"`; `list` shows its grade as `S3?`, render-issue and the
+suspicion: `add --suspected`, which needs `--unverified WHY` -- why it could not be verified -- and `--verify-by WHAT`
+-- what would verify it --, both written into notes as `Unverified: WHY. Verify by: WHAT.`, no JSON key of their own)
+carries `"confidence": "suspected"`; `list` shows its grade as `S3?`, render-issue and the
 plan issue as "(suspected)". A worker who reproduces it runs `confirm ID [--evidence TEXT]` (the marker removed, the
 evidence appended to notes). One who proves it is NOT a defect runs `disprove ID --version V --kind K --evidence TEXT`,
 allowed only for a suspected entry whose effective grade (the override's, when there is one) is S3 or S4, with evidence
@@ -132,7 +135,8 @@ THE WEEKLY PLAN ISSUE (issue #135, part 2a; tools/weekly-plan.py runs it as a Gi
                Minecraft version, each pinned dependency with a newer compatible build, ticked by default, unticked
                with the reason for an alpha/beta, a major-version jump, a dropped Minecraft version or a provider
                switch; a failed lookup listed as "could not check"), and grade overrides (`/grade <ID> <S1-S4> [reason]`). The
-               title starts `[decision needed]` when the plan escalates something. A previous plan issue no round
+               title starts `[decision needed]` when the plan escalates something or lists a suspected entry still
+               unresolved two weeks or more after its mark. A previous plan issue no round
                closed is carried in: its ticks and replies, with "last week's round did not run".
   read-plan    the round's first step: the issue's checkboxes and the `/decide` and `/grade` replies, frozen as JSON.
                Only replies from the resolved owner (a user, or a member of the owner team) or from users with write
@@ -157,7 +161,9 @@ blocks-publish: an open S1 applies to that platform; 2 bad input or an invalid l
 """
 import argparse
 import collections
+import datetime
 import json
+import math
 import os
 import pathlib
 import re
@@ -907,8 +913,47 @@ def sv_merge_lines(f):
 
 
 def sus(r):
-    """A plan row's marker for a suspected entry (weekly-plan.py's rows carry `suspected`; a ledger entry `confidence`)."""
-    return " (suspected)" if r.get("suspected") or r.get("confidence") == SUSPECTED else ""
+    """A plan row's marker for a suspected entry (weekly-plan.py's rows carry `suspected`; a ledger entry `confidence`);
+    one still suspected for STALE_WEEKS weeks or more since its mark (a row's `suspected_weeks`) is said to need a
+    decision."""
+    if not (r.get("suspected") or r.get("confidence") == SUSPECTED):
+        return ""
+    n = r.get("suspected_weeks") or 0
+    return f" (suspected, unresolved for {n} weeks -- needs a decision)" if n >= STALE_WEEKS else " (suspected)"
+
+
+STALE_WEEKS = 2           # a suspected entry neither confirmed nor disproved this many weeks after its mark goes to the
+                          # owner: the second weekly plan to show it
+
+
+def suspected_since(repo, ref, rel=None, limit=400):
+    """{id: unix time} of each entry suspected in the ledger at `ref`: the commit time of the oldest ledger commit from
+    which it has been suspected without a break (the git history of the ledger file -- no key in the entry; the last
+    `limit` commits of it are read, so an older mark counts from the oldest read). {} when git cannot say."""
+    rel = rel or ledger_rel(None)
+    r = subprocess.run(["git", "-C", str(repo), "log", "--format=%H %ct", "-n", str(limit), ref, "--", rel],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode:
+        return {}
+    since = {}
+    for ln in reversed(r.stdout.splitlines()):
+        sha, _, ct = ln.partition(" ")
+        show = subprocess.run(["git", "-C", str(repo), "show", f"{sha}:{rel}"], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        try:
+            issues = json.loads(show.stdout).get("issues", []) if show.returncode == 0 else []
+        except (ValueError, AttributeError):
+            continue
+        now_ = {e.get("id") for e in issues if isinstance(e, dict) and e.get("confidence") == SUSPECTED}
+        since = {i: since.get(i, int(ct)) for i in now_}
+    return since
+
+
+def suspected_weeks(since, now):
+    """The weeks, begun, between `since` (unix time, its mark) and `now` (an ISO time, the plan's): 1 in its first week,
+    then one more a week -- weeks since the mark, not plan issues counted (a week no plan opened still counts)."""
+    t = datetime.datetime.fromisoformat(str(now).replace("Z", "+00:00")).timestamp()
+    return max(1, math.ceil((t - since) / (7 * 86400)))
 
 
 def render_plan(inp):
@@ -938,7 +983,7 @@ def render_plan(inp):
     if prev.get("issue"):
         lines += [f"> **Last week's round did not run:** #{prev['issue']} was never closed by a round. Its ticks and "
                   f"replies are carried forward below, and #{prev['issue']} is closed as superseded.", ""]
-    escalated, data_forks = 0, []
+    escalated, data_forks, stale = 0, [], 0
     for f in forks:
         repo = f["repo"]
         lines += [f"## {repo}" + (f" ({f['role']})" if f.get("role") else "") + f" -- head `{f['head']}`", ""]
@@ -999,6 +1044,14 @@ def render_plan(inp):
                          f"<!-- ki:{repo}:{r['id']} candidate -->")
         if not sel and not cand:
             lines.append(f"No open known issues in the ledger (`.port/{LEDGER_NAME}` on `{f['head']}`).")
+        old = [r for r in sel + cand if (r.get("suspected_weeks") or 0) >= STALE_WEEKS]
+        if old:              # never left to sit: the owner decides (nothing here changes what the round selects)
+            stale += len(old)
+            lines += ["", f"**{len(old)} suspected entr{'y' if len(old) == 1 else 'ies'} neither confirmed nor disproved "
+                      f"{STALE_WEEKS} or more weeks after its mark:** " + ", ".join(f"`{_q(repo, r['id'], multi, clash)}`" for r in old)
+                      + ". Tick one for this round to verify it (reproduce it, or disprove an S3/S4), `/grade` it, or "
+                      "close it by hand (`known-issues.py confirm` / `disprove` / `status --set <v>=wontfix:<reason>`); "
+                      "left as it is, it is listed again next week."]
         du = f.get("dep_updates")
         if du is not None:
             lines += ["", "### Dependency updates", ""] + dep_lines(repo, du, pdeps.get(repo, {}))
@@ -1074,7 +1127,7 @@ def render_plan(inp):
             "forks": data_forks, "carried": carried if prev.get("issue") else {"decide": [], "grade": []},
             "carried_from": prev.get("issue"), "migrator": inp.get("migrator", {})}
     lines += [data_block(data), ""]
-    need = escalated > 0
+    need = escalated > 0 or stale > 0
     title = (("[decision needed] " if need else "") + f"Weekly plan {inp['week']}: keep-current round "
              f"{inp['deadline'][:10]} ({', '.join(f['repo'] for f in forks)})")
     return {"title": title, "body": "\n".join(lines), "decision_needed": need, "week": inp["week"]}
@@ -1628,7 +1681,9 @@ def build_parser():
                         "own pinned tools must read the new key: on a fork whose weekly plan's migrator_sha or Port CI "
                         "kit predates suspected entries, a suspected entry breaks its plan issue and its publishing "
                         "until it is re-pinned (weekly-plan.py install --keep-existing, a kit release); the round checks "
-                        "that before it writes one, this command does not")
+                        "that before it writes one, this command does not. Needs --unverified and --verify-by")
+    p.add_argument("--unverified", metavar="WHY", help="with --suspected (required): why it could not be verified (notes)")
+    p.add_argument("--verify-by", metavar="WHAT", help="with --suspected (required): what would verify it (notes)")
     p = common(sub.add_parser("confirm", help="a suspected issue reproduced: remove the marker, the evidence in notes"))
     p.add_argument("id"); p.add_argument("--evidence", help="what reproduced it (appended to notes)")
     p = common(sub.add_parser("disprove", help="close a suspected S3/S4 as not a defect, with concrete evidence"))
@@ -1758,6 +1813,12 @@ def run(argv):
         if not MC_RE.match(v):
             raise Invalid(f"{v!r} is not a Minecraft version (--version, --lowest)")
     if a.cmd == "add":
+        why_, how_ = (" ".join((x or "").split()) for x in (a.unverified, a.verify_by))
+        if a.suspected and not (why_ and how_):
+            raise Invalid("add --suspected needs --unverified WHY (why it could not be verified) and --verify-by WHAT "
+                          "(what would verify it): a defect you can reproduce or compare is added confirmed")
+        if (why_ or how_) and not a.suspected:
+            raise Invalid("--unverified and --verify-by go with --suspected only")
         i = a.id or next_id(data)
         if any(e["id"] == i for e in data["issues"]):
             raise Invalid(f"issue {i} exists already")
@@ -1770,6 +1831,9 @@ def run(argv):
              "status": parse_states(a.status) or {a.lowest: "open"}}
         if a.notes:
             e["notes"] = a.notes
+        if a.suspected:         # the reason inside notes: no new key, so old ledgers and pinned readers stay valid
+            line = f"Unverified: {why_.rstrip('.')}. Verify by: {how_.rstrip('.')}."
+            e["notes"] = (e["notes"].rstrip() + " " if e.get("notes", "").strip() else "") + line
         if a.files:
             e["files"] = sorted(set(a.files))
         if a.pattern:
@@ -2537,16 +2601,28 @@ def suspected_selfcheck(expect, cli):
         L = ("--ledger", str(pathlib.Path(d) / LEDGER_NAME))
         led = lambda: read_ledger(L[1])
         rc, o = cli("add", *L, "--title", "a tint may no longer apply", "--failure", "cosmetic", *base, "--lowest", "1.21.1",
-                    "--status", "1.21.1=open", "--status", "1.21.4=open", "--suspected", "--notes", "Suspected; not verified")
+                    "--status", "1.21.1=open", "--status", "1.21.4=open", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test", "--notes", "Suspected; not verified")
         expect(rc == 0 and "KI-1: S3?" in o and find(led(), "KI-1")["confidence"] == SUSPECTED, f"add --suspected: {o}")
-        cli("add", *L, "--title", "a crash may happen", "--failure", "crash", *base, "--lowest", "1.21.1", "--suspected")
+        # a suspected entry says why it is not verified and what would verify it -- in notes, no key of its own
+        L2 = ("--ledger", str(pathlib.Path(d) / "refusals.json"))      # its own ledger: a wrong accept fails here only
+        for extra, why in ((["--suspected"], "--suspected alone"),
+                           (["--suspected", "--unverified", "no client here"], "no --verify-by"),
+                           (["--suspected", "--unverified", " ", "--verify-by", "a client test"], "a blank --unverified"),
+                           (["--unverified", "no client here", "--verify-by", "a client test"], "the reasons without --suspected")):
+            rc, o = cli("add", *L2, "--title", "a refused one", "--failure", "cosmetic", *base, "--lowest", "1.21.1", *extra)
+            expect(rc == 2 and not pathlib.Path(L2[1]).exists() and "--unverified" in o,
+                   f"{why}: refused, nothing written: {rc} {o}")
+        e1_ = find(led(), "KI-1")
+        expect(e1_["notes"] == "Suspected; not verified Unverified: not reproduced here. Verify by: a client test."
+               and set(e1_) <= ISSUE_KEYS, f"the reasons in notes, no new key: {e1_}")
+        cli("add", *L, "--title", "a crash may happen", "--failure", "crash", *base, "--lowest", "1.21.1", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test")
         cli("add", *L, "--title", "a menu may be unusable", "--failure", "functional", "--visibility", "common", "--reach",
-            "normal", "--workaround", "no", "--lowest", "1.21.1", "--suspected")
+            "normal", "--workaround", "no", "--lowest", "1.21.1", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test")
         cli("add", *L, "--title", "a seam we saw", "--failure", "cosmetic", *base, "--lowest", "1.21.1")
-        cli("add", *L, "--title", "a seam we only read about", "--failure", "cosmetic", *base, "--lowest", "1.21.1", "--suspected")
+        cli("add", *L, "--title", "a seam we only read about", "--failure", "cosmetic", *base, "--lowest", "1.21.1", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test")
         cli("grade", *L, "KI-5", "--override", "S1", "--reason", "the owner thinks it loses data", "--by", "owner")
         cli("add", *L, "--title", "a log line may be wrong", "--failure", "functional", "--visibility", "invisible",
-            "--reach", "normal", "--workaround", "no", "--lowest", "1.21.1", "--suspected")
+            "--reach", "normal", "--workaround", "no", "--lowest", "1.21.1", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test")
         expect([find(led(), i)["severity"] for i in ("KI-1", "KI-2", "KI-3", "KI-4", "KI-5", "KI-6")]
                == ["S3", "S1", "S2", "S3", "S1", "S4"] and "confidence" not in find(led(), "KI-4"),
                "the fixture: a suspected S3, S1, S2, S1 by override and S4; a confirmed S3")
@@ -2583,7 +2659,7 @@ def suspected_selfcheck(expect, cli):
         e1 = find(led(), "KI-1")
         want = f"wontfix:not a defect (disproved, no-regression): {ev}"
         expect(rc == 0 and e1["status"] == {"1.21.1": want, "1.21.4": want} and e1["confidence"] == SUSPECTED
-               and e1["notes"] == "Suspected; not verified" and len(e1["disproved"]) == 1
+               and e1["notes"] == "Suspected; not verified Unverified: not reproduced here. Verify by: a client test." and len(e1["disproved"]) == 1
                and {k: e1["disproved"][0][k] for k in ("kind", "evidence", "versions")}
                == {"kind": "no-regression", "evidence": ev, "versions": ["1.21.1", "1.21.4"]}
                and not open_versions(e1) and "KI-1" not in [e["id"] for e, _w in select(led())],
@@ -2600,12 +2676,12 @@ def suspected_selfcheck(expect, cli):
                    f"an S4 with a path:line or a test name as evidence: {e6}")
         rc, o = cli("confirm", *L, "KI-6", "--evidence", "reproduced in a client: the line repeats")
         e6 = find(led(), "KI-6")
-        expect(rc == 0 and "confidence" not in e6 and e6["notes"].startswith("Confirmed ")
+        expect(rc == 0 and "confidence" not in e6 and e6["notes"].startswith("Unverified: not reproduced here. Verify by: a client test. Confirmed ")
                and e6["notes"].endswith(": reproduced in a client: the line repeats"), f"confirm: {rc} {o} {e6}")
         rc, o = cli("confirm", *L, "KI-6")
         expect(rc == 2 and "already confirmed" in o, f"confirm on a confirmed entry is refused: {rc} {o}")
         rc, o = cli("confirm", *L, "KI-3")
-        expect(rc == 0 and find(led(), "KI-3")["notes"].startswith("Confirmed ") and "confidence" not in find(led(), "KI-3"),
+        expect(rc == 0 and find(led(), "KI-3")["notes"].startswith("Unverified: not reproduced here. Verify by: a client test. Confirmed ") and "confidence" not in find(led(), "KI-3"),
                f"confirm without --evidence: {rc} {o}")
         for mutate, why in ((lambda e: e.update(confidence="confirmed"), "confidence"),
                             (lambda e: e.update(disproved=[{"kind": "looked", "evidence": "x", "versions": ["1.21.1"],
@@ -2634,7 +2710,7 @@ def suspected_selfcheck(expect, cli):
         g("add", "-A"); g("commit", "-qm", "port")
         real = g("rev-parse", "--short=10", "HEAD")
         cli("add", "--repo", d, "--id", "KI-20", "--title", "a tint may be off", "--failure", "cosmetic", *base,
-            "--lowest", "1.21.1", "--suspected")
+            "--lowest", "1.21.1", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test")
         R = ("--repo", d)
         for evid, ok_, what in (("abcdef1234 never tinted it", False, "a sha that does not resolve"),
                                 ("src/Tint.java:9 does not tint", False, "a path:line past the end of the file"),
@@ -2754,6 +2830,50 @@ def plan_untaken_check(expect, cli):
     expect("Could not preview merging" in res["body"] and "Could not preview" not in render_plan(sv0)["body"]
            and (h(res), h(fr), h(render_plan(sv0))) == ("ce1aa9dc5af34a9c", "af5159d1b42a19c3", "9b9ceb2f13e3497b"),
            f"a single-version fork's plan and frozen input are unchanged: {(h(res), h(fr), h(render_plan(sv0)))}")
+    # B3: a suspected entry unresolved two weeks or more after its mark is marked, listed for the owner and puts
+    # [decision needed] in the title; one in its first plan only says (suspected); what the round selects is unchanged
+    s1 = json.loads(json.dumps(sv))
+    s1["forks"][0]["candidates"][0]["suspected"] = True
+    r1 = render_plan(json.loads(json.dumps(s1)))
+    s1["forks"][0]["candidates"][0]["suspected_weeks"] = 2
+    r2 = render_plan(s1)
+    expect("`KI-2` b (suspected) --" in r1["body"] and not r1["decision_needed"] and "neither confirmed" not in r1["body"],
+           f"a suspected entry in its first plans: (suspected) only: {r1['title']}")
+    expect("`KI-2` b (suspected, unresolved for 2 weeks -- needs a decision) --" in r2["body"]
+           and "**1 suspected entry neither confirmed nor disproved 2 or more weeks after its mark:** `KI-2`." in r2["body"]
+           and r2["decision_needed"] and r2["title"].startswith("[decision needed] ")
+           and plan_data(r2["body"])["forks"][0]["candidates"] == plan_data(r1["body"])["forks"][0]["candidates"] == ["KI-2"]
+           and "- [ ] **S3** `KI-2`" in r2["body"],
+           f"two weeks suspected: marked, listed, [decision needed]; still an unticked candidate: {r2['title']}")
+    # its age from the ledger's git history: since the commit that marked it, a confirm in between restarting nothing
+    # (it is no longer suspected) and a mark again counting from then
+    d = pathlib.Path(tempfile.mkdtemp())
+    try:
+        led_ = d / ".port" / LEDGER_NAME
+        led_.parent.mkdir()
+        g = lambda *a, t=None: subprocess.run(["git", "-C", str(d), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                               *a], capture_output=True, text=True, encoding="utf-8", check=True,
+                                              env=dict(os.environ, **({"GIT_COMMITTER_DATE": f"@{t} +0000",
+                                                                       "GIT_AUTHOR_DATE": f"@{t} +0000"} if t else {})))
+        g("init", "-q", "-b", "neoforge-1.21.1")
+        t0 = 1_790_000_000
+        def put(conf, t):
+            led_.write_text(json.dumps({"schema": 1, "issues": [
+                {"id": i, **({"confidence": SUSPECTED} if c else {})} for i, c in conf.items()]}), encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "ledger", t=t)
+        put({"KI-1": True, "KI-2": False}, t0)
+        put({"KI-1": True, "KI-2": True, "KI-3": True}, t0 + 86400)
+        put({"KI-1": True, "KI-2": True, "KI-3": False}, t0 + 2 * 86400)
+        put({"KI-1": True, "KI-2": True, "KI-3": True}, t0 + 10 * 86400)
+        got = suspected_since(d, "HEAD")
+        expect(got == {"KI-1": t0, "KI-2": t0 + 86400, "KI-3": t0 + 10 * 86400},
+               f"suspected since: the first commit of its unbroken run: {got}")
+        iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).isoformat()
+        expect([suspected_weeks(t0, iso(t0 + x * 86400)) for x in (0, 6, 7, 8, 13, 15)] == [1, 1, 1, 2, 2, 3]
+               and suspected_weeks(t0, iso(t0 - 86400)) == 1, "1 in its first week, one more a week")
+        expect(suspected_since(d, "no-such-ref") == {}, "git cannot say: nothing")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
     dec = {"id": "d1e2f3a4b5c6", "file": "src/main/java/com/example/mod/A.java", "versions": ["1.21.4", "1.21.5"],
            "escalate": True, "choice": "keep", "reasoning": "over the budget."}
     dflt = {"id": "a1b2c3d4e5f6", "file": "src/main/java/com/example/mod/B.java", "versions": ["1.21.4"],

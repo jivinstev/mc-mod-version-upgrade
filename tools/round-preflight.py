@@ -32,12 +32,20 @@ XDG_RUNTIME_DIR) for a round that runs no Gate C. A single-version fork is check
               when no clone given carries that config. Missing even when the plan takes no authors' code: the
               preflight runs before the plan is frozen, so it cannot know.
 
-A shallow single-branch clone of a version-branch fork holds no ref of its other version branches: their names are
-read from origin (git ls-remote --heads origin 'neoforge-*') and each counts at its version's JDK. A single-version
-fork's origin names are not read: its versions are as before.
-Read-only: it writes nothing and fetches nothing (git ls-remote is its one network read). Standard library only.
+A shallow or single-branch clone (a cloud session's: the fork's GitHub default branch, which may be the authors' own
+branch, not the port's head) holds none of origin's neoforge-<v> branches, so it would read as an unported tree: no
+26.x version (no JDK 25), no upstream freeze (no remote line) and no weekly-plan.json (it is on the head branch only).
+So first, as tools/round.py init does moments later, each clone that lacks one of origin's neoforge-* branches (or is
+shallow) gets them fetched as remote-tracking refs (refs/remotes/origin/neoforge-*; no branch or working tree moves,
+nothing when the clone already has them all; a single-branch clone's fetch refspec gains neoforge-*: the one
+implementation, make_whole, which init runs too); a fetch that fails is MISSING with git's message, as init then refuses
+(origin listed within 60 s, a stalled transfer ended, no prompt). When origin cannot
+be listed, a shallow clone's other version branches are still counted by name (git ls-remote) at their version's JDK;
+a single-version fork's origin names are not counted: its versions are as before. weekly-plan.json is read from HEAD,
+origin/HEAD, then the clone's neoforge-* head branches (no .port/<v>/branch.properties: the set's config lives on a
+head), then its version branches. Besides those refs and that refspec line it writes nothing. Standard library only.
 """
-import argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys
+import argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -105,6 +113,102 @@ def fork_versions(repo, heads=origin_heads):
     return out
 
 
+LIST_TIMEOUT = 60           # git ls-remote: the preflight's one read of origin before (origin_heads)
+FETCH_TIMEOUT = 1800        # a whole fetch (an unshallow of a large fork); a stalled transfer ends sooner (lowSpeed*,
+                            # HTTPS only: ssh ignores it). MMVU_FETCH_TIMEOUT (seconds) overrides it
+FETCH_TRIES = 5             # a fetch another process's ref lock refused is tried again (round.py's git(), 7b60750e)
+# another git process holds the ref, index or shallow lock: tried again, never a failure (tools/round.py's git() too)
+LOCKED_REF = re.compile(r"cannot lock ref|index\.lock|Unable to create .*\.lock|shallow file has changed", re.I)
+
+
+def fetch_timeout(env=None):
+    """MMVU_FETCH_TIMEOUT (whole seconds, above 0), else FETCH_TIMEOUT."""
+    v = (os.environ if env is None else env).get("MMVU_FETCH_TIMEOUT", "")
+    return int(v) if v.strip().isdigit() and int(v) > 0 else FETCH_TIMEOUT
+
+
+def bounded(cmd, timeout, grace=10, **kw):
+    """(rc, how) of cmd run to its end, or stopped after `timeout` s: asked to end (terminate: SIGTERM, which lets git
+    remove its own .lock files; TerminateProcess on Windows), killed after `grace` s more. how: None (it ended),
+    "terminated" or "killed"; rc None when stopped."""
+    pr = subprocess.Popen(cmd, **kw)
+    try:
+        return pr.wait(timeout=timeout), None
+    except subprocess.TimeoutExpired:
+        pr.terminate()
+        try:
+            pr.wait(timeout=grace)
+            return None, "terminated"
+        except subprocess.TimeoutExpired:
+            pr.kill()
+            pr.wait()
+            return None, "killed"
+
+
+def lock_files(repo):
+    """The *.lock files under the clone's git directory (a git stopped mid-fetch may leave them), relative, sorted."""
+    rc, gd = git(repo, "rev-parse", "--absolute-git-dir")
+    g = pathlib.Path(gd.strip()) if rc == 0 and gd.strip() else None
+    return sorted(x.relative_to(g).as_posix() for x in g.rglob("*.lock")) if g and g.is_dir() else []
+
+
+def net_git(repo, args, timeout, grace=10):
+    """(rc, stdout, stderr) of a git command that talks to origin: no prompt (GIT_TERMINAL_PROMPT=0), a stalled
+    transfer ended by git itself (http.lowSpeedLimit/Time), the whole bounded by `timeout` (bounded(): asked to end,
+    then killed); its output through files, never pipes (Windows: a killed git leaves git-remote-https holding a pipe,
+    and the wait would hang on it). Stopped, the message says so and names any .lock file left in the clone."""
+    import tempfile
+    with tempfile.TemporaryFile() as o, tempfile.TemporaryFile() as e:
+        try:
+            rc, how = bounded(["git", "-C", str(repo), "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=30", *args],
+                              timeout, grace, stdin=subprocess.DEVNULL, stdout=o, stderr=e,
+                              env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        except OSError as x:
+            return 1, "", str(x)
+        o.seek(0); e.seek(0)
+        out, err = (f.read().decode("utf-8", "replace") for f in (o, e))
+    if how:
+        left = lock_files(repo)
+        return 1, out, (err.strip() + f" (no answer in {timeout} s: {how})" + (
+            f"; left behind in its .git: {', '.join(left)} -- remove them once no git runs there" if left else "")).strip()
+    return rc, out, err
+
+
+def make_whole(repo, say=None, sleep=time.sleep):
+    """None, or why the clone cannot be made whole -- the one implementation tools/round.py init runs too
+    (fetch_version_branches), run here first so the checks read what the round will (weekly round 2026-10-31: a
+    dependent's clone of its default branch held no 26.x branch, so no JDK 25 line, and its 26.1.2 measure stopped on
+    the Gradle toolchain; the library's held no freeze, so no line for its missing `authors` remote). A shallow or
+    single-branch clone has none of origin's neoforge-<v> branches, so a version-branch fork would read as
+    single-version: origin's neoforge-* branches are fetched whole as remote-tracking refs (the clone made whole when it
+    is shallow; a single-branch clone's fetch refspec gains neoforge-*) when one is missing, and nothing is fetched when
+    none is; a fetch another process's ref lock refuses is tried again (FETCH_TRIES). say(what) is told what was
+    fetched."""
+    rc, out, err = net_git(repo, ["ls-remote", "--heads", "origin", "refs/heads/neoforge-*"], LIST_TIMEOUT)
+    if rc:
+        return f"cannot list origin's branches ({(err or out).strip()[-200:]}): the fork's kind is read from them"
+    remote = sorted(ln.split("refs/heads/", 1)[1] for ln in out.splitlines() if "refs/heads/" in ln)
+    shallow = git(repo, "rev-parse", "--is-shallow-repository")[1].strip() == "true"
+    missing = [b for b in remote if git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{b}")[0]]
+    if not missing and not shallow:
+        return None
+    for n in range(FETCH_TRIES):       # another process's ref lock: tried again, as round.py's git() did (2 + 3n s)
+        rc, out, err = net_git(repo, ["fetch", "-q", *(["--unshallow"] if shallow else []), "origin",
+                                      *[f"+refs/heads/{b}:refs/remotes/origin/{b}" for b in remote]], fetch_timeout())
+        if not (rc and LOCKED_REF.search(err or "")) or n == FETCH_TRIES - 1:
+            break
+        sleep(2 + 3 * n)
+    if rc:
+        return (f"a shallow or single-branch clone (missing {', '.join(missing) or 'its history'}), and fetching them "
+                f"failed: {' '.join((err or out).split())[:300]} -- clone the fork whole (no --depth/--single-branch)")
+    if missing and not any("*" in x for x in git(repo, "config", "--get-all", "remote.origin.fetch")[1].split()):
+        # a single-branch clone's fetch refspec names one branch: later `git fetch origin <b>` must update origin/<b>
+        git(repo, "config", "--add", "remote.origin.fetch", "+refs/heads/neoforge-*:refs/remotes/origin/neoforge-*")
+    if say:
+        say(", ".join(missing) if missing else "history (the clone was shallow)")
+    return None
+
+
 def is_branch_fork(repo, refs=()):
     """Is the clone a fork of stacked version branches: its checkout carries .port/ (a version branch's
     .port/<mc>/branch.properties, or the port branch's records), or a held neoforge-<v> ref has
@@ -126,10 +230,16 @@ def norm_url(u):
 
 def plan_upstreams(dirs):
     """{fork slug (lower case): (the authors' repository URL, their branch)} from .github/weekly-plan.json at HEAD (else
-    origin/HEAD) of each clone given: the library's head branch holds the set's config (keep-current, "The fork set")."""
+    origin/HEAD, else the clone's neoforge-* head branches -- no .port/<v>/branch.properties -- then its version
+    branches, lowest version first) of each clone given: the library's head branch holds the set's config
+    (keep-current, "The fork set"), and a clone of the GitHub default branch may not be on it."""
     out = {}
     for d in dirs:
-        for ref in ("HEAD", "origin/HEAD"):
+        rc, refs = git(d, "for-each-ref", "--format=%(refname:short)", "refs/heads/neoforge-*",
+                       "refs/remotes/origin/neoforge-*")
+        vb = lambda r: git(d, "cat-file", "-e", f"{r}:.port/{r.split('neoforge-', 1)[1]}/branch.properties")[0] == 0
+        held = sorted(refs.split() if rc == 0 else [], key=lambda r: (vb(r), mc_key(r.split("neoforge-", 1)[1]), r))
+        for ref in ("HEAD", "origin/HEAD", *held):
             rc, cfg = git(d, "show", f"{ref}:.github/weekly-plan.json")
             if rc != 0:
                 continue
@@ -216,15 +326,21 @@ def has_lib(name, env=None, dirs=None):
     return any((pathlib.Path(d) / name).exists() for d in dirs)
 
 
-def checks(forks, versions=None, client=True, env=None, find_java=None, lib=None, linux=None, gh=None, heads=None):
+def checks(forks, versions=None, client=True, env=None, find_java=None, lib=None, linux=None, gh=None, heads=None,
+           whole=None):
     """[(ok, what, detail)] for the round's needs. forks: [(owner/repo, dir)]. The keyword arguments stand in for the
-    machine in the self-check."""
+    machine in the self-check (whole: make_whole)."""
     env = os.environ if env is None else env
     linux = sys.platform.startswith("linux") if linux is None else linux
     if find_java is None:
         find_java = _load("shipped_gate_pf", "shipped-gate.py").find_java
     lib = lib or has_lib
-    out, need = [], {}
+    whole = whole or make_whole
+    out, need, made = [], {}, {}
+    for slug, d in forks:           # each clone made whole first, as round.py init does: the checks read what it will
+        p = pathlib.Path(d)
+        if (p / ".git").exists() and (origin_slug(p) or "").lower() == slug.lower():
+            made[slug] = whole(p)
     ups = plan_upstreams([pathlib.Path(d) for _s, d in forks if (pathlib.Path(d) / ".git").exists()])
     for slug, d in forks:
         p = pathlib.Path(d)
@@ -238,6 +354,8 @@ def checks(forks, versions=None, client=True, env=None, find_java=None, lib=None
             out.append((False, f"clone of {slug}", f"{p} is a clone of {got}, not {slug}"))
             continue
         out.append((True, f"clone of {slug}", str(p)))
+        if made.get(slug):
+            out.append((False, f"version branches of {slug}", made[slug]))
         out += remote_checks(p, ups)
         for v, j in (fork_versions(p, heads or origin_heads) if versions is None else {}).items():
             need.setdefault(j, set()).add(v)
@@ -293,9 +411,10 @@ def self_check():
         run("remote", "add", "origin", "https://github.com/owner/examplelib.git")
         run("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/neoforge-1.21.1")
         none = lambda repo: []
+        nf = lambda repo: None              # the clones here are whole already, and their origin is no real host
         jdks = {21: "/jdk21/bin/java"}
         xdg = d / "xdg"; xdg.mkdir()
-        res = checks([("owner/examplelib", lib), ("owner/examplemod", d / "absent")], env={"GITHUB_TOKEN": "x"},
+        res = checks(whole=nf, forks=[("owner/examplelib", lib), ("owner/examplemod", d / "absent")], env={"GITHUB_TOKEN": "x"},
                      find_java=jdks.get, lib=lambda n: False, linux=True, heads=none)
         by = {w: (ok, det) for ok, w, det in res}
         expect(not by["clone of owner/examplemod"][0] and "scheduled task's repositories" in by["clone of owner/examplemod"][1],
@@ -303,13 +422,13 @@ def self_check():
         expect(by["clone of owner/examplelib"][0] and by["github"][0] and "GITHUB_TOKEN" in by["github"][1], f"clone, github: {by}")
         expect(by["JDK 21"][0] and not by["JDK 25"][0] and "26.1.2, 26.3" in by["JDK 25"][1], f"JDK per version: {by}")
         expect(not by["libEGL.so.1"][0] and "26.3" in by["libEGL.so.1"][1] and not by["XDG_RUNTIME_DIR"][0], f"client needs: {by}")
-        res = checks([("owner/examplelib", lib)], env={"XDG_RUNTIME_DIR": str(xdg)}, find_java=lambda j: f"/jdk{j}",
+        res = checks(whole=nf, forks=[("owner/examplelib", lib)], env={"XDG_RUNTIME_DIR": str(xdg)}, find_java=lambda j: f"/jdk{j}",
                      lib=lambda n: True, linux=True, gh="/usr/bin/gh", heads=none)
         expect(all(ok for ok, _w, _d in res) and any(w == "github" and "gh command line" in det for _o, w, det in res),
                f"everything there: all ok, gh named: {res}")
-        res = checks([("owner/examplelib", lib)], versions=["1.21.1"], env={}, find_java=lambda j: None, linux=False, gh="", heads=none)
+        res = checks(whole=nf, forks=[("owner/examplelib", lib)], versions=["1.21.1"], env={}, find_java=lambda j: None, linux=False, gh="", heads=none)
         expect([w for ok, w, _d in res if not ok] == ["github", "JDK 21"], f"--versions, no client off Linux: {res}")
-        res = checks([("owner/examplelib", lib)], client=False, env={"GH_TOKEN": "y"}, find_java=lambda j: "/j", linux=True,
+        res = checks(whole=nf, forks=[("owner/examplelib", lib)], client=False, env={"GH_TOKEN": "y"}, find_java=lambda j: "/j", linux=True,
                      heads=none)
         expect(not any(w in ("libEGL.so.1", "XDG_RUNTIME_DIR") for _o, w, _d in res), "--no-client: no client checks")
         # weekly round 2026-10-19: (a) a shallow single-branch clone holds no ref of its 26.x branches: their names
@@ -325,7 +444,7 @@ def self_check():
                f"control: the clone's refs alone miss 26.1.2: {fork_versions(sh, none)}")
         expect(fork_versions(sh, names) == {"1.21.1": 21, "26.1.2": 25, "26.3": 25},
                f"origin's version branches by name, at their JDK: {fork_versions(sh, names)}")
-        res = checks([("owner/examplelib", sh)], env={"GH_TOKEN": "y", "XDG_RUNTIME_DIR": str(xdg)}, find_java=jdks.get,
+        res = checks(whole=nf, forks=[("owner/examplelib", sh)], env={"GH_TOKEN": "y", "XDG_RUNTIME_DIR": str(xdg)}, find_java=jdks.get,
                      lib=lambda n: False, linux=True, heads=names)
         by = {w: (ok, det) for ok, w, det in res}
         expect(not by["JDK 25"][0] and "26.1.2, 26.3" in by["JDK 25"][1] and not by["libEGL.so.1"][0],
@@ -361,7 +480,7 @@ def self_check():
                f"a single-version fork: origin's other neoforge-<v> names not counted: {fork_versions(sv, lambda repo: ['neoforge-26.3'])}")
         run_sv = lambda *a: subprocess.run(["git", "-C", str(sv), *a], capture_output=True, text=True, encoding="utf-8", check=True)
         run_sv("remote", "add", "origin", "https://github.com/owner/examplemod.git")
-        res_sv = checks([("owner/examplemod", sv)], env={"GH_TOKEN": "y", "XDG_RUNTIME_DIR": str(xdg)}, find_java=jdks.get,
+        res_sv = checks(whole=nf, forks=[("owner/examplemod", sv)], env={"GH_TOKEN": "y", "XDG_RUNTIME_DIR": str(xdg)}, find_java=jdks.get,
                         lib=lambda n: False, linux=True, heads=lambda repo: ["neoforge-1.21.1", "neoforge-26.3"])
         expect(all(ok is not False for ok, _w, _d in res_sv) and not any("JDK 25" in w for _o, w, _d in res_sv)
                and [w for ok, w, _d in res_sv if ok is None] == [f"origin/HEAD of {sv}"],
@@ -384,7 +503,7 @@ def self_check():
         rs = {w: (ok, det) for ok, w, det in remote_checks(sv, ups)}
         expect(rs[f"authors' remote of {sv}"][0] is True and "--upstream upstream/dev" in rs[f"authors' remote of {sv}"][1],
                f"the authors' remote there (another URL form): ok: {rs}")
-        res = checks([("owner/examplemod", sv)], env={"GH_TOKEN": "y", "XDG_RUNTIME_DIR": str(xdg)}, find_java=jdks.get,
+        res = checks(whole=nf, forks=[("owner/examplemod", sv)], env={"GH_TOKEN": "y", "XDG_RUNTIME_DIR": str(xdg)}, find_java=jdks.get,
                      lib=lambda n: False, linux=True, heads=none)
         expect(any(w == f"authors' remote of {sv}" and ok for ok, w, _d in res), f"checks() reads the set's config: {res}")
         # a version-branch fork with the same config: its remote lines are its freezes', exactly as before
@@ -392,6 +511,147 @@ def self_check():
         expect(remote_checks(lib, {"owner/examplelib": ("https://github.com/up/examplelib", "main")}) == before
                and not any("authors' remote" in w for _o, w, _d in before),
                f"a version-branch fork: no weekly-plan remote line, its freeze lines unchanged: {before}")
+        # weekly round 2026-10-31: a cloud clone of the fork's GitHub default branch (the authors' own branch, the port
+        # head not checked out) holds none of the port's branches -- no 26.x JDK, no freeze remote, no weekly-plan.json
+        # read. make_whole fetches origin's neoforge-* branches first, as round.py init does, and the checks see them.
+        au = d / "authors-default"; au.mkdir()
+        ga = lambda *a: subprocess.run(["git", "-C", str(au), *a], capture_output=True, text=True, encoding="utf-8", check=True)
+        cm = lambda m: (ga("add", "-A"), ga("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", m))
+        ga("init", "-q", "-b", "main"); ga("config", "core.autocrlf", "false")
+        (au / "gradle.properties").write_text("minecraft_version=1.20.1\n", encoding="utf-8"); cm("authors")
+        ga("checkout", "-q", "-b", "neoforge-1.21.1")
+        (au / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        (au / ".port").mkdir(); (au / ".port/KNOWN-ISSUES.json").write_text("{}\n", encoding="utf-8")
+        (au / ".github").mkdir(); (au / ".github/weekly-plan.json").write_text(json.dumps(cfg), encoding="utf-8"); cm("port")
+        ga("checkout", "-q", "-b", "neoforge-26.1.2"); (au / ".port/26.1.2").mkdir()
+        (au / ".port/26.1.2/branch.properties").write_text("minecraft_version=26.1.2\njava_version=25\nupstream=authors/main\n",
+                                                          encoding="utf-8"); cm("26.1.2")
+        ga("checkout", "-q", "main")
+        gh_url = "https://github.com/owner/examplelib.git"
+
+        def cloud_clone(name, branch):
+            c = d / name
+            subprocess.run(["git", "clone", "-q", "--single-branch", "--depth", "1", "-b", branch, au.as_uri(), str(c)],
+                           check=True, capture_output=True)
+            return c
+        cc = cloud_clone("cloud", "main")
+        subprocess.run(["git", "-C", str(cc), "remote", "set-url", "origin", gh_url], check=True)
+        res0 = checks(whole=nf, forks=[("owner/examplelib", cc)], env={"GH_TOKEN": "y"}, find_java=jdks.get, linux=False,
+                      heads=none)
+        expect([w for ok, w, _d in res0 if ok is False] == [],
+               f"control: the clone as given hides its 26.x JDK and its freeze's remote (nothing missing): {res0}")
+        subprocess.run(["git", "-C", str(cc), "remote", "set-url", "origin", au.as_uri()], check=True)
+        expect(make_whole(cc) is None and git(cc, "rev-parse", "--verify", "-q", "refs/remotes/origin/neoforge-26.1.2")[0] == 0
+               and git(cc, "rev-parse", "--abbrev-ref", "HEAD")[1].strip() == "main",
+               "make_whole fetches origin's neoforge-* branches as remote-tracking refs; the checkout stays where it was")
+        expect(make_whole(cc) is None, "a whole clone: nothing to fetch, no error")
+        # a version branch LOWER than the head that carries an older config: the head's config wins
+        ga("checkout", "-q", "-b", "neoforge-1.20.6", "neoforge-26.1.2"); (au / ".port/1.20.6").mkdir()
+        (au / ".port/1.20.6/branch.properties").write_text("minecraft_version=1.20.6\n", encoding="utf-8")
+        (au / ".github/weekly-plan.json").write_text(json.dumps({"forks": [{"repo": "owner/examplemod", "upstream":
+                                                     "https://github.com/stale/examplemod"}]}), encoding="utf-8")
+        cm("an older config on a version branch"); ga("checkout", "-q", "main")
+        told = []
+        expect(make_whole(cc, say=told.append) is None and told == ["neoforge-1.20.6"],
+               f"a branch origin gained is fetched, and said: {told}")
+        bad_ = d / "no-origin"
+        subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "main", au.as_uri(), str(bad_)], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(bad_), "remote", "set-url", "origin", (d / "gone.git").as_uri()], check=True)
+        why_ = make_whole(bad_) or ""
+        expect(why_.startswith("cannot list origin's branches (") and ("gone.git" in why_ or "fatal" in why_),
+               f"origin that cannot be listed: git's own message in the MISSING line: {why_}")
+        ff_ = d / "fetch-fails"         # origin lists, the fetch fails: git's message in the MISSING line
+        subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "main", au.as_uri(), str(ff_)], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(ff_), "config", "fetch.negotiationAlgorithm", "bogus"], check=True)
+        why_ = make_whole(ff_) or ""
+        expect("and fetching them failed: " in why_ and "bogus" in why_ and "clone the fork whole" in why_,
+               f"a fetch that fails: git's message in the MISSING line: {why_}")
+        # a fetch another git's ref lock refuses is tried again with round.py git()'s backoff (2 + 3n s)
+        lk_ = d / "locked"
+        subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "main", au.as_uri(), str(lk_)], check=True,
+                       capture_output=True)
+        lock_ = lk_ / ".git/refs/remotes/origin/neoforge-1.21.1.lock"
+        lock_.parent.mkdir(parents=True, exist_ok=True)
+        lock_.write_text("", encoding="utf-8")
+        slept = []
+        why_ = make_whole(lk_, sleep=lambda t: (slept.append(t), lock_.unlink()))
+        expect(why_ is None and slept == [2] and git(lk_, "rev-parse", "-q", "--verify", "refs/remotes/origin/neoforge-1.21.1")[0] == 0,
+               f"a ref lock once: tried again after 2 s, then fetched: {why_} {slept}")
+        lk2 = d / "locked-for-good"
+        subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "main", au.as_uri(), str(lk2)], check=True,
+                       capture_output=True)
+        (lk2 / ".git/refs/remotes/origin").mkdir(parents=True, exist_ok=True)
+        (lk2 / ".git/refs/remotes/origin/neoforge-1.21.1.lock").write_text("", encoding="utf-8")
+        slept = []
+        why_ = make_whole(lk2, sleep=slept.append) or ""
+        expect(slept == [2, 5, 8, 11] and "fetching them failed" in why_ and LOCKED_REF.search(why_),
+               f"a lock that stays: {FETCH_TRIES} tries, then git's message: {slept} {why_}")
+        expect(fetch_timeout({"MMVU_FETCH_TIMEOUT": "90"}) == 90 and fetch_timeout({"MMVU_FETCH_TIMEOUT": "soon"})
+               == fetch_timeout({}) == FETCH_TIMEOUT, "MMVU_FETCH_TIMEOUT: whole seconds, else the default")
+        if os.name != "nt":      # signals and the ext transport's shell command (POSIX here)
+            stub = ("import signal, sys, time\nif sys.argv[1] == 'deaf':\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    "open(sys.argv[2], 'w').close()\ntime.sleep(60)\n")
+            (d / "stub.py").write_text(stub, encoding="utf-8")
+            for kind, want in (("polite", "terminated"), ("deaf", "killed")):
+                up = d / f"{kind}.up"
+                t_ = time.time()
+                got_ = bounded([sys.executable, str(d / "stub.py"), kind, str(up)], 3, grace=1)
+                expect(got_ == (None, want) and up.exists() and time.time() - t_ < 20,
+                       f"a {kind} process past its time: asked to end, killed only if it will not: {got_}")
+            ext = ["-c", "protocol.ext.allow=always", "ls-remote"]
+            (d / "env.sh").write_text("echo prompt=$GIT_TERMINAL_PROMPT >&2\nexit 1\n", encoding="utf-8")
+            (d / "hang.sh").write_text("sleep 20\n", encoding="utf-8")
+            env0_ = os.environ.get("GIT_TERMINAL_PROMPT")
+            os.environ["GIT_TERMINAL_PROMPT"] = "1"        # the caller's own setting does not matter
+            try:
+                rc_, _o, e_ = net_git(au, ext + [f"ext::sh {(d / 'env.sh').as_posix()}"], 30)
+            finally:
+                os.environ.pop("GIT_TERMINAL_PROMPT") if env0_ is None else os.environ.update(GIT_TERMINAL_PROMPT=env0_)
+            expect(rc_ != 0 and "prompt=0" in e_, f"no terminal prompt on a network read: {rc_} {e_}")
+            t_ = time.time()
+            (au / ".git/shallow.lock").write_text("", encoding="utf-8")       # as a git stopped mid-fetch leaves it
+            rc_, _o, e_ = net_git(au, ext + [f"ext::sh {(d / 'hang.sh').as_posix()}"], 2, grace=2)
+            (au / ".git/shallow.lock").unlink()
+            expect(rc_ == 1 and "no answer in 2 s: terminated" in e_ and time.time() - t_ < 15
+                   and "left behind in its .git: shallow.lock" in e_,
+                   f"a network read that never answers is cut off, and a lock it left is named: {rc_} {e_} "
+                   f"{time.time() - t_:.1f}s")
+        subprocess.run(["git", "-C", str(cc), "remote", "set-url", "origin", gh_url], check=True)
+        seen = []
+        res = checks(whole=lambda r: seen.append(pathlib.Path(r)) or None, forks=[("owner/examplelib", cc)],
+                     env={"GH_TOKEN": "y"}, find_java=jdks.get, linux=False, heads=none)
+        by = {w: (ok, det) for ok, w, det in res}
+        expect(seen == [cc], f"checks() makes each clone whole before reading it: {seen}")
+        j25, ra = by.get("JDK 25", (True, "")), by.get(f"remote authors of {cc}", (True, ""))
+        expect(not j25[0] and "26.1.2" in j25[1] and ra[0] is False and "exit 19" in ra[1] and f"authors' remote of {cc}" not in by,
+               f"the whole clone: JDK 25 for 26.1.2 and the freeze's `authors` remote are missing: {by}")
+        expect(plan_upstreams([cc]).get("owner/examplemod") == ("https://github.com/up/examplemod", "dev"),
+               f"weekly-plan.json read from the head branch (not a lower version branch) when HEAD and origin/HEAD lack "
+               f"it: {plan_upstreams([cc])}")
+        res = checks(whole=lambda r: "fetching them failed", forks=[("owner/examplelib", cc)], env={"GH_TOKEN": "y"},
+                     find_java=jdks.get, linux=False, heads=none)
+        expect(any(ok is False and w == "version branches of owner/examplelib" and "failed" in det for ok, w, det in res),
+               f"a clone that cannot be made whole is missing: {res}")
+        # a single-version fork's clone of its head (origin has only that branch): make_whole fetches nothing and the
+        # checks are exactly as before
+        sh1 = d / "sv-origin"; sh1.mkdir()
+        g1 = lambda *a: subprocess.run(["git", "-C", str(sh1), *a], capture_output=True, text=True, encoding="utf-8", check=True)
+        g1("init", "-q", "-b", "neoforge-1.21.1")
+        (sh1 / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        g1("add", "-A"); g1("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "port")
+        svc = d / "sv-cloud"
+        subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "neoforge-1.21.1", sh1.as_uri(), str(svc)],
+                       check=True, capture_output=True)
+        refs_before = git(svc, "for-each-ref")[1]
+        expect(make_whole(svc) is None and git(svc, "for-each-ref")[1] == refs_before
+               and git(svc, "config", "--get-all", "remote.origin.fetch")[1].split() == ["+refs/heads/neoforge-1.21.1:refs/remotes/origin/neoforge-1.21.1"],
+               "a single-version fork's clone of its one branch: nothing fetched, no ref or config written")
+        subprocess.run(["git", "-C", str(svc), "remote", "set-url", "origin", "https://github.com/owner/examplemod.git"], check=True)
+        a_ = checks(whole=nf, forks=[("owner/examplemod", svc)], env={"GH_TOKEN": "y"}, find_java=jdks.get, linux=False, heads=none)
+        expect([w for ok, w, _d in a_ if ok is False] == [] and not any("version branches" in w for _o, w, _d in a_),
+               f"the single-version verdict unchanged: {a_}")
         expect(has_lib("libX.so.1", {}, [str(d)]) is False and (d / "libX.so.1").write_bytes(b"") == 0
                and has_lib("libX.so.1", {}, [str(d)]), "has_lib looks in the directories given")
     for m in bad:

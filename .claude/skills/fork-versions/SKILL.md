@@ -442,7 +442,7 @@ into the ledger at its lowest affected version and the run goes on. `known-issue
     python3 tools/known-issues.py release-notes --repo DIR --version 1.21.5 --tag <tag> [--min S3] [--platform mr|cf]
     python3 tools/known-issues.py page --repo DIR --fork owner/repo   # the project page's Known issues: open S2s, S3/S4 behind a link
     python3 tools/known-issues.py issue --repo DIR --slug owner/repo  # create/update (and pin) the Known issues issue from the ledger
-    python3 tools/known-issues.py add ... --suspected                 # no reproduction or version comparison yet
+    python3 tools/known-issues.py add ... --suspected --unverified WHY --verify-by WHAT   # no reproduction or version comparison yet
     python3 tools/known-issues.py confirm --repo DIR KI-3 [--evidence TEXT]   # a suspected entry reproduced
     python3 tools/known-issues.py disprove --repo DIR KI-3 --version 1.21.4 --kind no-regression|api-unchanged|test-passes \
         --evidence TEXT [--check]                                     # a suspected S3/S4 proven not a defect
@@ -455,8 +455,12 @@ when it is the same defect. `status --set` takes one version, a comma list or `F
 the entry lists between them).
 
 **Suspected entries.** A finding added without a reproduction or a version comparison (a lesson harvest's or a
-reader's suspicion) is added with `--suspected`: `"confidence": "suspected"` (absent: confirmed, every entry before it),
-shown `S3?` by `list` and "(suspected)" in the pinned issue and the plan issue. A reviewer who can point at the
+reader's suspicion) is added with `--suspected`, which needs `--unverified WHY` (why it could not be verified) and
+`--verify-by WHAT` (what would verify it), both written into its notes (no key of their own): `"confidence": "suspected"`
+(absent: confirmed, every entry before it), shown `S3?` by `list` and "(suspected)" in the pinned issue and the plan
+issue; two weeks or more after its mark, still suspected (its age from the ledger's git history: the commit that
+marked it; weeks, not plan issues counted), the plan says "(suspected, unresolved for N weeks -- needs a decision)", lists it for the owner and titles
+itself `[decision needed]` (what the round selects is unchanged). A reviewer who can point at the
 regressing line, a failing gate or test, or a reproduction is a confirmed finding. **The fork's own pinned tools must
 read the new key**: its weekly plan workflow runs `known-issues.py` at its config's `migrator_sha`, and Port CI's
 publish job at the kit its workflow pins, both strict about unknown keys -- a suspected entry added by hand on a fork
