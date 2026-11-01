@@ -67,7 +67,8 @@ exit 1 on any FAIL or UNKNOWN):
                   gated run as its source (`jars and gates of run N, the same tree` in the body: port-ci.yml
                   from_run, whose release job checked that run's built-tree.txt) with its release run's jobs green,
                   or has no such marker and its release run gated it itself (I1's jobs check: gates jobs success,
-                  ci-gates steps success). Its gate summaries (gates-*.md assets) must exist and be readable
+                  ci-gates steps success). The last PR merge of the window that ships (more than the allowlist)
+                  must have a release with its tree. Its gate summaries (gates-*.md assets) must exist and be readable
                   (UNKNOWN otherwise), each with Gate C rows all PASS (a library's `skipped` row too). A version
                   merged by PR with no release is a FAIL.
   I3 reviewed     at EVERY merged commit of the window, the review part of the done list -- fork-branches.py
@@ -832,6 +833,14 @@ def i2_released(ctx, F, v):
             line += f"; {read} gate summar{'y' if read == 1 else 'ies'}: Gate C PASS"
         ok &= good
         ev.append(line)
+    ship = [e["after"] for e in updates(F, v) if is_merge(F, e) and shipping_merge(F, v, e)]
+    last = next((g for g in reversed(gated) if ship and g["merge"] == ship[-1]), None)
+    rel_trees = {tree(F.shadow, out_of(F.shadow, "rev-parse", "--verify", "--quiet", f"refs/tags/{r['tag_name']}^{{commit}}")
+                      or r.get("target_commitish")) for r in rels}
+    if ship and (not last or last["tree"] not in rel_trees):
+        ok = False
+        ev.append(f"the last merge that ships ({short(ship[-1])}" + (f", PR #{last['pr']}" if last else "") +
+                  ") was not released: no release of the window has its tree")
     return (FAIL if not ok else UNKNOWN if unknown else PASS), ev
 
 
@@ -1478,6 +1487,8 @@ def self_check():
             ("I2", (DEP, "1.21.4"), "a Gate C FAIL in a release's gate summary", lambda f: f.assets.update(
                 {f.dep_tag: "| check | result |\n|---|---|\n| Gate C -- real client, `launch` | FAIL | crash |\n"}),
              FAIL, "Gate C rows not PASS"),
+            ("I2", (DEP, "1.21.4"), "a later PR merged after the release and never released",
+             lambda f: f.late_pr(), FAIL, "was not released"),
             ("I2", (DEP, "1.21.4"), "a release with no gate summary", lambda f: f.no_assets.add(f.dep_tag), UNKNOWN,
              "no gate summary"),
             ("I2", (DEP, "1.21.4"), "no from_run marker and a release run whose gates were skipped",
@@ -1974,6 +1985,17 @@ class Fixture:
         self.w(lib, ".port/1.21.5/COST.md", "a record\n")
         self.commit(lib, "publish config", at(74))
         self.pr_merge(self.LIB, lib, "1.21.5", "publish-config", 7, at(75))
+        self.finish()
+
+    def late_pr(self):
+        """A second PR (#9, gated) into dep 1.21.4 at +97, after its release (+95), with no release of its own."""
+        dep = self.dep
+        self.g(dep, "checkout", "-q", "-b", "late", "neoforge-1.21.4")
+        self.w(dep, "src/main/java/com/example/mod/Main.java", "class Main { int a = 9; }\n")
+        c = self.commit(dep, "a later change", at(96))
+        self.write_review(dep, "1.21.4", c)
+        self.commit(dep, "its review", at(96))
+        self.pr_merge(self.DEP, dep, "1.21.4", "late", 9, at(97))
         self.finish()
 
     def history_gap(self):
