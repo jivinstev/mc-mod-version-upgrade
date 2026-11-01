@@ -36,7 +36,10 @@ GitHub: REST with GITHUB_TOKEN / GH_TOKEN, else gh (known-issues.py gh_api, as e
 is the repository activity API (`/activity`, every page through its Link cursor: each push with before/after sha,
 its kind -- push, force_push, pr_merge, branch_creation -- and GitHub's own timestamp). A branch's history is trusted
 only when it reaches back before the window (or to the branch's creation), chains without a gap and ends at origin's
-tip now; otherwise I1 FAILs for it and I3/I4/I7 say UNKNOWN. A download (a release asset, an artifact) goes to
+tip now; a branch with no history at all is trusted only when its tip commit is dated before the window; otherwise
+I1 FAILs for it and I3/I4/I7 say UNKNOWN. The versions audited are read here: every origin neoforge-<v> whose tip
+has .port/<v>/branch.properties (the head's version aside); this checkout's round.py ladder and the pinned migrator's
+must name the same, or a `(versions)` row FAILs. A download (a release asset, an artifact) goes to
 api.github.com only, and follows one redirect only to GitHub's storage hosts (REDIRECT_HOSTS).
 
 THE INVARIANTS, per fork and per version branch (and head) (PASS / FAIL / UNKNOWN / N-A, each with its evidence;
@@ -63,13 +66,15 @@ exit 1 on any FAIL or UNKNOWN):
                   (weekly-plan.json and .yml, port-publish*, port-install.json). Any other .github/ change needs a
                   green push run; anything else (.port/branch.gradle, a build key, a pin, code, resources) a PR.
   I2 released     each release published in the window for the version (TAG_RE) points at a commit whose tree I1
-                  found gated and has a green workflow_dispatch (release) run on that commit; it either names a
+                  found gated, and the workflow_dispatch run on that commit that was running when the release was
+                  published (the run that made it; none: UNKNOWN) is green; it either names a
                   gated run as its source (`jars and gates of run N, the same tree` in the body: port-ci.yml
                   from_run, whose release job checked that run's built-tree.txt) with its release run's jobs green,
                   or has no such marker and its release run gated it itself (I1's jobs check: gates jobs success,
                   ci-gates steps success). The last PR merge of the window that ships (more than the allowlist)
                   must have a release with its tree. Its gate summaries (gates-*.md assets) must exist and be readable
-                  (UNKNOWN otherwise), each with Gate C rows all PASS (a library's `skipped` row too). A version
+                  (UNKNOWN otherwise), each with at least one Gate C row PASS and every other row PASS (`skipped`
+                  accepted on a library only). A version
                   merged by PR with no release is a FAIL.
   I3 reviewed     at EVERY merged commit of the window, the review part of the done list -- fork-branches.py
                   review_items and review_problems, what `fork-port.py --check-done` runs (a single-version tree
@@ -80,14 +85,15 @@ exit 1 on any FAIL or UNKNOWN):
                   pr_body): every file the merge changed outside the allowlist needs a row in the body's review or
                   recheck section, its last verdict ok, and the review's RESULT ok; the rows name files, not
                   commits, so a file a PR commit after the last commit the summaries name (`commit:` lines) changed
-                  must be in the recheck (not determinable when they name none: said). N-A for a branch the round
-                  only pushed to.
+                  must be in the recheck; when the summaries name no commit, or none in the PR's commit list, that is
+                  not determinable: UNKNOWN. N-A for a branch the round only pushed to.
   I4 lower first  every commit an update brought onto neoforge-<v> that belongs to the version below (its
                   branch.properties `parent`, read at the new tip) -- on that branch at the window's end, or on the
                   head of any PR into it (a lower PR closed unmerged or squashed: its commits never reach the
                   branch) -- was on origin's lower branch at the update's push time (GitHub's activity timestamp,
                   not committer dates). N-A on a head and a single-version fork (nothing below).
-  I5 dependents   on a library's version: the newest library release of the window at that version is pinned by
+  I5 dependents   (UNKNOWN when the set's .github/weekly-plan.json, which names the roles and dependencies, cannot
+                  be read) on a library's version: the newest library release of the window at that version is pinned by
                   each dependent's matching branch at the window's end (a non-comment line of its branch.properties,
                   port-ci.yml or build.gradle: `library.<owner/repo>=TAG`, or a github.com/<owner/repo>/releases/
                   download/TAG/ URL), and the library's branch then has the dependent's PASS Gate C record for it
@@ -444,8 +450,13 @@ def history_problem(F, b, evs, start):
     window (or to the branch's creation), chain without a gap (each update's before = the previous one's after) and
     end at the branch's tip now."""
     if not evs:
-        return None       # never updated in GitHub's history: the window cannot have changed it (the PR cross-check
-        # below still fails a merge into it)
+        # never updated in GitHub's history: trusted only when the branch's tip is older than the window
+        tip = out_of(F.shadow, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{b}")
+        when = ts(out_of(F.shadow, "log", "-1", "--format=%cI", tip)) if tip else None
+        if not when or when >= start:
+            return (f"{b}: no activity history, but its tip {short(tip)} is dated {iso(when)}, in or after the window's "
+                    "start: GitHub's record of its pushes is missing")
+        return None
     first = evs[0]
     if first.get("activity_type") != "branch_creation" and first.get("before") != ZERO and \
             (ts(first.get("timestamp")) or start) >= start:
@@ -460,13 +471,52 @@ def history_problem(F, b, evs, start):
     return None
 
 
+def vkey(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.findall(r"\d+|[A-Za-z]+", v))
+
+
+def own_versions(d, base):
+    """The fork's version branches, read here (not from the code the audit polices): every origin neoforge-<v> whose
+    tip carries .port/<v>/branch.properties, the head's version excluded, oldest first."""
+    out = []
+    for line in out_of(d, "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/").splitlines():
+        m = re.fullmatch(r"origin/neoforge-(.+)", line.strip())
+        if m and m.group(1) != base and git(d, "cat-file", "-e", f"{line.strip()}:.port/{m.group(1)}/branch.properties").returncode == 0:
+            out.append(m.group(1))
+    return sorted(set(out), key=vkey)
+
+
+def pinned_ladder(pf, d, base):
+    """round.py ladder() computed with the pinned migrator's fork-branches.py (None when it cannot be)."""
+    try:
+        vs = sorted(pf.version_branches(d), key=pf.mc_key)
+        if not vs:
+            return []
+        try:
+            _p, chain = pf.versions_to(d, vs[-1])
+        except ValueError:
+            chain = vs
+        return [v for v in chain if v != base]
+    except Exception:                            # noqa: BLE001 -- said by the caller
+        return None
+
+
 def collect(F, start, end):
     """The fork's kind, versions, branch history, PRs and releases."""
-    fb, rd = mod("fb"), mod("rd")
+    rd = mod("rd")
     d = F.shadow
-    have = fb.version_branches(d)
-    F.kind = "branches" if have else "single"
-    F.versions = rd.ladder(d, F.base) if have else []
+    F.versions = own_versions(d, F.base)
+    F.kind = "branches" if F.versions else "single"
+    F.version_problem = None
+    pf = pinned()
+    lad = {"this checkout's round.py ladder": rd.ladder(d, F.base) if F.versions else [],
+           "the pinned migrator's ladder": pinned_ladder(pf, d, F.base) if pf else None}
+    for what, lv in lad.items():
+        if lv is None:
+            F.version_problem = f"{what} could not be computed ({PIN['why'] or 'an error'})"
+        elif lv != F.versions:
+            F.version_problem = (f"{what} ({', '.join(lv) or 'none'}) disagrees with the fork's version branches "
+                                 f"({', '.join(F.versions) or 'none'})")
     for v in F.all_versions():
         b = F.branch(v)
         evs, complete = gh_cursor(f"repos/{F.slug}/activity?ref=refs/heads/{b}")
@@ -753,7 +803,8 @@ TESTED_AS = re.compile(r"tested as (\w+) \((\w+) run (\d+)\), the same tree")
 
 def release_gatec(F, rel):
     """(bad rows, read, problem or None) of the release's gate summary assets: none, or one not downloadable, is a
-    problem."""
+    problem. Each summary needs at least one Gate C row PASS; a `skipped` row is accepted only on a library (ci-gates
+    skips a library's spawn-type phases)."""
     bad, read, names = [], 0, []
     for a in sorted(rel.get("assets") or [], key=lambda a: a.get("name") or ""):
         if not re.fullmatch(r"gates-[\w-]+\.md", a.get("name") or ""):
@@ -764,15 +815,19 @@ def release_gatec(F, rel):
         except Exception as e:                   # noqa: BLE001 -- unreadable evidence: said as such
             return bad, read, f"{a['name']} could not be downloaded ({type(e).__name__})"
         read += 1
-        rows = 0
+        rows = passed = 0
         for line in text.splitlines():
             c = [x.strip() for x in line.strip().strip("|").split("|")]
             if len(c) >= 2 and c[0].startswith("Gate C"):
                 rows += 1
-                if c[1] not in ("PASS", "skipped"):
-                    bad.append(f"{a['name']}: {c[0]} {c[1]}")
+                passed += c[1] == "PASS"
+                if c[1] not in (("PASS", "skipped") if F.library else ("PASS",)):
+                    bad.append(f"{a['name']}: {c[0]} {c[1]}" + (" (skipped is accepted on a library only)"
+                                                                if c[1] == "skipped" else ""))
         if not rows:
             bad.append(f"{a['name']}: no Gate C row")
+        elif not passed:
+            bad.append(f"{a['name']}: no Gate C row PASS")
     if not names:
         return bad, read, "the release has no gate summary (gates-*.md)"
     return bad, read, None
@@ -803,11 +858,19 @@ def i2_released(ctx, F, v):
         body = r.get("body") or ""
         m = FROM_RUN.search(body) or TESTED_AS.search(body)
         src = int(m.group(1) if m.re is FROM_RUN else m.group(3)) if m else None
-        disp = sorted([x for x in mod_runs(F, c) if x.get("event") == "workflow_dispatch" and x.get("conclusion") == "success"],
-                      key=lambda x: x.get("created_at") or "")
-        if not disp:
+        pub = ts(r.get("published_at") or r.get("created_at"))
+        tied = [x for x in mod_runs(F, c) if x.get("event") == "workflow_dispatch" and pub
+                and (ts(x.get("run_started_at") or x.get("created_at")) or pub) <= pub <= (ts(x.get("updated_at")) or pub)]
+        if not tied:
+            unknown = True
+            ev.append(f"{tag} at {short(c)}: no workflow_dispatch run on the commit was running when the release was "
+                      f"published ({iso(pub)}): the run that made it is not known")
+            continue
+        disp = sorted(tied, key=lambda x: x.get("created_at") or "")
+        if disp[-1].get("conclusion") != "success":
             ok = False
-            ev.append(f"{tag} at {short(c)}: no green release (workflow_dispatch) run on the commit")
+            ev.append(f"{tag} at {short(c)}: no green release run: the run that made it ({disp[-1]['id']}) is "
+                      f"{disp[-1].get('conclusion')}")
             continue
         if src is not None:
             good = src in {x["run"] for x in gated if x["tree"] == t_}
@@ -934,10 +997,14 @@ def pr_review_verdict(ctx, F, v, e):
                 if f not in rechecked:
                     fails.append(f"{f} changed by {short(c)}, after the last commit the summaries name, and not in the recheck")
     elif named:
-        ev.append("the commits the summaries name are not in the PR's commit list: the order is not determinable")
+        undet = "the commits the summaries name are not in the PR's commit list: the order is not determinable"
     else:
-        ev.append("the summaries name no commit: the order is not determinable")
-    return (FAIL if fails else PASS), ev + fails
+        undet = "the summaries name no commit (`commit:` lines): the order is not determinable"
+    if fails:
+        return FAIL, ev + fails
+    if not (named and idx):
+        return UNKNOWN, ev + [undet + ", so whether the review covers the PR's last commits is not known"]
+    return PASS, ev
 
 
 def i3_reviewed(ctx, F, v):
@@ -948,11 +1015,12 @@ def i3_reviewed(ctx, F, v):
                     if not allm else f"{len(allm)} PR merge(s), records only (the allowlist): no review needed"]
     if F.history.get(v):
         return UNKNOWN, [f"history: {F.history[v]}"]
-    out, ok = [], True
+    out, ok, unknown = [], True, False
     for e in merges:                          # every merge of the window, not only the last
         if F.kind == "branches" and v == F.base:
             s_, ev = pr_review_verdict(ctx, F, v, e)
-            ok &= s_ == PASS
+            ok &= s_ != FAIL
+            unknown |= s_ == UNKNOWN
             out += ev
             continue
         probs, note = review_verdict(F, v, e["after"], ts(e.get("timestamp")))
@@ -962,7 +1030,7 @@ def i3_reviewed(ctx, F, v):
                    ([f"... {len(probs) - 6} more"] if len(probs) > 6 else [])
         else:
             out.append(f"at {short(e['after'])}: review current ({note}; this checkout's and the pinned check agree)")
-    return (PASS if ok else FAIL), out
+    return (FAIL if not ok else UNKNOWN if unknown else PASS), out
 
 
 def revs(d, *a):
@@ -1041,6 +1109,9 @@ def pins(text, slug, tag):
 
 
 def i5_dependents(ctx, F, v):
+    probs = [f"{G.slug}: {G.cfg_problem}" for G in ctx.forks.values() if getattr(G, "cfg_problem", None)]
+    if probs:
+        return UNKNOWN, ["the set's roles and dependencies cannot be read: " + "; ".join(probs[:2])]
     if not F.library:
         return NA, ["not a library"]
     rx = re.compile(TAG_RE.format(v=re.escape(v)))
@@ -1293,18 +1364,24 @@ def audit(plan, forks_arg, state=None, since=None, until=None, keep=False, say=p
             collect(F, start, end)
         # the dependencies come from the set's weekly-plan.json (the plan issue names the roles only)
         for F in forks.values():
+            F.cfg_problem = "no fork of the set has a .github/weekly-plan.json on its head naming it"
             for G in forks.values():
                 txt = show(G.shadow, f"refs/remotes/origin/{G.head}", ".github/weekly-plan.json")
                 if not txt:
                     continue
                 try:
                     cfgj = json.loads(txt)
-                except ValueError:
-                    continue
+                except ValueError as e:
+                    F.cfg_problem = f"{G.slug}'s .github/weekly-plan.json is not JSON ({e})"
+                    break
+                if not isinstance(cfgj, dict):
+                    F.cfg_problem = f"{G.slug}'s .github/weekly-plan.json is not a set's config"
+                    break
                 me = next((x for x in cfgj.get("forks", []) if x.get("repo") == F.slug), None)
                 if me:
                     F.depends_on = list(me.get("depends_on") or F.depends_on)
                     F.library = F.library or me.get("role") == "library"
+                    F.cfg_problem = None
                     break
         ctx = Ctx(start, end, close, frozen, forks, st)
         rows = []
@@ -1318,6 +1395,9 @@ def audit(plan, forks_arg, state=None, since=None, until=None, keep=False, say=p
                         s_, ev = UNKNOWN, [f"could not be checked: {type(e).__name__}: {e}"[:300]]
                     row["checks"][k] = {"status": s_, "evidence": ev}
                 rows.append(row)
+            if F.version_problem:
+                rows.append({"fork": F.slug, "version": "(versions)", "head": False, "checks": dict(
+                    {k: {"status": NA, "evidence": []} for k in INVS}, I7={"status": FAIL, "evidence": [F.version_problem]})})
             stray = pr_set_rows(ctx, F)
             if stray:          # a PR the round merged into a branch that is no version of the fork: its own FAIL row
                 rows.append({"fork": F.slug, "version": "(other)", "head": False, "checks": dict(
@@ -1533,6 +1613,27 @@ def self_check():
             ("I7", (DEP, "1.21.5"), "a version the plan gave work (a bump) that the round never touched",
              pre(dep_bump="1.21.5"), FAIL, "the plan gave it work"),
         ]
+        cases += [
+            ("I3", (DEP, "1.21.1"), "a head PR body whose summaries name no commit (order not determinable)",
+             pre(head_body=("### review\n\nRESULT: ok\n\n| file | ok/not-ok | note |\n|---|---|---|\n"
+                            "| src/main/java/com/example/mod/Main.java | ok | fine |\n")), UNKNOWN, "not determinable"),
+            ("I2", (DEP, "1.21.4"), "a summary whose only Gate C row is skipped, on a fork that is not a library",
+             lambda f: f.assets.update({f.dep_tag: "| Gate C -- real client, `launch` | skipped | x |\n"}), FAIL,
+             "accepted on a library only"),
+            ("I2", (LIB, "1.21.4"), "a library summary with every Gate C row skipped (none PASS)",
+             lambda f: f.assets.update({X: "| Gate C -- real client, `launch` | skipped | x |\n"
+                                           "| Gate C -- real client, `spawn` | skipped | x |\n"}), FAIL, "no Gate C row PASS"),
+            ("I7", (LIB, "(versions)"), "the pinned migrator's ladder disagrees with the fork's version branches",
+             pre(pin_ladder_lies=True), FAIL, "disagrees with the fork's version branches"),
+            ("I1", (LIB, "1.21.5"), "no activity history for a branch whose tip is dated inside the window",
+             lambda f: f.no_history(LIB, "neoforge-1.21.5"), FAIL, "no activity history"),
+            ("I2", (DEP, "1.21.4"), "no dispatch run was running when the release was published",
+             lambda f: f.untied_release(), UNKNOWN, "the run that made it is not known"),
+            ("I2", (DEP, "1.21.4"), "the run that made the release is red, a later dispatch run (a promotion) green",
+             lambda f: f.red_release_green_promotion(), FAIL, "no green release run"),
+            ("I5", (LIB, "1.21.4"), "the set's weekly-plan.json is unreadable", lambda f: f.bad_config(), UNKNOWN,
+             "cannot be read"),
+        ]
         seen = set()
         for k, (f_, v_), what, mut, want_s, why in cases:
             name = re.sub(r"\W+", "-", what)[:40]
@@ -1614,16 +1715,21 @@ def at(minutes):
 
 
 class LyingPin:
-    """A pinned fork-branches.py whose review check finds nothing (the self-check of the cross-check)."""
+    """A pinned fork-branches.py that disagrees with this checkout's (the self-check of the cross-checks): its review
+    check finds a problem, or (ladder) its version chain is another."""
 
-    def __init__(self, real):
-        self.real = real
+    def __init__(self, real, ladder=False):
+        self.real, self.ladder = real, ladder
 
     def __getattr__(self, k):
         return getattr(self.real, k)
 
     def review_problems(self, *a, **k):
-        return ["REVIEW.md: a problem only the pinned check sees"]
+        return self.real.review_problems(*a, **k) if self.ladder else ["REVIEW.md: a problem only the pinned check sees"]
+
+    def versions_to(self, repo, to):
+        port, chain = self.real.versions_to(repo, to)
+        return (port, chain[:-1]) if self.ladder else (port, chain)
 
 
 class Fixture:
@@ -1652,9 +1758,9 @@ class Fixture:
             "### fix\n\nRESULT: ok\n\n### recheck\n\nRESULT: ok\nnot_ok: 0\n\n"
             "| file | ok/not-ok | note |\n|---|---|---|\n| src/main/java/com/example/mod/Main.java | ok | fixed |\n"))
         self.build()
-        if o.get("pin_lies"):
+        if o.get("pin_lies") or o.get("pin_ladder_lies"):
             pf = pinned()
-            PIN["mod"] = LyingPin(pf.real if isinstance(pf, LyingPin) else pf)
+            PIN["mod"] = LyingPin(pf.real if isinstance(pf, LyingPin) else pf, ladder=bool(o.get("pin_ladder_lies")))
         elif isinstance(PIN.get("mod"), LyingPin):
             PIN["mod"] = PIN["mod"].real
         if o.get("state_no_repin"):
@@ -1765,7 +1871,9 @@ class Fixture:
         self.g(d, "tag", "-f", tag, c)
         self.runs.setdefault(slug, []).append({"id": run_id + 5000, "head_sha": c, "event": "workflow_dispatch",
                                                "status": "completed", "conclusion": "success", "path": PORT_CI_WF,
-                                               "created_at": when, "head_branch": "x", "pull_requests": []})
+                                               "created_at": iso(ts(when) - datetime.timedelta(minutes=5)),
+                                               "updated_at": iso(ts(when) + datetime.timedelta(minutes=5)),
+                                               "head_branch": "x", "pull_requests": []})
         self.releases[slug].append({"tag_name": tag, "target_commitish": c, "published_at": when, "created_at": when,
                                     "draft": False, "body": f"Built from `{c}` (jars and gates of run {run_id}, the same tree)."
                                     if from_run else f"Built from `{c}`.",
@@ -1870,7 +1978,10 @@ class Fixture:
             self.g(d, "fetch", "-q", "--prune", "origin")
             for b in ("neoforge-1.21.1", "neoforge-1.21.4", "neoforge-1.21.5"):
                 evs = [e for e in self.activity.get((s, b), []) if not e.get("synthetic")]
-                first = evs[0]["before"] if evs else self.tip(d, b)
+                if not evs:            # never pushed in GitHub's record: its tip is older than the window
+                    self.activity[(s, b)] = []
+                    continue
+                first = evs[0]["before"]
                 self.activity[(s, b)] = [{"id": 1, "before": ZERO, "after": first, "ref": f"refs/heads/{b}",
                                           "timestamp": at(-300), "activity_type": "branch_creation", "synthetic": True}] + evs
         self.before = self.snapshot()
@@ -1996,6 +2107,29 @@ class Fixture:
         self.write_review(dep, "1.21.4", c)
         self.commit(dep, "its review", at(96))
         self.pr_merge(self.DEP, dep, "1.21.4", "late", 9, at(97))
+        self.finish()
+
+    def no_history(self, slug, b):
+        self.activity[(slug, b)] = []
+        self.finish = lambda: None
+
+    def untied_release(self):
+        for r in self.runs[self.DEP]:
+            if r["id"] == self.r_dep + 5000:
+                r["created_at"], r["updated_at"] = at(150), at(155)
+
+    def red_release_green_promotion(self):
+        self.run_conclusion[self.r_dep + 5000] = "failure"
+        self.runs[self.DEP].append({"id": 9999, "head_sha": self.m_dep, "event": "workflow_dispatch", "status": "completed",
+                                    "conclusion": "success", "path": PORT_CI_WF, "created_at": at(200),
+                                    "updated_at": at(205), "head_branch": "x", "pull_requests": []})
+
+    def bad_config(self):
+        self.g(self.lib, "checkout", "-q", "neoforge-1.21.1")
+        before = self.tip(self.lib, "neoforge-1.21.1")
+        self.w(self.lib, ".github/weekly-plan.json", "{ not json\n")
+        self.commit(self.lib, "a broken config", at(111))
+        self.ev(self.LIB, "neoforge-1.21.1", before, self.tip(self.lib, "neoforge-1.21.1"), "push", at(112))
         self.finish()
 
     def history_gap(self):
