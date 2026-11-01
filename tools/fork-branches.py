@@ -3008,6 +3008,108 @@ def mark_ungated(repo, t, commit=None, why=None):
         f.unlink(missing_ok=True)
 
 
+# MMVU_ROUND_REUSE=1 (off by default; off, nothing below is read or written): a green A/B run's commit and what else its
+# verdict depends on, kept beside UNGATED_FILE, so a round's resync after a records-only merge and its t_gates on a
+# ci_record fork do not run Gate A/B again on a tree that run already passed (measured, round #129: ~12.5 min a
+# carry-only version). Gate C and PR CI are never reused.
+REUSE_ENV = "MMVU_ROUND_REUSE"
+AB_GREEN_FILE = "mmvu-ab-green.json"
+AB_ENV_KEYS = ("JAVA_HOME", "GRADLE_OPTS", "GRADLE_USER_HOME", "MMVU_SHARED_DIR")
+
+
+def reuse_on():
+    return os.environ.get(REUSE_ENV) == "1"
+
+
+def kit_id():
+    """The migrator's committed tree (its tools are what ran the gates), or None when its checkout has changes."""
+    if git(ROOT, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        return None
+    return git(ROOT, "rev-parse", "--verify", "--quiet", "HEAD^{tree}").stdout.strip() or None
+
+
+def ab_key(repo, t, untaken_ok):
+    """What an A/B verdict depends on besides the tree: the gate command (fork-port.py --from-stage measure --gates ab,
+    no budget), the round's frozen input by its bytes, the authors' branch tip the drift check reads, the migrator kit
+    and the environment the gates build with. -> a digest, or None when one of them cannot be read."""
+    kit = kit_id()
+    if not kit:
+        return None
+    try:
+        frozen = hashlib.sha256(pathlib.Path(untaken_ok).read_bytes()).hexdigest() if untaken_ok else ""
+    except OSError:
+        return None
+    up = upstream_of(repo, t)
+    tip = git(repo, "rev-parse", "--verify", "--quiet", f"{up}^{{commit}}").stdout.strip() if up else ""
+    k = {"cmd": "measure ab budget0 maxerrors0", "frozen": frozen, "upstream": tip, "kit": kit,
+         "env": {e: os.environ.get(e, "") for e in AB_ENV_KEYS}}
+    return hashlib.sha256(json.dumps(k, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def note_ab_green(repo, work, t, untaken_ok, rc):
+    """After a green A/B run (fork-port.py exit rc) on version t's checkout `work`: its commit, key and exit recorded
+    (MMVU_ROUND_REUSE=1 only)."""
+    if not reuse_on():
+        return
+    key, c = ab_key(repo, t, untaken_ok), git(work, "rev-parse", "HEAD").stdout.strip()
+    f = _ungated_path(repo) / AB_GREEN_FILE
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    if key and c:
+        data[t] = {"commit": c, "key": key, "exit": rc}
+    else:
+        data.pop(t, None)
+    f.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def records_only(path, t):
+    """Can a change to `path` not change version t's A/B verdict? A file jar_relevant does not count, outside .github/
+    (a CI change always runs CI) and outside .port/<t>/ but for that version's own run outputs (its other files --
+    STUBS.json, logs-known-absent.txt, shipped-expect.txt -- are read by the gate run; of its outputs GATES.md and
+    GATES-RED.md decide its exit, 0 or 17)."""
+    return not jar_relevant(path, t) and not path.startswith(".github/") and \
+        (not path.startswith(f"{REC}/{t}/") or run_output(path, t) and path.rsplit("/", 1)[-1] not in ("GATES.md", "GATES-RED.md"))
+
+
+def ab_reusable(repo, work, t, untaken_ok, merged_from=None, ok=(0, 17, UNDONE_EXIT)):
+    """(commit, None) when version t's A/B green record still stands for `work`'s HEAD, else (None, why): MMVU_ROUND_REUSE=1;
+    a record for t whose exit the caller accepts (ok) with the same ab_key, the authors' branch fetched first (the gate
+    run's drift check fetches it); its commit an ancestor of HEAD with only records_only files changed since; and, with
+    merged_from (the branch before a merge), that merge's own change records-only too."""
+    if not reuse_on():
+        return None, f"{REUSE_ENV} is not 1"
+    try:
+        rec = json.loads((_ungated_path(repo) / AB_GREEN_FILE).read_text(encoding="utf-8")).get(t)
+    except (OSError, ValueError, AttributeError):
+        rec = None
+    if not isinstance(rec, dict) or not COMMIT_ID.match(str(rec.get("commit") or "")) or not rec.get("key"):
+        return None, f"no A/B green record for {t}"
+    if rec.get("exit") not in ok:
+        return None, f"the record's exit {rec.get('exit')} is not one this step accepts ({', '.join(map(str, ok))})"
+    up = info_ref(repo, t).get("upstream") or ""
+    if "/" in up and git(repo, "fetch", "-q", *up.split("/", 1)).returncode:
+        return None, f"cannot fetch the authors' {up}"
+    key = ab_key(repo, t, untaken_ok)
+    if not key or key != rec["key"]:
+        return None, "the gate command, frozen input, authors' tip, migrator kit or environment differ from the record's"
+    h = git(work, "rev-parse", "HEAD").stdout.strip()
+    if not h or git(repo, "merge-base", "--is-ancestor", rec["commit"], h).returncode:
+        return None, f"the record's commit {rec['commit'][:12]} is not an ancestor of HEAD"
+    for base, what in ((rec["commit"], "since the record"), (merged_from, "in the merge")):
+        if not base:
+            continue
+        d = git(repo, "diff", "--name-only", base, h)
+        if d.returncode:
+            return None, f"cannot compare with {base[:12]}"
+        bad = [f for f in d.stdout.splitlines() if f and not records_only(f, t)]
+        if bad:
+            return None, f"{len(bad)} file(s) the gates read changed {what}, e.g. {bad[0]}"
+    return rec["commit"], None
+
+
 def cascade_nodes(repo, spec):
     """(port branch, [None, versions...] of TO's chain, start index, TO) for `FROM..TO`; ValueError for bad input."""
     frm, sep, to = spec.partition("..")
@@ -3065,7 +3167,7 @@ def port_ref_refused(repo, tip, name, first, upstream=None):
 
 
 def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=None, budget=DEFAULT_BUDGET_LINES,
-            out_dir=None, port_ref=None, upstream=None, _guarded=False, untaken_ok=None, head_merge=None):
+            out_dir=None, port_ref=None, upstream=None, _guarded=False, untaken_ok=None, head_merge=None, reuse_ab=False):
     """`FROM..TO`: merge FROM's branch into the next branch up TO's chain, then that one into the next, ... up to TO,
     running the no-model gates on each branch a merge changed. FROM is a version or the port branch (its name, or
     `port`). Pushes nothing.
@@ -3074,7 +3176,9 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
     CASCADE-PLAN.json / CASCADE-PLAN.md / ISSUE.md under out_dir (default build/fork-branches/plan). mode "apply": the
     same merges on the real branches, each decision file merged without the authors' change and an open REMERGE.json
     entry (or a default the tool carries out, logged in .port/DECISIONS.md); everything else goes on, the versions
-    above included; a red branch still stops. port_ref (FROM the port branch only): carry that commit in place of the
+    above included; a red branch still stops. reuse_ab (round.py's resync, with MMVU_ROUND_REUSE=1): a merge whose change
+    is records-only on a tree with a standing A/B green record (ab_reusable) is not gated again. port_ref (FROM the port
+    branch only): carry that commit in place of the
     port branch's tip -- a fix made on a branch cut from what the versions took, so none of the head's untaken authors'
     code goes with it (port_ref_refused). A cascade FROM a version branch carries only what that branch took (each
     merge's port commit is its merge-base with the port branch), never the head's untaken code.
@@ -3138,6 +3242,8 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
                     f"--repo {work} --target {t} --from-stage measure, with a budget), commit, then cascade {t}..{to}")
                 break
             mark_ungated(repo, t)
+            if gates == "ab":
+                note_ab_green(repo, work, t, untaken_ok, rc)
             rows.append((t, f"merged earlier, gated now, gates exit {rc}", ""))
             continue
         if dry_run:
@@ -3191,7 +3297,12 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
             # recorded BEFORE the gates run: a run that is killed or times out leaves the merge recorded as ungated
             mark_ungated(repo, t, git(work, "rev-parse", "HEAD").stdout.strip(),
                          "merged; its gates did not finish (killed, timed out, or still running)")
-        rc = runner(work, t, gates, say) if mode != "plan-run" else 0
+        reused = None
+        if reuse_ab and gates == "ab" and mode is None and reuse_on():
+            reused, why = ab_reusable(repo, work, t, untaken_ok, merged_from=tref)
+            say(f"fork-branches: cascade: {t}: reused A/B from {AB_GREEN_FILE} (green at {reused[:12]}; the merge and "
+                f"everything since are records only)" if reused else f"fork-branches: cascade: {t}: A/B runs: {why}")
+        rc = 0 if reused else runner(work, t, gates, say) if mode != "plan-run" else 0
         if rc not in (0, 17, UNDONE_EXIT):
             rows.append((t, f"merged, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
             mark_ungated(repo, t, git(work, "rev-parse", "HEAD").stdout.strip(), f"red after the merge, fork-port exit {rc}")
@@ -3200,6 +3311,8 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
             break
         if gates != "none" and mode != "plan-run":
             mark_ungated(repo, t)
+            if gates == "ab" and not reused:
+                note_ab_green(repo, work, t, untaken_ok, rc)
         n_open = sum(1 for x in its if not x.get("executed"))
         rows.append((t, "merged" + ("" if gates == "none" or mode == "plan-run" else f", gates exit {rc}")
                      + (f", {n_open} decision(s) open" if n_open else ""), ""))
@@ -4958,6 +5071,8 @@ def main():
     k.add_argument("--untaken-ok", metavar="FROZEN_JSON", help="a weekly round's frozen input (round/frozen.json), passed "
                    "to each version's gates (fork-port.py --untaken-ok): the authors' commits the plan does not take do "
                    "not stop them at the upstream freeze; recorded in that version's DRIFT.md")
+    k.add_argument("--reuse-ab", action="store_true", help="tools/round.py's resync step, with MMVU_ROUND_REUSE=1: a merge "
+                   "that brings records only, on a tree whose A/B green record stands, is not gated again")
     un = sub.add_parser("untaken", help="the authors' code the head carries that a version branch has not taken")
     un.add_argument("--repo", required=True); un.add_argument("--upstream", required=True, metavar="REF",
                                                               help="the authors' branch (e.g. authors/main)")
@@ -5066,7 +5181,7 @@ def main():
             ap.error("cascade needs FROM..TO")
         return cascade(a.repo, a.range, a.gates, a.dry_run, mode="plan" if a.plan else "apply" if a.apply else None,
                        budget=a.budget_lines, out_dir=a.out, port_ref=a.port_ref, upstream=a.upstream,
-                       untaken_ok=a.untaken_ok, head_merge=a.head_merge)
+                       untaken_ok=a.untaken_ok, head_merge=a.head_merge, reuse_ab=a.reuse_ab)
     if a.cmd == "check-done":
         return check_done(a.repo, a.target, "fork-branches", base=a.base)
     ap.print_help()
@@ -5239,6 +5354,115 @@ def _check_ungated_rerun(expect):
                and not ungated(r) and "| 1.21.4 | up to date |" in out3,
                f"a re-run after a red stop gates the earlier merge, then says up to date: {first} {second} {calls} "
                f"{out2[-500:]} {out3[-300:]}")
+
+
+def _check_ab_reuse(expect):
+    """MMVU_ROUND_REUSE=1: the resync's records-only merge reuses the A/B green record of the tree (no gate run, one
+    "reused A/B" line); each precondition that fails runs the gates as before; with the flag off nothing is written."""
+    global kit_id
+    keep_kit, keep_env = kit_id, os.environ.get(REUSE_ENV)
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        frozen = pathlib.Path(d) / "frozen.json"
+        frozen.write_text('{"plan": 1}\n', encoding="utf-8")
+        calls = []
+        green = lambda w, t, gates, say=print: (calls.append(t), 0)[1]
+        rec_f = _ungated_path(r) / AB_GREEN_FILE
+        w4, _w = worktree_for(r, "1.21.4")
+        w5, _w = worktree_for(r, "1.21.5")
+        h5 = lambda: git(w5, "rev-parse", "HEAD").stdout.strip()
+
+        def resync(msg, edits=None, reuse=True):
+            _hand(w4, edits or {".port/1.21.4/COST.md": msg + "\n"}, msg)
+            calls[:] = []
+            rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "ab", runner=green, untaken_ok=frozen, reuse_ab=reuse)
+            return rc, out, list(calls)
+        try:
+            kit_id = lambda: "kit-a"
+            os.environ.pop(REUSE_ENV, None)
+            _authors(r, g, {"src/main/java/com/example/mod/Plain.java": ("int v = 1;", "int v = 2;")}, "authors: v = 2")
+            rc0, out0 = _quiet(cascade, r, "port..1.21.5", "ab", runner=green, untaken_ok=frozen)
+            rc, out, ran = resync("flag off", reuse=True)
+            expect(rc0 == 0 and calls == ["1.21.5"] and not rec_f.exists() and "reused A/B" not in out + out0
+                   and "A/B runs" not in out, f"flag off: the gates run, no record written, no reuse line: {ran} {out[-300:]}")
+            os.environ[REUSE_ENV] = "1"
+            rc, out, ran = resync("first green, recorded")
+            rec = json.loads(rec_f.read_text(encoding="utf-8")).get("1.21.5", {})
+            expect(rc == 0 and ran == ["1.21.5"] and rec.get("commit") == h5() and rec.get("exit") == 0
+                   and "A/B runs: no A/B green record for 1.21.5" in out,
+                   f"no record yet: the gates run, and the green run is recorded: {ran} {rec} {out[-300:]}")
+            green_at = h5()
+            rc, out, ran = resync("records only")
+            expect(rc == 0 and ran == [] and f"reused A/B from {AB_GREEN_FILE} (green at {green_at[:12]}" in out
+                   and not ungated(r) and json.loads(rec_f.read_text(encoding="utf-8"))["1.21.5"]["commit"] == green_at
+                   and "| 1.21.5 | merged, gates exit 0 |" in out,
+                   f"THE MEASURED CASE: a records-only resync merge on a recorded green tree reuses it: {ran} {out[-400:]}")
+            rc, out, ran = resync("mergeup: never reused", reuse=False)
+            expect(ran == ["1.21.5"] and "reused" not in out, f"the merge-up (no --reuse-ab) always runs: {ran}")
+            _hand(w4, {".port/1.21.4/COST.md": "full\n"}, "full")
+            calls[:] = []
+            _quiet(cascade, r, "1.21.4..1.21.5", "full", runner=green, untaken_ok=frozen, reuse_ab=True)
+            expect(calls == ["1.21.5"], f"--gates full (Gate C) is never reused: {calls}")
+            rc, out, ran = resync("code", {"src/main/java/com/example/mod/Plain.java": ("int v = 2;", "int v = 3;")})
+            expect(ran == ["1.21.5"] and "file(s) the gates read changed" in out, f"a code change merged: the gates run: {ran} {out[-300:]}")
+            rc, out, ran = resync("ci", {".github/workflows/other.yml": "on: push\n"})
+            expect(ran == ["1.21.5"] and ".github/workflows/other.yml" in out, f".github/ changed: the gates run: {ran} {out[-300:]}")
+            kit_id = lambda: "kit-b"
+            rc, out, ran = resync("another kit")
+            expect(ran == ["1.21.5"] and "differ from the record's" in out, f"another migrator kit: the gates run: {ran}")
+            frozen.write_text('{"plan": 2}\n', encoding="utf-8")
+            rc, out, ran = resync("another frozen input")
+            expect(ran == ["1.21.5"] and "differ from the record's" in out, f"another frozen input: the gates run: {ran}")
+            os.environ["JAVA_HOME"], keep_jh = "/elsewhere", os.environ.get("JAVA_HOME")
+            try:
+                rc, out, ran = resync("another JAVA_HOME")
+            finally:
+                os.environ.pop("JAVA_HOME") if keep_jh is None else os.environ.__setitem__("JAVA_HOME", keep_jh)
+            expect(ran == ["1.21.5"] and "differ from the record's" in out, f"another environment: the gates run: {ran}")
+            # the direct checks: what is "records only" for 1.21.5, the record's exit, its ancestry, the merge's change
+            rc, out, ran = resync("recorded again")
+            expect(ran == ["1.21.5"], f"re-recorded under the restored environment: {ran}")
+            at = h5()
+            ok_ = lambda **k: ab_reusable(r, w5, "1.21.5", frozen, **k)[0]
+            expect(ok_() == at and ok_(ok=(0, 18)) == at, "the record stands for its own commit")
+            for p_, txt, why in ((".port/1.21.5/logs-known-absent.txt", "x.log\n", "an input of .port/1.21.5/"),
+                                 (".port/1.21.5/GATES-RED.md", "red\n", "GATES-RED.md decides the exit"),
+                                 (".port/branch.gradle", "// x\n", "the build script"),
+                                 ("src/main/resources/x.json", "{}\n", "a resource")):
+                _hand(w5, {p_: txt}, why)
+                expect(ok_() is None, f"{p_} changed since the record ({why}): no reuse")
+                git(w5, "reset", "-q", "--hard", at, check=True)
+            _hand(w5, {".port/1.21.5/COST.md": "c\n", ".port/1.21.3/X.md": "x\n", "NOTES.md": "n\n"}, "records")
+            expect(ok_() == at, "its own run outputs, another version's records and a document: still reused")
+            git(w5, "reset", "-q", "--hard", at, check=True)
+            data = json.loads(rec_f.read_text(encoding="utf-8"))
+            rec_f.write_text(json.dumps(dict(data, **{"1.21.5": dict(data["1.21.5"], exit=17)})), encoding="utf-8")
+            expect(ok_() == at and ok_(ok=(0, 18)) is None, "an exit-17 record: the resync takes it, t_gates (0, 18) does not")
+            twin = git(w5, "commit-tree", f"{at}^{{tree}}", "-p", f"{at}~1", "-m", "same tree, off the branch").stdout.strip()
+            rec_f.write_text(json.dumps(dict(data, **{"1.21.5": dict(data["1.21.5"], commit=twin)})), encoding="utf-8")
+            expect(twin and ok_() is None, "a record whose commit (the same tree) is not an ancestor of HEAD: no reuse")
+            rec_f.write_text(json.dumps(data), encoding="utf-8")
+            expect(ok_(merged_from=green_at) is None and ok_(merged_from=at) == at,
+                   "a merge whose own change is code (from a commit before it): no reuse")
+            # the authors' branch the drift check fetches: fetched first, its tip part of the key
+            git(r, "remote", "add", "authors", str(r), check=True)
+            bp = w5 / ".port/1.21.5/branch.properties"
+            _hand(w5, {".port/1.21.5/branch.properties": bp.read_text(encoding="utf-8") + "upstream=authors/neoforge-1.21.1\n"},
+                  "upstream")
+            git(r, "fetch", "-q", "authors", check=True)
+            note_ab_green(r, w5, "1.21.5", frozen, 0)
+            expect(ok_() == h5(), "an authors' branch at the recorded tip: reused")
+            _authors(r, g, {"src/main/java/com/example/mod/Plain.java": ("int v = 2;", "int v = 9;")}, "authors move")
+            expect(ok_() is None, "the authors' branch moved since the record (fetched first): no reuse")
+            note_ab_green(r, w5, "1.21.5", frozen, 0)
+            git(r, "remote", "set-url", "authors", str(pathlib.Path(d) / "gone"), check=True)
+            expect(ok_() is None and "cannot fetch" in ab_reusable(r, w5, "1.21.5", frozen)[1],
+                   "the authors' branch cannot be fetched: no reuse")
+            os.environ.pop(REUSE_ENV)
+            expect(ok_() is None, "flag off: never reused")
+        finally:
+            kit_id = keep_kit
+            os.environ.pop(REUSE_ENV, None) if keep_env is None else os.environ.__setitem__(REUSE_ENV, keep_env)
 
 
 def _check_check_done_rows(expect):
@@ -7385,6 +7609,7 @@ def self_check():
         _check_untaken_head(expect)
         _check_prerelease_pin(expect)
         _check_ungated_rerun(expect)
+        _check_ab_reuse(expect)
         _check_check_done_rows(expect)
         _check_ci_check(expect)
         _check_change_reviews(expect)
