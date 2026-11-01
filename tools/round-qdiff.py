@@ -18,8 +18,13 @@ THROWAWAY CLONES and a throwaway state directory:
   - each fork's throwaway clone is a fresh repository under a temporary directory that borrows the clone's objects
     (objects/info/alternates) and copies its local branches, origin's remote-tracking branches and tags (a local
     fetch: no object is written to the clone, no ref of it moves, its checkout is untouched); HEAD names the clone's
-    current branch; remote.origin.url is the clone's own (init checks it), and every github.com URL is rewritten to a
-    path that does not exist, so a fetch or push in the throwaway clone fails at once instead of reaching GitHub;
+    current branch; remote.origin.url is the clone's own (init checks it), every github.com URL (https, ssh, git) is
+    rewritten to a path that does not exist and every transport but file:// is refused (protocol.allow never), so a
+    fetch or push in the throwaway clone -- a token URL too -- fails at once instead of reaching the network;
+  - a shallow or single-branch clone is warned about (the real init fetches origin's neoforge-* first; here it is
+    read as it is), and the throwaway clone has an empty working tree, so init's layer refusal sees only what git
+    holds (fork-kind.py stray_files reads HEAD's tree; is_layer's working-tree .multiversion/ check finds nothing):
+    a fork with the removed layer checked out is refused by the real init, not by this diff;
   - init's one network step, fetch_version_branches (round-preflight.py make_whole: ls-remote and a fetch of origin's
     neoforge-* when the clone lacks one), is replaced by "the clone is whole" (the throwaway clone has every branch
     the clone has), and migrator_file (the B1 reader check's fetch of a pinned migrator commit) reads only what this
@@ -57,9 +62,16 @@ def rmtree(p):
     shutil.rmtree(p, onerror=onerror)
 
 
-def throwaway_clone(src, dest):
+def throwaway_clone(src, dest, say=None):
     """A clone of `src` that shares its objects and copies its refs; nothing in `src` is written."""
     src = pathlib.Path(src).resolve()
+    if say and git(src, "rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+        say(f"round-qdiff: WARNING {src.as_posix()} is shallow: init reads the clone as it is (the real init would "
+            "fetch origin's neoforge-* branches whole first), so its queue may differ from a real round's")
+    if say and not any("*" in x for x in git(src, "config", "--get-all", "remote.origin.fetch").stdout.split()):
+        say(f"round-qdiff: WARNING {src.as_posix()} is a single-branch clone: origin's other neoforge-* branches it "
+            "lacks are not fetched here (round-preflight.py make_whole would), so a version-branch fork may read as "
+            "single-version")
     common = git(src, "rev-parse", "--path-format=absolute", "--git-common-dir", check=True).stdout.strip()
     dest.mkdir(parents=True)
     git(dest, "init", "-q", check=True)
@@ -72,9 +84,11 @@ def throwaway_clone(src, dest):
     url = git(src, "config", "--get", "remote.origin.url").stdout.strip()
     for k, v in (("remote.origin.url", url), ("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
                  ("core.autocrlf", "false"), ("gc.auto", "0"), ("maintenance.auto", "false"),
+                 ("protocol.allow", "never"), ("protocol.file.allow", "always"),
                  ("url.file:///round-qdiff-no-network/.insteadOf", "https://github.com/")):
         git(dest, "config", k, v, check=True)
-    git(dest, "config", "--add", "url.file:///round-qdiff-no-network/.insteadOf", "git@github.com:")
+    for prefix in ("git@github.com:", "ssh://git@github.com/", "git://github.com/"):
+        git(dest, "config", "--add", "url.file:///round-qdiff-no-network/.insteadOf", prefix)
     branch = git(src, "symbolic-ref", "-q", "HEAD").stdout.strip()
     if branch:
         git(dest, "symbolic-ref", "HEAD", branch, check=True)
@@ -132,7 +146,7 @@ def build(round_py, frozen, forks, work, config=None, through=(), date=None, sin
     work.mkdir(parents=True)
     args = ["init", "--frozen", str(pathlib.Path(frozen).resolve()), "--round-dir", str(work / "rd"), "--force"]
     for slug, d in forks.items():
-        c = throwaway_clone(d, work / "clones" / slug.replace("/", "__"))
+        c = throwaway_clone(d, work / "clones" / slug.replace("/", "__"), say=lambda m: print(m, file=sys.stderr))
         args += ["--fork", f"{slug}={c}"]
     if config:
         args += ["--config", str(pathlib.Path(config).resolve())]
@@ -334,6 +348,18 @@ def self_check():
             run(ns(tmp / "A/tools/round.py", tmp / "B/tools/round.py"))
         expect("~ examplemod@1.21.5:reviewref\n    -dep examplemod@1.21.4:recheck" in buf.getvalue(),
                f"the text report names the item and its removed dep: {buf.getvalue()}")
+        tc = throwaway_clone(d, tmp / "tc")
+        r1 = git(tc, "ls-remote", "https://x-access-token:t@github.com/owner/examplemod.git")
+        r2 = git(tc, "ls-remote", "origin")
+        r3 = git(tc, "ls-remote", "https://example.com/other.git")
+        expect(r1.returncode and r2.returncode and r3.returncode and "not allowed" in (r3.stderr + r1.stderr),
+               f"the throwaway clone reaches no network (a token URL, origin, another host): {r1.stderr} {r2.stderr} {r3.stderr}")
+        warned = []
+        shallow = tmp / "shallow"
+        git(tmp, "clone", "-q", "--depth", "1", "--single-branch", bare.as_uri(), str(shallow), check=True)
+        throwaway_clone(shallow, tmp / "tc2", say=warned.append)
+        expect(any("shallow" in w_ for w_ in warned) and any("single-branch" in w_ for w_ in warned),
+               f"a shallow single-branch clone is warned about: {warned}")
         after = (git(d, "for-each-ref").stdout, git(d, "config", "--list", "--local").stdout, git(d, "status", "--porcelain").stdout)
         expect(after == before, "the fork clone is untouched (refs, config, checkout)")
         # the diff itself: every kind of change named
