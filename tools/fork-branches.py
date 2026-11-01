@@ -3029,9 +3029,12 @@ def kit_id():
 
 
 def ab_key(repo, t, untaken_ok):
-    """What an A/B verdict depends on besides the tree: the gate command (fork-port.py --from-stage measure --gates ab,
-    no budget), the round's frozen input by its bytes, the authors' branch tip the drift check reads, the migrator kit
-    and the environment the gates build with. -> a digest, or None when one of them cannot be read."""
+    """What an A/B verdict depends on besides the tree: the round's frozen input by its bytes, the authors' branch tip
+    the drift check reads, the migrator kit (its committed tree: the gate command's code and the one argument list both
+    callers pass) and the environment the gates build with. -> a digest, or None when one of them cannot be read."""
+    # Not covered, and constant within one round (the only span a record is reused across): the parent version's
+    # build/mc<pv> harness logs lost_logs compares with, a parent's STUBS.json review inheritance, the Java found through
+    # PATH, the contents of MMVU_SHARED_DIR (its path is in the key) and the migrator's untracked files.
     kit = kit_id()
     if not kit:
         return None
@@ -3041,7 +3044,7 @@ def ab_key(repo, t, untaken_ok):
         return None
     up = upstream_of(repo, t)
     tip = git(repo, "rev-parse", "--verify", "--quiet", f"{up}^{{commit}}").stdout.strip() if up else ""
-    k = {"cmd": "measure ab budget0 maxerrors0", "frozen": frozen, "upstream": tip, "kit": kit,
+    k = {"frozen": frozen, "upstream": tip, "kit": kit,
          "env": {e: os.environ.get(e, "") for e in AB_ENV_KEYS}}
     return hashlib.sha256(json.dumps(k, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -3065,6 +3068,18 @@ def note_ab_green(repo, work, t, untaken_ok, rc):
     f.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def drop_ab_green(repo, t):
+    """After a red gate run at version t: its A/B green record removed, so a retry never reuses the older green."""
+    f = _ungated_path(repo) / AB_GREEN_FILE
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(data, dict) and t in data:
+        data.pop(t)
+        f.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def records_only(path, t):
     """Can a change to `path` not change version t's A/B verdict? A file jar_relevant does not count, outside .github/
     (a CI change always runs CI) and outside .port/<t>/ but for that version's own run outputs (its other files --
@@ -3074,11 +3089,11 @@ def records_only(path, t):
         (not path.startswith(f"{REC}/{t}/") or run_output(path, t) and path.rsplit("/", 1)[-1] not in ("GATES.md", "GATES-RED.md"))
 
 
-def ab_reusable(repo, work, t, untaken_ok, merged_from=None, ok=(0, 17, UNDONE_EXIT)):
-    """(commit, None) when version t's A/B green record still stands for `work`'s HEAD, else (None, why): MMVU_ROUND_REUSE=1;
-    a record for t whose exit the caller accepts (ok) with the same ab_key, the authors' branch fetched first (the gate
-    run's drift check fetches it); its commit an ancestor of HEAD with only records_only files changed since; and, with
-    merged_from (the branch before a merge), that merge's own change records-only too."""
+def ab_reusable(repo, work, t, untaken_ok, ok=(0, 17, UNDONE_EXIT)):
+    """(record, None) when version t's A/B green record ({"commit", "key", "exit"}) still stands for `work`'s HEAD, else
+    (None, why): MMVU_ROUND_REUSE=1; a record for t whose exit the caller accepts (ok) with the same ab_key, the authors'
+    branch fetched first (the gate run's drift check fetches it); its commit an ancestor of HEAD with only records_only
+    files changed since (a merge since included)."""
     if not reuse_on():
         return None, f"{REUSE_ENV} is not 1"
     try:
@@ -3098,16 +3113,13 @@ def ab_reusable(repo, work, t, untaken_ok, merged_from=None, ok=(0, 17, UNDONE_E
     h = git(work, "rev-parse", "HEAD").stdout.strip()
     if not h or git(repo, "merge-base", "--is-ancestor", rec["commit"], h).returncode:
         return None, f"the record's commit {rec['commit'][:12]} is not an ancestor of HEAD"
-    for base, what in ((rec["commit"], "since the record"), (merged_from, "in the merge")):
-        if not base:
-            continue
-        d = git(repo, "diff", "--name-only", base, h)
-        if d.returncode:
-            return None, f"cannot compare with {base[:12]}"
-        bad = [f for f in d.stdout.splitlines() if f and not records_only(f, t)]
-        if bad:
-            return None, f"{len(bad)} file(s) the gates read changed {what}, e.g. {bad[0]}"
-    return rec["commit"], None
+    d = git(repo, "diff", "--name-only", rec["commit"], h)
+    if d.returncode:
+        return None, f"cannot compare with {rec['commit'][:12]}"
+    bad = [f for f in d.stdout.splitlines() if f and not records_only(f, t)]
+    if bad:
+        return None, f"{len(bad)} file(s) the gates read changed since the record, e.g. {bad[0]}"
+    return rec, None
 
 
 def cascade_nodes(repo, spec):
@@ -3237,6 +3249,7 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
             say(f"fork-branches: cascade: {t}: {what}: gating it now")
             rc = runner(work, t, gates, say)          # the record stays until this run is green
             if rc not in (0, 17, UNDONE_EXIT):
+                drop_ab_green(repo, t)
                 rows.append((t, f"merged earlier, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
                 say(f"fork-branches: cascade STOPPED at {t}: still red -- start ONE fixer there (python3 tools/fork-port.py "
                     f"--repo {work} --target {t} --from-stage measure, with a budget), commit, then cascade {t}..{to}")
@@ -3299,11 +3312,13 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
                          "merged; its gates did not finish (killed, timed out, or still running)")
         reused = None
         if reuse_ab and gates == "ab" and mode is None and reuse_on():
-            reused, why = ab_reusable(repo, work, t, untaken_ok, merged_from=tref)
-            say(f"fork-branches: cascade: {t}: reused A/B from {AB_GREEN_FILE} (green at {reused[:12]}; the merge and "
-                f"everything since are records only)" if reused else f"fork-branches: cascade: {t}: A/B runs: {why}")
-        rc = 0 if reused else runner(work, t, gates, say) if mode != "plan-run" else 0
+            reused, why = ab_reusable(repo, work, t, untaken_ok)
+            say(f"fork-branches: cascade: {t}: reused A/B from {AB_GREEN_FILE} (green at {reused['commit'][:12]}, exit "
+                f"{reused['exit']}; the merge and everything since are records only)" if reused
+                else f"fork-branches: cascade: {t}: A/B runs: {why}")
+        rc = reused["exit"] if reused else runner(work, t, gates, say) if mode != "plan-run" else 0
         if rc not in (0, 17, UNDONE_EXIT):
+            drop_ab_green(repo, t)
             rows.append((t, f"merged, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
             mark_ungated(repo, t, git(work, "rev-parse", "HEAD").stdout.strip(), f"red after the merge, fork-port exit {rc}")
             say(f"fork-branches: cascade STOPPED at {t}: red after the merge -- start ONE fixer there (python3 tools/fork-port.py "
@@ -5397,6 +5412,30 @@ def _check_ab_reuse(expect):
                    and not ungated(r) and json.loads(rec_f.read_text(encoding="utf-8"))["1.21.5"]["commit"] == green_at
                    and "| 1.21.5 | merged, gates exit 0 |" in out,
                    f"THE MEASURED CASE: a records-only resync merge on a recorded green tree reuses it: {ran} {out[-400:]}")
+            # the reused run's own exit is what the cascade reports (an 18: green, the done list open)
+            d18 = json.loads(rec_f.read_text(encoding="utf-8"))
+            d18["1.21.5"]["exit"] = 18
+            rec_f.write_text(json.dumps(d18), encoding="utf-8")
+            rc, out, ran = resync("records only, exit 18")
+            expect(ran == [] and "| 1.21.5 | merged, gates exit 18 |" in out and "exit 18;" in out,
+                   f"a reused record reports its own exit: {out[-300:]}")
+            # a red run drops the record: the retry after it (records only since the old green) runs the gates
+            red = lambda w, t, gates, say=print: (calls.append(t), 12)[1]
+            _hand(w4, {".port/1.21.4/COST.md": "red\n"}, "red run")
+            calls[:] = []
+            rc_r, out_r = _quiet(cascade, r, "1.21.4..1.21.5", "ab", runner=red, untaken_ok=frozen, reuse_ab=False)
+            gone = "1.21.5" not in json.loads(rec_f.read_text(encoding="utf-8"))
+            _hand(w4, {".port/1.21.4/COST.md": "retry\n"}, "records only again")
+            calls[:] = []
+            rc2, out2 = _quiet(cascade, r, "1.21.4..1.21.5", "ab", runner=green, untaken_ok=frozen, reuse_ab=True)
+            expect(rc_r == 1 and gone and calls == ["1.21.5"] and "reused" not in out2,
+                   f"a red run drops the version's record; the retry runs the gates: {gone} {calls} {out2[-300:]}")
+            mark_ungated(r, "1.21.5", h5(), "an earlier merge left ungated")
+            _quiet(cascade, r, "1.21.4..1.21.5", "ab", runner=red, untaken_ok=frozen)
+            expect("1.21.5" not in json.loads(rec_f.read_text(encoding="utf-8")),
+                   "an earlier merge gated now and red: the record is dropped too")
+            mark_ungated(r, "1.21.5")
+            rc, out, ran = resync("green again after the red")
             rc, out, ran = resync("mergeup: never reused", reuse=False)
             expect(ran == ["1.21.5"] and "reused" not in out, f"the merge-up (no --reuse-ab) always runs: {ran}")
             _hand(w4, {".port/1.21.4/COST.md": "full\n"}, "full")
@@ -5423,7 +5462,7 @@ def _check_ab_reuse(expect):
             rc, out, ran = resync("recorded again")
             expect(ran == ["1.21.5"], f"re-recorded under the restored environment: {ran}")
             at = h5()
-            ok_ = lambda **k: ab_reusable(r, w5, "1.21.5", frozen, **k)[0]
+            ok_ = lambda **k: (ab_reusable(r, w5, "1.21.5", frozen, **k)[0] or {}).get("commit")
             expect(ok_() == at and ok_(ok=(0, 18)) == at, "the record stands for its own commit")
             for p_, txt, why in ((".port/1.21.5/logs-known-absent.txt", "x.log\n", "an input of .port/1.21.5/"),
                                  (".port/1.21.5/GATES-RED.md", "red\n", "GATES-RED.md decides the exit"),
@@ -5442,8 +5481,6 @@ def _check_ab_reuse(expect):
             rec_f.write_text(json.dumps(dict(data, **{"1.21.5": dict(data["1.21.5"], commit=twin)})), encoding="utf-8")
             expect(twin and ok_() is None, "a record whose commit (the same tree) is not an ancestor of HEAD: no reuse")
             rec_f.write_text(json.dumps(data), encoding="utf-8")
-            expect(ok_(merged_from=green_at) is None and ok_(merged_from=at) == at,
-                   "a merge whose own change is code (from a commit before it): no reuse")
             # the authors' branch the drift check fetches: fetched first, its tip part of the key
             git(r, "remote", "add", "authors", str(r), check=True)
             bp = w5 / ".port/1.21.5/branch.properties"
@@ -5458,6 +5495,9 @@ def _check_ab_reuse(expect):
             git(r, "remote", "set-url", "authors", str(pathlib.Path(d) / "gone"), check=True)
             expect(ok_() is None and "cannot fetch" in ab_reusable(r, w5, "1.21.5", frozen)[1],
                    "the authors' branch cannot be fetched: no reuse")
+            git(r, "remote", "set-url", "authors", str(r), check=True)
+            note_ab_green(r, w5, "1.21.5", frozen, 0)
+            expect(ok_() == h5(), "fetchable again: reused")
             os.environ.pop(REUSE_ENV)
             expect(ok_() is None, "flag off: never reused")
         finally:

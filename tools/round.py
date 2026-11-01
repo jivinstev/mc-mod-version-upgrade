@@ -2523,12 +2523,17 @@ def t_gates(st, it, log):
             if why:
                 say_to(log)(f"round: gates: A/B runs: {why}")
             if reused:
-                say_to(log)(f"round: gates: reused A/B from {fb.AB_GREEN_FILE} (green at {reused[:12]}; records only since)")
+                say_to(log)(f"round: gates: reused A/B from {fb.AB_GREEN_FILE} (green at {reused['commit'][:12]}, exit "
+                            f"{reused['exit']}; records only since)")
             else:
-                r_ = sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"], gates="ab"), log, ok=(0, 18))
+                try:
+                    r_ = sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"], gates="ab"), log, ok=(0, 18))
+                except StepError:
+                    fb.drop_ab_green(F["dir"], v)        # red: a retry never reuses an older green
+                    raise
                 fb.note_ab_green(F["dir"], d, v, st.data["frozen"], r_.returncode)
             c = commit_paths(d, [f".port/{v}"], f"Gate records for {v} (keep-current round)")
-            return ("build and Gate A/B green" + (f" (reused from {reused[:12]})" if reused else "")
+            return ("build and Gate A/B green" + (f" (reused from {reused['commit'][:12]})" if reused else "")
                     + "; Gate C is the PR's CI (the gate of record)"
                     + (f", records {pre[:12]} before" if pre else "") + (f", records {c[:12]}" if c else "")), {
                 "gated_head": gated, "gated_at": at, "head_after": head(d), "ci_record": True}
@@ -3309,8 +3314,13 @@ def push_run_needed(st, it):
     if not it["result"].get("from_run"):
         return True
     d, mg = st.fork(it["fork"])["dir"], seg_item(st, it, "merge")["result"]
-    changed = git(d, "diff", "--name-only", f"{mg['merge_sha']}^1", mg["merge_sha"]).stdout.splitlines()
-    return any(f.startswith(".github/") for f in changed)
+    return bool(github_changed(d, mg["merge_sha"]))         # git unable to tell: not awaited, as before
+
+
+def github_changed(d, sha):
+    """Did merge commit `sha` change anything under .github/ against its first parent? None when git cannot tell."""
+    r = git(d, "diff", "--name-only", f"{sha}^1", sha)
+    return None if r.returncode else any(f.startswith(".github/") for f in r.stdout.splitlines())
 
 
 def head_push_redundant(st, it, sha):
@@ -3320,9 +3330,7 @@ def head_push_redundant(st, it, sha):
     rid = reuse_run(st, it, sha)
     if not rid:
         return None
-    d = st.fork(it["fork"])["dir"]
-    r = git(d, "diff", "--name-only", f"{sha}^1", sha)
-    if r.returncode or any(f.startswith(".github/") for f in r.stdout.splitlines()):
+    if github_changed(st.fork(it["fork"])["dir"], sha) is not False:
         return None
     return f"the release reuses PR run {rid}, whose tree the merge is, and .github/ is unchanged"
 
@@ -4124,7 +4132,7 @@ def parse_summary(text):
     res = {"status": m.group(1).lower() if m else None, "blocking": [], "fixed": [], "commits": [], "lowest": []}
     for ln in lines[1:]:
         ln = ln.strip()
-        if (ln and ln != SUMMARY_END and not res.get("why") and not re.match(r"^(not_ok|fixed|commit|lowest|finding|disproved|regrade):", ln)
+        if (ln and not (ln == SUMMARY_END and mod("fb").reuse_on()) and not res.get("why") and not re.match(r"^(not_ok|fixed|commit|lowest|finding|disproved|regrade):", ln)
                 and not re.match(r"^blocking:\s*\S+\s+S[12]\b", ln)):
             # the first line that says why (a `blocking:` line not in the <ID> <S1|S2> form included): the note of a
             # blocked or failed job, so its BLOCKED line says what (measured, weekly round 2026-10-30: a re-pin job
@@ -6245,6 +6253,10 @@ def self_check():
                        "no end marker (an old prompt): the second look and the settle wait, as before")
                 expect(look(done_, False, 2) == [0, 0], "flag off: the end marker changes nothing (settle wait)")
                 expect(look(f"{SUMMARY_END}\n", True) == [0], "an end marker with no RESULT line: not recorded")
+                os.environ.pop(mod("fb").REUSE_ENV, None)
+                expect(parse_summary(f"RESULT: blocked\n{SUMMARY_END}\n").get("why") == SUMMARY_END,
+                       "flag off: parse_summary reads the marker line as today (the reason line)")
+                os.environ[mod("fb").REUSE_ENV] = "1"
                 expect(SUMMARY_END in summary_rule("S.md") and summary_rule("S.md").startswith(SUMMARY_FORMAT.format(summary="S.md")),
                        "flag on: the job asks for the end marker")
                 os.environ.pop(mod("fb").REUSE_ENV, None)
@@ -7543,7 +7555,24 @@ def self_check():
                            f"THE MEASURED CASE: t_gates on a ci_record version, the tree A/B-green: not run again: {nab}")
                     nab, rab, kab = gates_(_St10)
                     expect(kab == 1 and "reused" not in nab, f"a library with a dependent gate (it takes this run's jar): runs: {nab}")
-                    commit(nc_, "src/main/java/A.java", "class A { int b; }\n", "code")
+                    # a red A/B run drops the record: the retry (records only since the old green) runs again
+                    commit(nc_, "src/main/java/A.java", "class A { int red; }\n", "code that goes red")
+                    sh_ok = G["sh"]
+                    G["sh"] = lambda *a_, **k_: (_ for _ in ()).throw(StepError("fork-port.py exit 12"))
+                    try:
+                        gates_(_StAB)
+                        expect(False, "a red A/B run raises")
+                    except StepError:
+                        pass
+                    finally:
+                        G["sh"] = sh_ok
+                    expect("1.21.10" not in json.loads(rec_f_.read_text(encoding="utf-8")),
+                           "a red A/B run in t_gates drops the version's record")
+                    git(nc_, "rm", "-q", "src/main/java/A.java", check=True)
+                    git(nc_, "commit", "-qm", "the code as it was green", check=True)
+                    nab, rab, kab = gates_(_StAB)
+                    expect(kab == 1 and "reused" not in nab, f"after a red run the retry runs: {nab}")
+                    commit(nc_, "src/main/java/A.java", "class A { int c; }\n", "code")
                     nab, rab, kab = gates_(_StAB)
                     expect(kab == 1 and "reused" not in nab, f"code changed since the record: runs: {nab}")
                     d_ = json.loads(rec_f_.read_text(encoding="utf-8"))
