@@ -1458,8 +1458,12 @@ def render(rep):
 
 # ---------------------------------------------------------------- self-check (local bare repos, a stand-in GitHub)
 
-def self_check():
+def self_check(cases_arg=None):
+    """cases_arg "i/n": the base case and every n-th mutation case from the i-th (round-robin), the checks that are no
+    case (unit checks, the single-version fixtures, refs_as_of, the clones untouched) in slice 1 only: CI runs the
+    slices as parallel jobs, every case in one of them."""
     t0 = time.monotonic()
+    sl_i, sl_n = (int(x) for x in cases_arg.split("/")) if cases_arg else (1, 1)
     global API, RAW
     ok = True
     keep_env = {k: os.environ.get(k) for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
@@ -1634,12 +1638,29 @@ def self_check():
             ("I5", (LIB, "1.21.4"), "the set's weekly-plan.json is unreadable", lambda f: f.bad_config(), UNKNOWN,
              "cannot be read"),
         ]
+        all_cases = len(cases)
+        cases = [c for j, c in enumerate(cases) if j % sl_n == sl_i - 1]
+        if os.environ.get("ROUND_AUDIT_LIST_CASES"):
+            for k, (f_, v_), what, _m, want_s, why in cases:
+                print(f"case {k} {f_} {v_} {want_s} {why!r}: {what}")
         seen = set()
+        # each distinct build (BUILD_OPTS) is made once and copied for every case: the base fixture is the template
+        # of the cases that change no build option; the others' templates are built on first use
+        templates = {(): fx}
+        prints = {}
         for k, (f_, v_), what, mut, want_s, why in cases:
             name = re.sub(r"\W+", "-", what)[:40]
             assert name not in seen
             seen.add(name)
-            fm = Fixture(tmp / f"m-{k}-{name}", mutate=mut)
+            opts = getattr(mut, "opts", {})
+            key = tuple(sorted((o_, str(opts[o_])) for o_ in Fixture.BUILD_OPTS if o_ in opts))
+            if key not in templates:
+                templates[key] = Fixture(tmp / f"t-{len(templates)}", mutate=pre(**{o_: opts[o_] for o_ in
+                                                                                   Fixture.BUILD_OPTS if o_ in opts}))
+            tpl = templates[key]
+            prints.setdefault(key, tpl.fingerprint())
+            fm = Fixture(tmp / f"m-{k}-{name}", mutate=mut, template=tpl)
+            expect(tpl.fingerprint() == prints[key], f"case {k} ({what}) changed its shared template fixture")
             API, RAW = fm.api, fm.raw
             rep, rc = fm.run(state=getattr(fm, "state_path", None))
             c = row(rep, f_, v_)["checks"][k]
@@ -1648,6 +1669,8 @@ def self_check():
                 print(f"mutation {k} ({what}): {s_}: {ev_[:300]}")
             expect(s_ == want_s and why in ev_ and rc == (1 if want_s in BAD else rc) and "could not be checked" not in ev_,
                    f"mutation {k} ({what}): {f_} {v_} {k} = {s_} (want {want_s} saying {why!r}), rc {rc}: {ev_[:600]}")
+        if sl_i != 1:
+            return finish_check(ok, t0, f"slice {sl_i}/{sl_n}: the base and {len(cases)} of {all_cases} case(s)")
         # ---- a single-version fork: only its head; I4 N-A, I1/I3 judged on its one branch
         fs = SingleFixture(tmp / "sv")
         API, RAW = fs.api, fs.raw
@@ -1685,7 +1708,12 @@ def self_check():
         for k, v in keep_env.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
         rmtree(tmp)
-    print(f"round-audit self-check: {'OK' if ok else 'FAILED'} ({time.monotonic() - t0:.1f} s)")
+    return finish_check(ok, t0, f"slice 1/{sl_n}: the base and {len(cases)} of {all_cases} case(s)" if sl_n > 1 else "")
+
+
+def finish_check(ok, t0, what):
+    print(f"round-audit self-check: {'OK' if ok else 'FAILED'}" + (f" ({what})" if what else "")
+          + f" ({time.monotonic() - t0:.1f} s)")
     return 0 if ok else 1
 
 
@@ -1742,22 +1770,31 @@ class Fixture:
     LIB, DEP = "owner/examplelib", "owner/examplemod"
     WF = 'jobs:\n  gates:\n    steps:\n      - run: python3 ci-gates.py --repo . --gatec "launch,spawn"\n'
 
-    def __init__(self, tmp, mutate=None):
-        self.tmp = pathlib.Path(tmp)
-        self.tmp.mkdir(parents=True, exist_ok=True)
-        self.run_conclusion, self.job_skip, self.step_fail, self.run_pr = {}, set(), set(), {}
-        self.rel_body, self.assets, self.no_assets = {}, {}, set()
-        self.activity, self.pulls, self.runs, self.releases = {}, {self.LIB: [], self.DEP: []}, {}, {self.LIB: [], self.DEP: []}
-        self.pr_commits, self.comments = {}, []
+    BUILD_OPTS = ("wf", "head_body", "late_head")     # the options build() reads: a different world, built once each
+
+    def __init__(self, tmp, mutate=None, template=None):
+        """A fixture world in `tmp`: built (git commands, slow on Windows), or -- `template` given, a fixture built with
+        the same BUILD_OPTS -- copied from it (files and the stand-in GitHub's records), then `mutate` applied to the
+        copy only."""
         o = getattr(mutate, "opts", {}) if mutate else {}
-        self.opts = o
-        self.wf = o.get("wf", self.WF)
-        self.head_body = o.get("head_body", (
-            "keep-current round\n\n### backlog\n\nRESULT: ok\ncommit: {FIX}\n\n### review\n\nRESULT: ok\nnot_ok: 1\n\n"
-            "| file | ok/not-ok | note |\n|---|---|---|\n| src/main/java/com/example/mod/Main.java | not-ok | the comment |\n\n"
-            "### fix\n\nRESULT: ok\n\n### recheck\n\nRESULT: ok\nnot_ok: 0\n\n"
-            "| file | ok/not-ok | note |\n|---|---|---|\n| src/main/java/com/example/mod/Main.java | ok | fixed |\n"))
-        self.build()
+        if template is not None:
+            self.copy_from(template, tmp)
+            self.opts = o
+        else:
+            self.tmp = pathlib.Path(tmp)
+            self.tmp.mkdir(parents=True, exist_ok=True)
+            self.run_conclusion, self.job_skip, self.step_fail, self.run_pr = {}, set(), set(), {}
+            self.rel_body, self.assets, self.no_assets = {}, {}, set()
+            self.activity, self.pulls, self.runs, self.releases = {}, {self.LIB: [], self.DEP: []}, {}, {self.LIB: [], self.DEP: []}
+            self.pr_commits, self.comments = {}, []
+            self.opts = o
+            self.wf = o.get("wf", self.WF)
+            self.head_body = o.get("head_body", (
+                "keep-current round\n\n### backlog\n\nRESULT: ok\ncommit: {FIX}\n\n### review\n\nRESULT: ok\nnot_ok: 1\n\n"
+                "| file | ok/not-ok | note |\n|---|---|---|\n| src/main/java/com/example/mod/Main.java | not-ok | the comment |\n\n"
+                "### fix\n\nRESULT: ok\n\n### recheck\n\nRESULT: ok\nnot_ok: 0\n\n"
+                "| file | ok/not-ok | note |\n|---|---|---|\n| src/main/java/com/example/mod/Main.java | ok | fixed |\n"))
+            self.build()
         if o.get("pin_lies") or o.get("pin_ladder_lies"):
             pf = pinned()
             PIN["mod"] = LyingPin(pf.real if isinstance(pf, LyingPin) else pf, ladder=bool(o.get("pin_ladder_lies")))
@@ -1771,6 +1808,41 @@ class Fixture:
                 encoding="utf-8")
         if mutate:
             mutate(self)
+
+    def copy_from(self, t, tmp):
+        """This fixture as a copy of the built fixture t: its directory (clones and bare origins) copied, its records
+        deep-copied, every path re-rooted, and each clone's origin pointed at its own copy of the bare repository."""
+        import copy
+        tmp = pathlib.Path(tmp)
+        shutil.copytree(str(t.tmp), str(tmp), symlinks=True)
+        state = {k: v for k, v in t.__dict__.items() if k not in ("tmp", "lib", "dep", "before")}
+        self.__dict__.update(copy.deepcopy(state))
+        self.tmp, self.copied = tmp, True
+        self.lib, self.dep = tmp / t.lib.relative_to(t.tmp), tmp / t.dep.relative_to(t.tmp)
+        for d in sorted({self.lib, self.dep}):
+            url = pathlib.Path(out_of(d, "remote", "get-url", "origin"))
+            self.g(d, "remote", "set-url", "origin", (tmp / url.relative_to(t.tmp)).as_posix())
+        self.before = None
+
+    def fingerprint(self):
+        """A digest of this fixture's directory (every file, sorted) and its stand-in GitHub records: a case that
+        changed the shared base would change it."""
+        import hashlib
+        h = hashlib.sha256()
+        for p in sorted(self.tmp.rglob("*")):
+            if p.is_file():
+                h.update(p.relative_to(self.tmp).as_posix().encode("utf-8") + b"\0" + p.read_bytes() + b"\0")
+        def norm(x):
+            if isinstance(x, dict):
+                return sorted((repr(k), norm(v)) for k, v in x.items())
+            if isinstance(x, (list, tuple)):
+                return [norm(v) for v in x]
+            if isinstance(x, set):
+                return sorted(repr(v) for v in x)
+            return repr(x)
+        rec = {k: v for k, v in self.__dict__.items() if k not in ("tmp", "lib", "dep", "before", "finish")}
+        h.update(json.dumps(norm(rec)).encode("utf-8"))
+        return h.hexdigest()
 
     # -- git
     def g(self, d, *a):
@@ -1984,7 +2056,8 @@ class Fixture:
                 first = evs[0]["before"]
                 self.activity[(s, b)] = [{"id": 1, "before": ZERO, "after": first, "ref": f"refs/heads/{b}",
                                           "timestamp": at(-300), "activity_type": "branch_creation", "synthetic": True}] + evs
-        self.before = self.snapshot()
+        if not getattr(self, "copied", False):      # only the fixtures built here are compared with their snapshot
+            self.before = self.snapshot()
 
     def snapshot(self):
         return [(out_of(d, "for-each-ref", "--format=%(refname) %(objectname)"), out_of(d, "config", "--list", "--local"),
@@ -2389,9 +2462,12 @@ def main(argv=None):
     ap.add_argument("--pin", help=f"the migrator commit whose fork-branches.py the review and library checks are "
                                   f"cross-checked with (default {PINNED_MIGRATOR[:12]})")
     ap.add_argument("--self-check", action="store_true")
+    ap.add_argument("--cases", help="with --self-check: I/N runs the base case and the I-th of N slices of the cases")
     a = ap.parse_args(argv)
+    if a.cases and not (re.fullmatch(r"\d+/\d+", a.cases) and 1 <= int(a.cases.split("/")[0]) <= int(a.cases.split("/")[1])):
+        ap.error("--cases must be I/N with 1 <= I <= N")
     if a.self_check:
-        return self_check()
+        return self_check(a.cases)
     if not a.plan or not a.fork:
         ap.error("--plan and at least one --fork are required")
     try:
