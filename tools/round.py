@@ -1324,7 +1324,7 @@ SUMMARY_FORMAT = (f"Write your summary, at most {SUMMARY_LINES} lines, to {{summ
                   ".port/KNOWN-ISSUES.json -- with the rubric's values (known-issues.py add --help); the driver adds it to "
                   "the ledger and commits it, `fixed` only when you fixed it here, its commit), `commit: <sha> <subject>`; then what changed, the gate verdicts and the open rows. Never "
                   "paste logs or diffs into it. Your final reply is only that file's path.")
-# MMVU_ROUND_REUSE=1: the summary ends with this line, written last, so drive --follow records it as soon as it is there
+# By default (not with MMVU_ROUND_REUSE=0): the summary ends with this line, written last, so drive --follow records it as soon as it is there
 # instead of after SUMMARY_SETTLE (measured, round #129: 60-80 s a job); a summary without it is waited for as before
 SUMMARY_END = "END-OF-SUMMARY"
 SUMMARY_END_RULE = (f" Write the summary in one write, its last line exactly `{SUMMARY_END}`, and add nothing to it after "
@@ -1332,7 +1332,7 @@ SUMMARY_END_RULE = (f" Write the summary in one write, its last line exactly `{S
 
 
 def summary_rule(summary):
-    """The job's summary instruction: SUMMARY_FORMAT, and with MMVU_ROUND_REUSE=1 the end-marker rule."""
+    """The job's summary instruction: SUMMARY_FORMAT, and unless MMVU_ROUND_REUSE=0 the end-marker rule."""
     return SUMMARY_FORMAT.format(summary=summary) + (SUMMARY_END_RULE if mod("fb").reuse_on() else "")
 
 
@@ -2515,8 +2515,8 @@ def t_gates(st, it, log):
             j.unlink()
         gated, at = head(d), time.time()
         if ci_record(d):            # the PR's CI is the gate of record: the build and Gate A/B here, no client, no lock
-            # MMVU_ROUND_REUSE=1, no library dependent gate (it takes the jar this run builds): an A/B green record
-            # standing for this tree (fork-branches.py ab_reusable) is not run again; PR CI runs Gate C either way
+            # by default (not with MMVU_ROUND_REUSE=0), no library dependent gate (it takes the jar this run builds): an
+            # A/B green record standing for this tree (fork-branches.py ab_reusable) is not run again; PR CI runs Gate C either way
             fb = mod("fb")
             reused, why = fb.ab_reusable(F["dir"], d, v, st.data["frozen"], ok=(0, 18)) if fb.reuse_on() and not seg_ids(
                 st, it, ("depgate",)) else (None, None)
@@ -3324,7 +3324,7 @@ def github_changed(d, sha):
 
 
 def head_push_redundant(st, it, sha):
-    """MMVU_ROUND_REUSE=1, a version-branch fork's head: why its merge's push run need not be awaited -- the release
+    """By default (not with MMVU_ROUND_REUSE=0), a version-branch fork's head: why its merge's push run need not be awaited -- the release
     will reuse the PR run (reuse_run: a ci_record workflow, the merge commit's tree the PR run's tested tree) and the
     merge changed nothing under .github/ (the push run then tests the tree the PR run passed) -- or None (awaited)."""
     rid = reuse_run(st, it, sha)
@@ -6239,27 +6239,28 @@ def self_check():
                     fsp.write_text(json.dumps(st3), encoding="utf-8")
                     _SEEN_SUMMARY.clear()
                     sj.write_text(text, encoding="utf-8")
-                    if flag:
-                        os.environ[mod("fb").REUSE_ENV] = "1"
+                    if flag is None:
+                        os.environ.pop(mod("fb").REUSE_ENV, None)      # unset: the default, on
                     else:
-                        os.environ.pop(mod("fb").REUSE_ENV, None)
+                        os.environ[mod("fb").REUSE_ENV] = "1" if flag else "0"
                     return [q(auto_record, str(fsp))[0] for _ in range(looks)]
                 done_ = f"RESULT: ok\nnot_ok: 0\n{SUMMARY_END}\n"
                 got_ = look(done_, True)
                 fin_ = json.loads(fsp.read_text(encoding="utf-8"))["items"][0]
                 expect(got_ == [1] and fin_["status"] == "ok" and not parse_summary(f"RESULT: blocked\n{SUMMARY_END}\n").get("why"),
                        f"THE MEASURED CASE: a finished summary (end marker) is recorded at the first look: {got_} {fin_}")
+                expect(look(done_, None) == [1], "MMVU_ROUND_REUSE unset (the default): the end marker is recorded at once")
                 expect(look("RESULT: ok\nnot_ok: 0\n", True, 2) == [0, 0],
                        "no end marker (an old prompt): the second look and the settle wait, as before")
                 expect(look(done_, False, 2) == [0, 0], "flag off: the end marker changes nothing (settle wait)")
                 expect(look(f"{SUMMARY_END}\n", True) == [0], "an end marker with no RESULT line: not recorded")
-                os.environ.pop(mod("fb").REUSE_ENV, None)
+                os.environ[mod("fb").REUSE_ENV] = "0"
                 expect(parse_summary(f"RESULT: blocked\n{SUMMARY_END}\n").get("why") == SUMMARY_END,
                        "flag off: parse_summary reads the marker line as today (the reason line)")
                 os.environ[mod("fb").REUSE_ENV] = "1"
                 expect(SUMMARY_END in summary_rule("S.md") and summary_rule("S.md").startswith(SUMMARY_FORMAT.format(summary="S.md")),
                        "flag on: the job asks for the end marker")
-                os.environ.pop(mod("fb").REUSE_ENV, None)
+                os.environ[mod("fb").REUSE_ENV] = "0"
                 expect(summary_rule("S.md") == SUMMARY_FORMAT.format(summary="S.md"), "flag off: the job's summary rule as before")
             finally:
                 G_.update(keep2)
@@ -7388,10 +7389,10 @@ def self_check():
                                  {"id": "nc@1.21.10:ci", "fork": "o/nc", "version": "1.21.10", "step": "ci", "result": {"run_id": 4242}}]
                     G["gh"] = lambda path, method="GET", data=None: {"merged": True, "merge_commit_sha": merge_sha,
                                                                      "head": {"sha": prh}}
-                    if flag:
-                        os.environ[mod("fb").REUSE_ENV] = "1"
+                    if flag is None:
+                        os.environ.pop(mod("fb").REUSE_ENV, None)      # unset: the default, on
                     else:
-                        os.environ.pop(mod("fb").REUSE_ENV, None)
+                        os.environ[mod("fb").REUSE_ENV] = "1" if flag else "0"
                     waited_m.clear()
                     expect(not release_waits_push(st_, st_.items[0]), "the fixture's merge is a version-branch fork's head")
                     return t_merge(st_, st_.items[0], log_)[0], list(waited_m)
@@ -7399,6 +7400,8 @@ def self_check():
                 expect(w_ == [] and "push run not awaited" in n_, f"flag on, the reused run's tree: no push-run wait: {n_}")
                 n_, w_ = merge_(m_wf, True)
                 expect(w_ == ["push"] and "push run green" in n_, f"flag on, .github/ changed: the push run awaited: {n_}")
+                n_, w_ = merge_(m_same, None)
+                expect(w_ == [] and "push run not awaited" in n_, f"flag unset (the default): no push-run wait: {n_}")
                 n_, w_ = merge_(m_same, False)
                 expect(w_ == ["push"] and "push run green" in n_, f"flag off: the push run awaited as today: {n_}")
             finally:
@@ -7534,7 +7537,6 @@ def self_check():
                 rec_f_ = fbm_._ungated_path(nc_) / fbm_.AB_GREEN_FILE
                 if not pathlib.Path(_St10.data["frozen"]).is_file():
                     pathlib.Path(_St10.data["frozen"]).write_text("{}\n", encoding="utf-8")
-                expect(not rec_f_.exists(), "flag off: t_gates writes no A/B record")
                 class _StAB(_St10):
                     items = [x for x in _St10.items if x["step"] != "depgate"]
                 def gates_(st_cls):
@@ -7543,8 +7545,11 @@ def self_check():
                     return nab, rab, len(seen_cmds)
                 try:
                     fbm_.kit_id = lambda: "kit-a"
-                    os.environ[fbm_.REUSE_ENV] = "1"
+                    os.environ[fbm_.REUSE_ENV] = "0"
                     rec_f_.unlink(missing_ok=True)
+                    nab, rab, kab = gates_(_StAB)
+                    expect(kab == 1 and not rec_f_.exists(), "MMVU_ROUND_REUSE=0: t_gates runs and writes no A/B record")
+                    os.environ[fbm_.REUSE_ENV] = "1"
                     nab, rab, kab = gates_(_StAB)
                     expect(kab == 1 and json.loads(rec_f_.read_text(encoding="utf-8"))["1.21.10"]["commit"] == head(nc_),
                            f"no record: the A/B run, then recorded: {nab}")
@@ -7582,7 +7587,7 @@ def self_check():
                     fbm_.kit_id = lambda: "kit-b"
                     nab, rab, kab = gates_(_StAB)
                     expect(kab == 1, f"another migrator kit: runs: {nab}")
-                    os.environ.pop(fbm_.REUSE_ENV)
+                    os.environ[fbm_.REUSE_ENV] = "0"
                     log_at = len(pathlib.Path(log_).read_text(encoding="utf-8"))
                     nab, rab, kab = gates_(_StAB)
                     expect(kab == 1 and "reused" not in nab and "A/B" not in pathlib.Path(log_).read_text(encoding="utf-8")[log_at:],
@@ -7594,7 +7599,7 @@ def self_check():
                         if flag_:
                             os.environ[fbm_.REUSE_ENV] = "1"
                         else:
-                            os.environ.pop(fbm_.REUSE_ENV, None)
+                            os.environ[fbm_.REUSE_ENV] = "0"
                         seen_cmds.clear()
                         t_resync(_StAB(), ri_, log_)
                         expect(len(seen_cmds) == 1 and ("--reuse-ab" in seen_cmds[0]) == flag_,
