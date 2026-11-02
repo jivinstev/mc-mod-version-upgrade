@@ -785,8 +785,8 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      (when it cuts a pre-release, awaited together with the release run: next item);
    - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
      `pre-release` in `allow`; without it, ask on the plan issue. Never before the review and its S1/S2 findings above.
-     **Dispatch it right after the merge** (every kind of fork; a version-branch fork's HEAD is the exception: the
-     driver waits for its push run at the merge, "A single-version fork on the driver" above, but only when the merge
+     **Dispatch it right after the merge** (every kind of fork; for now a version-branch fork's HEAD is the exception:
+     the driver waits for its push run at the merge, "A single-version fork on the driver" above, but only when the merge
      changed `.github/` or the release cannot reuse the PR run -- always with `MMVU_ROUND_REUSE=0`) instead of after the
      push run alone: the release run
      checks out the merged commit and its release job needs that run's own full gates (full, minimal and every variant
