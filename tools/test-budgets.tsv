@@ -88,7 +88,7 @@ fix-optional-listeners: a subscriber method naming an optional mod moves to a he
 forge-shapes: tick phases, DistExecutor, modifiers, item NBT, hooks, GeckoLib colour rewritten idemp	2	2	2
 forge_import_codemod rewrites the slash form (descriptors, mixin targets)	2	2	2
 forge_import_codemod: a loader package-prefix string (a transform whitelist) follows the loader	2	2	2
-fork-branches self-check --platform, the OS leg -- Linux runs all of: on the frozen 3-version fixtur			16
+fork-branches self-check --platform, the OS leg -- Linux runs all of: on the frozen 3-version fixtur		16	16
 fork-branches self-check: on the frozen 3-version fixture each version branch is done from its migra	62	514	
 fork-kind: one port branch (and a single-branch clone of the head) is single-version; a neoforge-<v>	2	5	7
 fork-port on a single-version fork: stops before any stage (exit 2); no freeze, no review, nothing w	2	2	2
@@ -153,8 +153,9 @@ real-install: --mc narrows a saved plan to those versions and keeps the file who
 real-install: a per-version plan from fixture branches (the versions every fork has, each fork's var	2	2	2
 recipes: auto groups rewrite and count, a dead group is named, choice sites stay untouched	2	2	2
 review-metrics: stubbed bodies, import churn, the port's unused imports and voice measured; the auth	2	2	2
-round-audit self-check, half 1 of 2: the base case and every other mutation case (the full list: par	44	230	471
-round-audit self-check, half 2 of 2: the base case and every other mutation case (the full list: par	48	230	398
+round-audit self-check, third 1 of 3: the base case and every third mutation case (the full list: pa	35	136	251
+round-audit self-check, third 2 of 3: the base case and every third mutation case (the full list: pa	28	107	196
+round-audit self-check, third 3 of 3: the base case and every third mutation case (the full list: pa	30	114	209
 round-audit: a finished round audited from a stand-in GitHub (paged branch histories, runs with jobs	83		
 round-preflight: a missing fork clone says to attach it to the scheduled task; the GitHub way named 	16	31	30
 round-qdiff: two copies of round.py give no diff; one with a dependency edge cut gives exactly that 	5	17	34
