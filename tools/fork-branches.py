@@ -1789,6 +1789,21 @@ def change_taken(data, diff, f, rules=None, strip=False):
     return not any(g in left for g in gone)
 
 
+def change_taken_but_comments(data, diff, f, rules=None, strip=False):
+    """Is the authors' change `diff` in the version's .java file `data` but for its added `//` comment lines -- every
+    other added line there, in order, through the rows (change_taken's rule), and at least one such line non-trivial?
+    A file with a text block is never judged so: only there can a line that starts with // be anything but a comment.
+    (Measured, rounds #129/#130: a hand merge at the lowest version reworded the change's comment, and every version
+    above stopped for a fixer that found the code there and cleared the entry.)"""
+    if data is None or not f.endswith(".java") or b'"""' in data:
+        return False
+    added, _removed = diff_lines(diff)
+    code = [x for x in added if not x.strip().startswith("//")]
+    if len(code) == len(added) or not any(x.strip() and not TRIVIAL_LINE.match(x.strip()) for x in code):
+        return False
+    return change_taken(data, "".join(f"+{x}\n" for x in code), f, rules, strip)
+
+
 def entry_status(c, data, rules, strip, dropped):
     """"taken" (the change is in the file: (a)), "deferred" (an absent integration's change, its dependency still
     dropped here) or "open". Never by a digest: an entry without its diff (carried from a layer) stays open until it
@@ -2313,7 +2328,12 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             body = staged(f)
             if body is None or (f.endswith(".java") and body == rows("new").get(f)):
                 continue                                # t does not have the file, or has exactly the rows' file
-            if change_taken(body, git(repo, "diff", port_from, port_new, "--", f).stdout, f, *rules_now):
+            d_f = git(repo, "diff", port_from, port_new, "--", f).stdout
+            if change_taken(body, d_f, f, *rules_now):
+                continue
+            if reuse_on() and change_taken_but_comments(body, d_f, f, *rules_now):
+                notes.append(f"{f}: the authors' change is in {t}'s file but for its // comment lines: no REMERGE.json "
+                             "entry (no fixer)")
                 continue
             if f.startswith("src/main/resources/data/") and f.endswith(".json") and blob_at(repo, port_new, f) and \
                     body.replace(b"\r\n", b"\n") in {fp().data_form_of(v, f[len("src/main/resources/"):], blob_at(repo, port_new, f))
@@ -5543,6 +5563,61 @@ def _check_ab_reuse(expect):
             os.environ.pop(REUSE_ENV, None) if keep_env is None else os.environ.__setitem__(REUSE_ENV, keep_env)
 
 
+def _check_comment_carry(expect):
+    """Rounds #129/#130: a hand merge at the lowest version reworded the comment of a change it carried, and every
+    version above stopped ("merged, the authors' change to re-apply by hand") for a fixer that found the code there and
+    cleared the REMERGE.json entry. The cascade now judges such a change taken but for its // comment lines (no entry,
+    one note, no stop); each precondition failing keeps today's entry and stop."""
+    pl = "src/main/java/com/example/mod/Plain.java"
+    keep_env = os.environ.get(REUSE_ENV)
+
+    def run(flag="1", code="int added() { return 7; }", block=False):
+        with tempfile.TemporaryDirectory() as d:
+            r, g, _run = _migrated_fixture(d)
+            _authors(r, g, {pl: "package com.example.mod;\npublic class Plain {\n    int v = 1;\n    int w = 2;\n}\n"},
+                     "authors: Plain on lines")
+            _quiet(cascade, r, "port..1.21.4", "none")
+            w4, _w = worktree_for(r, "1.21.4")
+            _hand(w4, {pl: ("public class Plain {\n", "public class Plain {\n    int mine = 4;\n"
+                            + ('    String tb = """\n        x\n        """;\n' if block else ""))}, "1.21.4: its own line")
+            _authors(r, g, {pl: ("    int w = 2;\n", "    int w = 2;\n    // the authors' note\n    int added() { return 7; }\n")},
+                     "authors: added(), with a comment")
+            _quiet(cascade, r, "port..1.21.3", "none")
+            w3, _w = worktree_for(r, "1.21.3")
+            _hand(w3, {pl: ("    // the authors' note\n    int added() { return 7; }\n", f"    // our note\n    {code}\n")},
+                  "1.21.3: the comment reworded by hand")
+            if flag is None:
+                os.environ.pop(REUSE_ENV, None)
+            else:
+                os.environ[REUSE_ENV] = flag
+            rc, out = _quiet(cascade, r, "1.21.3..1.21.4", "none")
+            ents = [c for c in remerge_entries(blob_at(r, "neoforge-1.21.4", f"{REC}/1.21.4/REMERGE.json")) if c.get("overlay") == pl]
+            return rc, out, ents
+    try:
+        rc, out, ents = run(None)
+        expect(rc == 0 and not ents and f"{pl}: the authors' change is in 1.21.4's file but for its // comment lines" in out
+               and "re-apply by hand" not in out,
+               f"THE MEASURED CASE (the flag unset: on): the change there but its comment: no entry, no stop: {rc} {ents} {out[-400:]}")
+        for kw, why in (({"flag": "0"}, "MMVU_ROUND_REUSE=0"), ({"code": "int added() { return 8; }"}, "a code line differs"),
+                        ({"block": True}, "the file has a text block")):
+            rc, out, ents = run(**kw)
+            expect(rc == 1 and len(ents) == 1 and "re-apply by hand" in out and "but for its // comment lines" not in out,
+                   f"{why}: the entry and the stop for a fixer, as before: {rc} {ents} {out[-300:]}")
+    finally:
+        os.environ.pop(REUSE_ENV, None) if keep_env is None else os.environ.__setitem__(REUSE_ENV, keep_env)
+    # the rule's own preconditions, directly
+    f_, body = "A.java", b"class A {\n    // ours\n    int a() { return 1; }\n}\n"
+    d_ = "+    // theirs\n+    int a() { return 1; }\n"
+    expect(change_taken_but_comments(body, d_, f_) and not change_taken(body, d_, f_),
+           "a .java file with the code lines and another comment: taken but for the comment")
+    expect(not change_taken_but_comments(body, d_, "a.txt"), "not a .java file: never")
+    expect(not change_taken_but_comments(body, "+    // theirs only\n", f_), "a comment-only change: never")
+    expect(not change_taken_but_comments(body, "+    int a() { return 1; }\n", f_), "no comment line set aside: never")
+    expect(not change_taken_but_comments(body, "+    // theirs\n+    }\n", f_), "only a trivial line besides: never")
+    expect(not change_taken_but_comments(body + b'String s = """\n x\n """;\n', d_, f_), "a text block in the file: never")
+    expect(not change_taken_but_comments(None, d_, f_), "no file: never")
+
+
 def _check_check_done_rows(expect):
     """fork-port.py --check-done on a version branch's checkout writes REVIEW.md's `?` rows (the skill and the REVIEW.md
     header say so; reviewers called review_skeleton by hand); off the branch it writes nothing. And the parent is read
@@ -7688,6 +7763,7 @@ def self_check():
         _check_prerelease_pin(expect)
         _check_ungated_rerun(expect)
         _check_ab_reuse(expect)
+        _check_comment_carry(expect)
         _check_check_done_rows(expect)
         _check_ci_check(expect)
         _check_change_reviews(expect)

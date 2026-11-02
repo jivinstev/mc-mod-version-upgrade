@@ -89,7 +89,7 @@ forge-shapes: tick phases, DistExecutor, modifiers, item NBT, hooks, GeckoLib co
 forge_import_codemod rewrites the slash form (descriptors, mixin targets)	2	2	2
 forge_import_codemod: a loader package-prefix string (a transform whitelist) follows the loader	2	2	2
 fork-branches self-check --platform, the OS leg -- Linux runs all of: on the frozen 3-version fixtur		8	14
-fork-branches self-check: on the frozen 3-version fixture each version branch is done from its migra	51		
+fork-branches self-check: on the frozen 3-version fixture each version branch is done from its migra	58		
 fork-kind: one port branch (and a single-branch clone of the head) is single-version; a neoforge-<v>	2	5	7
 fork-port on a single-version fork: stops before any stage (exit 2); no freeze, no review, nothing w	2	2	2
 fork-port.py on version branches: --check-done done off the branch, a resume refused off it, --write	3	14	24
