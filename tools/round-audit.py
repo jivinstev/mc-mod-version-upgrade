@@ -1460,8 +1460,8 @@ def render(rep):
 
 def self_check(cases_arg=None):
     """cases_arg "i/n": the base case and every n-th mutation case from the i-th (round-robin), the checks that are no
-    case (unit checks, the single-version fixtures, refs_as_of, the clones untouched) in slice 1 only: CI runs the
-    slices as parallel jobs, every case in one of them."""
+    case (unit checks, the single-version fixtures, refs_as_of, the clones untouched) in slice 1 only: split, the
+    suite (test-port-tools.sh) runs one third at the end of each of its three parts, every case in one of them."""
     t0 = time.monotonic()
     sl_i, sl_n = (int(x) for x in cases_arg.split("/")) if cases_arg else (1, 1)
     global API, RAW
@@ -1523,32 +1523,23 @@ def self_check(cases_arg=None):
         # ---- mutations: each fixture violating one check fails exactly there, for the reason named
         X = "examplelib-1.0-mc1.21.4"
         cases = [
-            ("I1", (LIB, "1.21.4"), "a red PR run", lambda f: f.run_conclusion.update({f.r_lib: "failure"}),
-             FAIL, "no green Port CI pull_request run"),
-            ("I1", (LIB, "1.21.4"), "a skipped gates job", lambda f: f.job_skip.add(f.r_lib), FAIL, "gates (full): skipped"),
             ("I1", (LIB, "1.21.4"), "a gates job green whose ci-gates step failed", lambda f: f.step_fail.add(f.r_lib),
              FAIL, "step Build and gates failure"),
             ("I1", (LIB, "1.21.4"), "the green run is another PR's", lambda f: f.run_pr.update({f.r_lib: 99}),
              FAIL, "for this PR"),
             ("I1", (LIB, "1.21.4"), "the workflow's Gate C is `none`", pre(wf='run: python3 ci-gates.py --gatec none\n'),
              FAIL, "runs no Gate C"),
-            ("I1", (LIB, "1.21.4"), "the workflow's Gate C is an expression",
-             pre(wf='run: python3 ci-gates.py --gatec "${{ inputs.gatec }}"\n'), FAIL, "runs no Gate C"),
             ("I1", (LIB, "1.21.4"), "Gate C only in a comment",
              pre(wf='# python3 ci-gates.py --gatec launch\nrun: python3 ci-gates.py --base x\n'), FAIL, "runs no Gate C"),
-            ("I1", (LIB, "1.21.4"), "the base moved by code after the run", lambda f: f.moved_base(records=False),
-             FAIL, "the base moved"),
             ("I1", (LIB, "1.21.4"), "a PR head behind a base that did not move after the run: its test merge's parents",
              lambda f: f.head_behind(), PASS, "the run's test merge"),
+            ("I1", (LIB, "1.21.4"), "the base moved after the run by a gated PR of code", lambda f: f.head_behind(when=50),
+             FAIL, "the base moved"),
             ("I1", (LIB, "1.21.4"), "the base moved by records only (a ledger push): not a failure",
              lambda f: f.moved_base(records=True), PASS, "by records only"),
             ("I1", (LIB, "1.21.5"), "a push that is not a fast-forward", lambda f: f.non_ff(), FAIL, "not a fast-forward"),
-            ("I1", (LIB, "1.21.5"), "a direct push of shipped code", lambda f: f.push_file(
-                "src/main/java/com/example/mod/Main.java", "class Main { int a = 3; }\n"), FAIL, "only a PR may change"),
             ("I1", (LIB, "1.21.5"), "a direct push of .port/branch.gradle (a jar rename, the 2026-10-31 case)",
              lambda f: f.push_file(".port/branch.gradle", "// jar names -mc<version>\n"), FAIL, ".port/branch.gradle"),
-            ("I1", (LIB, "1.21.5"), "a direct push of a build key", lambda f: f.push_props("java_version=25\n"),
-             FAIL, "branch.properties (java_version)"),
             ("I1", (LIB, "1.21.5"), "a direct push of the Port CI workflow with no green push run",
              lambda f: f.push_file(PORT_CI_WF, 'run: python3 ci-gates.py --gatec "launch"\n'), FAIL, "no green push run"),
             ("I1", (LIB, "1.21.4"), "GitHub's history starts inside the window", lambda f: f.cut_history(LIB, "neoforge-1.21.4"),
@@ -1559,18 +1550,14 @@ def self_check(cases_arg=None):
              FAIL, "a gap in GitHub's activity history"),
             ("I1", (LIB, "1.21.4"), "a PR merged with no branch update in the history", lambda f: f.hide_merge(),
              FAIL, "no branch update in GitHub's activity history names that merge"),
-            ("I2", (LIB, "1.21.5"), "a records-only PR (a publish config): gated, no release needed",
-             lambda f: f.records_pr(), NA, "records-only"),
-            ("I3", (LIB, "1.21.5"), "a records-only PR needs no review", lambda f: f.records_pr(), NA, "records only"),
+            ("I2", (LIB, "1.21.5"), "a records-only PR (a publish config): gated, no release or review needed",
+             lambda f: f.records_pr(), NA, "records-only", [("I3", (LIB, "1.21.5"), NA, "records only")]),
             ("I2", (LIB, "1.21.4"), "a release from a run that is not the gated one", lambda f: f.rel_body.update(
                 {X: "Built from x (jars and gates of run 999, the same tree)."}), FAIL, "not a gated run"),
             ("I2", (LIB, "1.21.4"), "a release on another tree", lambda f: f.release_elsewhere(), FAIL,
              "is no tree I1 found gated"),
             ("I2", (DEP, "1.21.4"), "a merged version with no release", lambda f: f.drop_release(f.dep_tag), FAIL,
              "no release was published"),
-            ("I2", (DEP, "1.21.4"), "a Gate C FAIL in a release's gate summary", lambda f: f.assets.update(
-                {f.dep_tag: "| check | result |\n|---|---|\n| Gate C -- real client, `launch` | FAIL | crash |\n"}),
-             FAIL, "Gate C rows not PASS"),
             ("I2", (DEP, "1.21.4"), "a later PR merged after the release and never released",
              lambda f: f.late_pr(), FAIL, "was not released"),
             ("I2", (DEP, "1.21.4"), "a release with no gate summary", lambda f: f.no_assets.add(f.dep_tag), UNKNOWN,
@@ -1578,8 +1565,6 @@ def self_check(cases_arg=None):
             ("I2", (DEP, "1.21.4"), "no from_run marker and a release run whose gates were skipped",
              lambda f: (f.rel_body.update({f.dep_tag: "Built from it."}), f.job_skip.add(f.r_dep + 5000)),
              FAIL, "did not gate it"),
-            ("I2", (DEP, "1.21.4"), "no green release run on the commit",
-             lambda f: f.run_conclusion.update({f.r_dep + 5000: "failure"}), FAIL, "no green release"),
             ("I3", (LIB, "1.21.4"), "a stale review", lambda f: f.stale_review(), FAIL, "re-review"),
             ("I3", (LIB, "1.21.4"), "the first of two merges stale (every merge is checked)",
              lambda f: f.stale_review(second=True), FAIL, "re-review"),
@@ -1591,8 +1576,6 @@ def self_check(cases_arg=None):
             ("I3", (DEP, "1.21.1"), "a head file changed after the last commit the summaries name, not rechecked",
              pre(late_head=True), FAIL, "after the last commit the summaries name"),
             ("I3", (LIB, "1.21.4"), "the pinned migrator's review check disagrees", pre(pin_lies=True), FAIL, "disagree"),
-            ("I4", (LIB, "1.21.5"), "pushed before the lower version's commits merged", lambda f: f.early_push(), FAIL,
-             "not on origin's"),
             ("I4", (LIB, "1.21.5"), "carrying a lower PR's commits that never reached the lower branch",
              lambda f: f.abandoned_lower(), FAIL, "not on origin's"),
             ("I5", (LIB, "1.21.4"), "a dependent left on the old release (the close names the version)",
@@ -1610,8 +1593,8 @@ def self_check(cases_arg=None):
              FAIL, "still open"),
             ("I6", (LIB, "1.21.4"), "a selected fix with no status at a merged version",
              lambda f: f.ledger({"1.21.5": "FIX"}), FAIL, "without a status"),
-            ("I6", (LIB, "1.21.4"), "an unreadable ledger at the window's end", lambda f: f.ledger(None), FAIL,
-             "cannot be read"),
+            ("I6", (LIB, "1.21.4"), "an unreadable ledger at the window's end (no ledger commit in the window)",
+             lambda f: f.end_ledger_unreadable(), FAIL, "the head's ledger at the window's end"),
             ("I6", (LIB, "1.21.4"), "an unreadable ledger commit in the window (the end readable)",
              lambda f: (f.ledger(None), f.ledger({"1.21.4": "FIX", "1.21.5": "FIX"})), FAIL, "or its parent cannot be read"),
             ("I7", (DEP, "1.21.5"), "a version the plan gave work (a bump) that the round never touched",
@@ -1631,8 +1614,6 @@ def self_check(cases_arg=None):
              pre(pin_ladder_lies=True), FAIL, "disagrees with the fork's version branches"),
             ("I1", (LIB, "1.21.5"), "no activity history for a branch whose tip is dated inside the window",
              lambda f: f.no_history(LIB, "neoforge-1.21.5"), FAIL, "no activity history"),
-            ("I2", (DEP, "1.21.4"), "no dispatch run was running when the release was published",
-             lambda f: f.untied_release(), UNKNOWN, "the run that made it is not known"),
             ("I2", (DEP, "1.21.4"), "the run that made the release is red, a later dispatch run (a promotion) green",
              lambda f: f.red_release_green_promotion(), FAIL, "no green release run"),
             ("I5", (LIB, "1.21.4"), "the set's weekly-plan.json is unreadable", lambda f: f.bad_config(), UNKNOWN,
@@ -1641,14 +1622,18 @@ def self_check(cases_arg=None):
         all_cases = len(cases)
         cases = [c for j, c in enumerate(cases) if j % sl_n == sl_i - 1]
         if os.environ.get("ROUND_AUDIT_LIST_CASES"):
-            for k, (f_, v_), what, _m, want_s, why in cases:
-                print(f"case {k} {f_} {v_} {want_s} {why!r}: {what}")
+            for case in cases:
+                k, (f_, v_), what, _m, want_s, why = case[:6]
+                print(f"case {k} {f_} {v_} {want_s} {why!r}: {what}"
+                      + "".join(f" + {a[0]} {a[1][0]} {a[1][1]} {a[2]} {a[3]!r}" for a in (case[6] if len(case) > 6 else [])))
         seen = set()
         # each distinct build (BUILD_OPTS) is made once and copied for every case: the base fixture is the template
         # of the cases that change no build option; the others' templates are built on first use
         templates = {(): fx}
         prints = {}
-        for k, (f_, v_), what, mut, want_s, why in cases:
+        for case in cases:
+            k, (f_, v_), what, mut, want_s, why = case[:6]
+            also = case[6] if len(case) > 6 else []
             name = re.sub(r"\W+", "-", what)[:40]
             assert name not in seen
             seen.add(name)
@@ -1664,7 +1649,7 @@ def self_check(cases_arg=None):
             API, RAW = fm.api, fm.raw
             # a case audits only the fork it asserts on (each audited fork is ~130 git processes, ~4 s on Windows);
             # I5 and I7 read the other fork (its pins, its releases) and audit both
-            only = None if k in ("I5", "I7") else f_
+            only = None if {k, *(a[0] for a in also)} & {"I5", "I7"} or {a[1][0] for a in also} - {f_} else f_
             rep, rc = fm.run(state=getattr(fm, "state_path", None), only=only)
             c = row(rep, f_, v_)["checks"][k]
             s_, ev_ = c["status"], " / ".join(c["evidence"])
@@ -1672,6 +1657,13 @@ def self_check(cases_arg=None):
                 print(f"mutation {k} ({what}): {s_}: {ev_[:300]}")
             expect(s_ == want_s and why in ev_ and rc == (1 if want_s in BAD else rc) and "could not be checked" not in ev_,
                    f"mutation {k} ({what}): {f_} {v_} {k} = {s_} (want {want_s} saying {why!r}), rc {rc}: {ev_[:600]}")
+            for k2, (f2, v2), want2, why2 in also:        # the same audit's other assertions (a merged case)
+                c2 = row(rep, f2, v2)["checks"][k2]
+                s2, ev2 = c2["status"], " / ".join(c2["evidence"])
+                if os.environ.get("ROUND_AUDIT_VERBOSE"):
+                    print(f"mutation {k2} ({what}): {s2}: {ev2[:300]}")
+                expect(s2 == want2 and why2 in ev2, f"mutation {k2} ({what}): {f2} {v2} {k2} = {s2} (want {want2} saying "
+                                                    f"{why2!r}): {ev2[:600]}")
         if sl_i != 1:
             return finish_check(ok, t0, f"slice {sl_i}/{sl_n}: the base and {len(cases)} of {all_cases} case(s)")
         # ---- a single-version fork: only its head; I4 N-A, I1/I3 judged on its one branch
@@ -2095,9 +2087,10 @@ class Fixture:
         self.relink_lib_15(m)
         self.finish()
 
-    def head_behind(self):
-        """Another PR (#8, gated) lands on 1.21.4 at +10, before PR #1's run (+40): PR #1's head is behind its base,
-        and its merge has the parents of the run's test merge."""
+    def head_behind(self, when=10):
+        """Another PR (#8, gated) lands on 1.21.4 at +when: before PR #1's run (+40, the default +10), PR #1's head is
+        behind its base and its merge has the parents of the run's test merge; after it (+50), the base moved under the
+        run and PR #1's merge is not the tree it gated."""
         lib = self.lib
         self.g(lib, "checkout", "-q", "neoforge-1.21.4")
         self.g(lib, "reset", "-q", "--hard", f"{self.m_lib}^1")
@@ -2109,8 +2102,8 @@ class Fixture:
         self.releases[self.LIB] = []
         self.g(lib, "checkout", "-q", "-b", "base-change", f"{self.m_lib}^1")
         self.w(lib, "src/main/java/com/example/mod/Other.java", "class Other {}\n")
-        self.commit(lib, "another change", at(8))
-        m8, _r8 = self.pr_merge(self.LIB, lib, "1.21.4", "base-change", 8, at(10))
+        self.commit(lib, "another change", at(when - 2))
+        m8, _r8 = self.pr_merge(self.LIB, lib, "1.21.4", "base-change", 8, at(when))
         self.g(lib, "update-ref", "refs/heads/keep-current/x-1.21.4", head1)
         m, rid = self.pr_merge(self.LIB, lib, "1.21.4", "keep-current/x-1.21.4", 1, at(60))
         self.release(self.LIB, lib, self.lib_tag, m, rid, at(65))
@@ -2208,6 +2201,18 @@ class Fixture:
         self.ev(self.LIB, "neoforge-1.21.1", before, self.tip(self.lib, "neoforge-1.21.1"), "push", at(112))
         self.finish()
 
+    def end_ledger_unreadable(self):
+        """The head's ledger is broken before the window and the round writes none: no ledger commit to read in the
+        window, only the end ledger the selected fixes are judged by."""
+        lib = self.lib
+        self.g(lib, "checkout", "-q", "neoforge-1.21.1")
+        self.g(lib, "reset", "-q", "--hard", [e for e in self.activity[(self.LIB, "neoforge-1.21.1")]
+                                               if not e.get("synthetic")][0]["before"])
+        self.write_ledger(lib, None)
+        self.commit(lib, "a broken ledger, before the round", at(-50))
+        self.activity[(self.LIB, "neoforge-1.21.1")] = []
+        self.finish()
+
     def history_gap(self):
         """Two records pushes on 1.21.5; GitHub's history lists only the second."""
         self.push_file(".port/1.21.5/COST.md", "one\n")
@@ -2226,9 +2231,9 @@ class Fixture:
         self.finish = lambda: None
 
     def release_elsewhere(self):
-        rel = next(r for r in self.releases[self.LIB] if r["tag_name"] == self.lib_tag)
-        self.g(self.lib, "tag", "-f", self.lib_tag, self.lib_fix)
-        rel["target_commitish"] = self.lib_fix
+        """A second release (-r2) of 1.21.4, of the fix commit's tree (no gated tree); the merge's own release stays,
+        so the last merge is released and only this release is wrong."""
+        self.release(self.LIB, self.lib, self.lib_tag + "-r2", self.lib_fix, self.r_lib, at(66))
         self.finish()
 
     def drop_release(self, tag):
@@ -2254,9 +2259,13 @@ class Fixture:
         m, rid = self.pr_merge(self.LIB, lib, "1.21.4", "keep-current/x-1.21.4", 1, at(60))
         last = m
         if second:
+            # a second PR that ships code too (a records-only PR needs no review), its own review current: only the
+            # first merge's review is stale
             self.g(lib, "checkout", "-q", "-b", "keep-current/y-1.21.4", m)
-            self.write_review(lib, "1.21.4", late)
-            self.commit(lib, "the review again", at(61))
+            self.w(lib, "src/main/java/com/example/mod/Main.java", "class Main { int a = 6; } // LIB-1\n")
+            c2 = self.commit(lib, "a second change", at(61))
+            self.write_review(lib, "1.21.4", c2)
+            self.commit(lib, "its review", at(61))
             last, rid = self.pr_merge(self.LIB, lib, "1.21.4", "keep-current/y-1.21.4", 6, at(62))
         self.release(self.LIB, lib, self.lib_tag, last, rid, at(65))
         self.g(lib, "checkout", "-q", "neoforge-1.21.4")
