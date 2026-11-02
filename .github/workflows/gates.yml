@@ -232,20 +232,13 @@ jobs:
       - run: python3 tools/check-compat.py
 
   macos:
-    name: "macOS: bash 3.2, BSD tools, Python 3.9 (${{ matrix.label }})"
+    name: "macOS: bash 3.2, BSD tools, Python 3.9 (part ${{ matrix.part }} of 3)"
     runs-on: macos-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # parts 1-3 keep their names (the branch protection requires them); 4 and 5 are round-audit's self-check
-        # in two halves (PORT_TOOLS_PART), which part 2 leaves out when the suite is split
-        include:
-          - {part: 1, label: "part 1 of 3"}
-          - {part: 2, label: "part 2 of 3"}
-          - {part: 3, label: "part 3 of 3"}
-          - {part: 4, label: "round-audit, half 1 of 2"}
-          - {part: 5, label: "round-audit, half 2 of 2"}
+        part: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -266,7 +259,7 @@ jobs:
         run: |
           export PATH="/bin:/usr/bin:$PATH"
           git ls-files '*.sh' | while read -r f; do /bin/bash -n "$f" || exit 1; done
-      - name: Port tools (macOS, ${{ matrix.label }})
+      - name: Port tools (macOS, part ${{ matrix.part }} of 3)
         run: |
           export PATH="/bin:/usr/bin:$PATH"
           PORT_TOOLS_PART=${{ matrix.part }} ./tools/test-port-tools.sh

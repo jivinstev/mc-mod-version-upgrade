@@ -1662,7 +1662,10 @@ def self_check(cases_arg=None):
             fm = Fixture(tmp / f"m-{k}-{name}", mutate=mut, template=tpl)
             expect(tpl.fingerprint() == prints[key], f"case {k} ({what}) changed its shared template fixture")
             API, RAW = fm.api, fm.raw
-            rep, rc = fm.run(state=getattr(fm, "state_path", None))
+            # a case audits only the fork it asserts on (each audited fork is ~130 git processes, ~4 s on Windows);
+            # I5 and I7 read the other fork (its pins, its releases) and audit both
+            only = None if k in ("I5", "I7") else f_
+            rep, rc = fm.run(state=getattr(fm, "state_path", None), only=only)
             c = row(rep, f_, v_)["checks"][k]
             s_, ev_ = c["status"], " / ".join(c["evidence"])
             if os.environ.get("ROUND_AUDIT_VERBOSE"):
@@ -2388,10 +2391,12 @@ class Fixture:
             raise OSError("no such download")
         return self.assets.get(m.group(1), "| check | result |\n|---|---|\n| Gate C -- real client, `launch` | PASS | ok |\n").encode("utf-8")
 
-    def run(self, state=None):
+    def run(self, state=None, only=None):
+        """The audit of this fixture's round: both forks, or `only` that one."""
+        forks = [f"{self.LIB}={self.lib}", f"{self.DEP}={self.dep}"]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            return audit(f"{self.LIB}#7", [f"{self.LIB}={self.lib}", f"{self.DEP}={self.dep}"],
+            return audit(f"{self.LIB}#7", [x for x in forks if not only or x.startswith(only + "=")],
                          state=str(state) if state else None, pin=PIN["rev"])
 
 
@@ -2444,7 +2449,7 @@ class SingleFixture(Fixture):
     def plan_issue(self):
         return plan_body([{"repo": self.SOLO, "head": "neoforge-1.21.1", "defaults": [], "candidates": []}])
 
-    def run(self, state=None):
+    def run(self, state=None, only=None):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             return audit(f"{self.SOLO}#7", [f"{self.SOLO}={self.lib}"], pin=PIN["rev"])

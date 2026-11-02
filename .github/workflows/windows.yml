@@ -301,20 +301,13 @@ jobs:
   # The two halves of tools/test-port-tools.sh (PORT_TOOLS_PART) and the review self-test, each on its own runner
   # beside `static`, so the Windows wall time is the longest one (~5 min) rather than the sum.
   static-port-tools:
-    name: windows port tools (${{ matrix.label }})
+    name: windows port tools (part ${{ matrix.part }} of 3)
     if: github.event.action != 'labeled'
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        # parts 1-3 keep their names (the branch protection requires them); 4 and 5 are round-audit's self-check
-        # in two halves (PORT_TOOLS_PART), which part 2 leaves out when the suite is split
-        include:
-          - {part: 1, label: "part 1 of 3"}
-          - {part: 2, label: "part 2 of 3"}
-          - {part: 3, label: "part 3 of 3"}
-          - {part: 4, label: "round-audit, half 1 of 2"}
-          - {part: 5, label: "round-audit, half 2 of 2"}
+        part: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
