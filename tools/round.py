@@ -6844,7 +6844,10 @@ def self_check():
                 expect(not _flock(fh, block=False), "a second full gate run waits for the machine's lock")
             # POSIX only: Windows has no pass_fds, and its msvcrt lock is not inherited by a child (the gate run
             # there passes no lock either, see the pass_fds guards above)
-            child = (subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"], pass_fds=(lk.fileno(),))  # compat-ok: os.name guard below
+            # the stand-in gate run holds the lock until this test closes its stdin (no sleep: a runner that stalls
+            # longer than a fixed sleep lost the race on macOS CI, 2026-11-02)
+            child = (subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+                                      pass_fds=(lk.fileno(),))  # compat-ok: os.name guard below
                      if os.name != "nt" else None)
             keep_w = GATE_LOCK_WAIT
             globals()["GATE_LOCK_WAIT"] = 0.3
@@ -6858,6 +6861,7 @@ def self_check():
         if child is not None:
             with open(gate_lock_path(), "a+", encoding="utf-8") as fh:
                 expect(not _flock(fh, block=False), "the gate run's process still holds the lock after the driver let go")
+                child.stdin.close()             # the gate run ends
                 child.wait()
                 got = _flock(fh, block=False)
                 expect(got, "free once the gate run ended")

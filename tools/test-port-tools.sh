@@ -13,8 +13,8 @@ _took() { _dt=$((SECONDS - _t_last)); _t_last=$SECONDS; }    # in this shell, no
 TIMES="$T/times.tsv"; : > "$TIMES"
 _nl='
 '
-ok()  { _took; printf '  PASS %4ss  %s\n' "$_dt" "$1"; printf '%s\t%s\n' "$_dt" "${1%%"$_nl"*}" >> "$TIMES"; pass=$((pass+1)); }
-bad() { _took; printf '  FAIL %4ss  %s\n' "$_dt" "$1"; printf '%s\t%s\n' "$_dt" "${1%%"$_nl"*}" >> "$TIMES"; fail=$((fail+1)); }
+ok()  { _took; printf '  PASS %4ss  %s\n' "$_dt" "$1"; printf '%s\tPASS\t%s\n' "$_dt" "${1%%"$_nl"*}" >> "$TIMES"; pass=$((pass+1)); }
+bad() { _took; printf '  FAIL %4ss  %s\n' "$_dt" "$1"; printf '%s\tFAIL\t%s\n' "$_dt" "${1%%"$_nl"*}" >> "$TIMES"; fail=$((fail+1)); }
 
 # PORT_TOOLS_PART=1|2|3 runs one third (CI runs them as parallel jobs); unset runs everything, as before. Split, the
 # git-heavy round-audit self-check runs in two halves, one in part 1 and one in part 2 (~5,000 git processes each).

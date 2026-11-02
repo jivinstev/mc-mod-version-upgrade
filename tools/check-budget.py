@@ -19,7 +19,8 @@ variance is about +-40%), at least 2 s. With --enforce (test-port-tools.sh passe
 PORT_TOOLS_BUDGET=enforce) a problem exits 1; without, it is printed as a warning and exits 0 (a slower laptop is not
 a failure). PORT_TOOLS_BUDGET=off skips the check.
 
-THE KEY. A test is named by its description: the first 100 characters of its PASS/FAIL line's text, with a measured
+THE KEY. A test is named by its description (a PASS line's; a FAIL line carries the failure text, not the test's name,
+so a failed test is not timed -- its FAIL already fails the part): the first 100 characters of its PASS/FAIL line's text, with a measured
 time `(in 12.3 s)` and any other `<n> s` duration removed, so the key does not change from run to run; a second test
 with the same key is `<key> #2`. The budgets file is TSV: key, then seconds for linux, macos, windows (an empty cell:
 no budget on that OS).
@@ -46,13 +47,22 @@ def key_of(desc):
     return " ".join(d.split())[:KEY_LEN]
 
 
-def read_times(path):
-    """[(key, seconds)] of a times file (SECONDS<TAB>DESCRIPTION per line), keys made unique in order."""
+def read_times(path, failed=None):
+    """[(key, seconds)] of a times file (SECONDS<TAB>PASS|FAIL<TAB>DESCRIPTION per line; SECONDS<TAB>DESCRIPTION is a
+    PASS), keys made unique in order. A FAIL line's text is its failure, not the test's name, so it has no stable key:
+    it is left out (counted in `failed`, a list, when given) -- its FAIL already fails the part."""
     out, seen = [], {}
     for ln in pathlib.Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
         t, sep, desc = ln.partition("\t")
         if not sep or not t.strip().isdigit():
             continue
+        st, sep2, rest = desc.partition("\t")
+        if sep2 and st in ("PASS", "FAIL"):
+            if st == "FAIL":
+                if failed is not None:
+                    failed.append(int(t))
+                continue
+            desc = rest
         k = key_of(desc)
         seen[k] = seen.get(k, 0) + 1
         out.append((k if seen[k] == 1 else f"{k} #{seen[k]}", int(t)))
@@ -76,7 +86,8 @@ def write_budgets(path, budgets):
              " OS. Add one: python3 tools/check-budget.py --times FILE --add-missing"]
     for k in sorted(budgets):
         lines.append("\t".join([k] + [str(budgets[k][o]) if o in budgets[k] else "" for o in OSES]))
-    pathlib.Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    with open(path, "w", encoding="utf-8", newline="\n") as f:      # LF on Windows too (newline= on write_text: 3.10+)
+        f.write("\n".join(lines) + "\n")
 
 
 def budget_for(seconds):
@@ -105,9 +116,12 @@ def self_check():
             print("FAIL:", msg)
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
-        (d / "times.tsv").write_text("3\texamplemod: a quick test\n40\texamplemod: a slow test (in 39.5 s): long text\n"
-                                     "1\texamplemod: a quick test\n0\ta new test nobody budgeted\n", encoding="utf-8")
-        times = read_times(d / "times.tsv")
+        (d / "times.tsv").write_text("3\tPASS\texamplemod: a quick test\n40\tPASS\texamplemod: a slow test (in 39.5 s): long text\n"
+                                     "1\texamplemod: a quick test\n0\tPASS\ta new test nobody budgeted\n"
+                                     "132\tFAIL\texamplemod self-check: FAIL: the lock is still held\n", encoding="utf-8")
+        failed = []
+        times = read_times(d / "times.tsv", failed)
+        expect(failed == [132], f"a FAIL line is not keyed by its failure text (not timed, counted): {failed}")
         expect([k for k, _ in times] == ["examplemod: a quick test", "examplemod: a slow test: long text",
                                          "examplemod: a quick test #2", "a new test nobody budgeted"],
                f"keys: the measured time dropped, a repeated key numbered: {times}")
@@ -153,7 +167,8 @@ def main(argv=None):
     if not a.times or not pathlib.Path(a.times).is_file():
         print("check-budget: --times FILE is required (and must exist)", file=sys.stderr)
         return 2
-    osf, times, budgets = a.os or os_family(), read_times(a.times), read_budgets(a.budgets)
+    failed = []
+    osf, times, budgets = a.os or os_family(), read_times(a.times, failed), read_budgets(a.budgets)
     if a.add_missing:
         n = 0
         for k, t in times:
@@ -167,7 +182,9 @@ def main(argv=None):
     for x in p:
         print(x)
     total = sum(t for _k, t in times)
-    print(f"check-budget: {len(times)} test(s), {total} s on {osf}: " + (f"{len(p)} over budget or unbudgeted"
+    print(f"check-budget: {len(times)} test(s), {total} s on {osf}"
+          + (f" ({len(failed)} failed test(s) not timed: their own FAIL lines report them)" if failed else "") + ": "
+          + (f"{len(p)} over budget or unbudgeted"
                                                                          + ("" if a.enforce else " (warning only)") if p else "all within budget"))
     return 1 if p and a.enforce else 0
 
