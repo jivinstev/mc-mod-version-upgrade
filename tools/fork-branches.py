@@ -1735,9 +1735,17 @@ def tracked_change(f):
 
 
 def diff_lines(diff):
-    added, removed = [], []
+    """(added, removed) lines of a unified diff. Only a file header (`--- a/...`, `+++ b/...`, before a hunk) is skipped:
+    an added `++i;` is `+++i;` and a removed `--i;` is `---i;`, content like any other line."""
+    added, removed, in_hunk = [], [], False
     for ln in (diff or "").splitlines():
-        if ln.startswith(("+++", "---")):
+        if ln.startswith("@@"):
+            in_hunk = True
+            continue
+        if ln.startswith("diff --git"):
+            in_hunk = False
+            continue
+        if not in_hunk and re.match(r"^(?:---|\+\+\+) ", ln):
             continue
         if ln[:1] == "+":
             added.append(ln[1:])
@@ -1790,18 +1798,73 @@ def change_taken(data, diff, f, rules=None, strip=False):
 
 
 def change_taken_but_comments(data, diff, f, rules=None, strip=False):
-    """Is the authors' change `diff` in the version's .java file `data` but for its added `//` comment lines -- every
-    other added line there, in order, through the rows (change_taken's rule), and at least one such line non-trivial?
-    A file with a text block is never judged so: only there can a line that starts with // be anything but a comment.
+    """Is the authors' change `diff` in the version's .java file `data` with only its prose `//` comment lines reworded?
     (Measured, rounds #129/#130: a hand merge at the lowest version reworded the change's comment, and every version
-    above stopped for a fixer that found the code there and cleared the entry.)"""
-    if data is None or not f.endswith(".java") or b'"""' in data:
+    above stopped for a fixer that found the code there and cleared the entry.) Each guard failing answers no, and the
+    entry and its fixer stay:
+      - no text block in the file or the diff, and no \\u escape in a comment set aside (only there can a `//` line hide
+        code); every hunk a real one (an @@ line), every added run anchored by a context line next to it;
+      - a comment is set aside only when it is prose: its text does not end like code (; { } )) and holds none of the
+        change's removed lines;
+      - each run of added lines, through the rows, is in the file as one block, line for line, between the same
+        neighbouring context lines, exactly once, a set-aside comment matching only a `//` line in the same place, and
+        the runs in order; at least one comment was set aside, and at least one non-trivial line is code;
+      - no non-trivial, non-comment line the change removed is still in the file."""
+    if data is None or not f.endswith(".java") or b'"""' in data or '"""' in (diff or ""):
         return False
-    added, _removed = diff_lines(diff)
-    code = [x for x in added if not x.strip().startswith("//")]
-    if len(code) == len(added) or not any(x.strip() and not TRIVIAL_LINE.match(x.strip()) for x in code):
-        return False
-    return change_taken(data, "".join(f"+{x}\n" for x in code), f, rules, strip)
+    if rules is not None and getattr(rules, "cutout", False):
+        tr = lambda x: cutout_translate(x, apply_rules(x, rules)).strip()
+    elif rules is not None:
+        tr = lambda x: apply_rules(x, rules).strip()
+    else:
+        tr = lambda x: x.strip()
+    have = [x.strip() for x in data.decode("utf-8", "surrogateescape").replace("\r\n", "\n").split("\n")]
+    added, removed = diff_lines(diff)
+    gone = [tr(x) for x in removed if x.strip() and not TRIVIAL_LINE.match(x.strip()) and not x.strip().startswith("//")]
+    if any(g in have for g in gone):
+        return False                                   # a line the change removed is still live
+    hunks, cur = [], None
+    for ln in (diff or "").replace("\r\n", "\n").splitlines():
+        if ln.startswith("@@"):
+            cur = []
+            hunks.append(cur)
+        elif cur is not None and ln[:1] in (" ", "+", "-", ""):
+            cur.append((ln[:1] or " ", ln[1:]))
+        elif ln.startswith("diff --git"):
+            cur = None
+    rem = [x.strip() for x in removed if x.strip()]
+    prose = lambda x: x.strip().startswith("//") and "\\u" not in x and not x.strip()[2:].strip().endswith(
+        (";", "{", "}", ")")) and not any(r_ in x for r_ in rem)
+    set_aside, code, at = 0, False, 0
+    for h in hunks:
+        k = 0
+        while k < len(h):
+            if h[k][0] != "+":
+                k += 1
+                continue
+            e = k
+            while e < len(h) and h[e][0] == "+":
+                e += 1
+            run = [x for _k, x in h[k:e]]
+            before = next((x for kind, x in reversed(h[:k]) if kind == " "), None)
+            after = next((x for kind, x in h[e:] if kind == " "), None)
+            if before is None and after is None:
+                return False                           # nothing to anchor the run to
+            # the pattern: the run's lines through the rows (a prose comment: any // line), between its context lines
+            pat = ([("=", tr(before))] if before is not None else []) + \
+                  [("//", None) if prose(x) else ("=", tr(x)) for x in run] + \
+                  ([("=", tr(after))] if after is not None else [])
+            set_aside += sum(1 for x in run if prose(x))
+            code = code or any(not x.strip().startswith("//") and x.strip() and not TRIVIAL_LINE.match(x.strip()) for x in run)
+            fits = lambda p0: all(have[p0 + q].startswith("//") if kind == "//" else have[p0 + q] == want
+                                  for q, (kind, want) in enumerate(pat))
+            hits = [p0 for p0 in range(len(have) - len(pat) + 1) if fits(p0)]
+            if len(hits) != 1 or hits[0] < at:
+                return False                           # not there, there twice, or out of order
+            at = hits[0] + len(pat) - (1 if after is not None else 0)
+            k = e
+    # set_aside == 0: change_taken already judged this change (an exact one); this rule is for a reworded comment only
+    return set_aside > 0 and code
 
 
 def entry_status(c, data, rules, strip, dropped):
@@ -2321,6 +2384,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
     # record_untaken: every authors' change from port_from to port_new to a file t has is taken (a) or recorded --
     # whatever path got here (a clean merge, a hand merge, a carry, a conflict kept as t had it, a default)
     mine = {c["overlay"] for c in new_entries}
+    comment_taken = []                 # judged taken but for a reworded comment: named in the merge commit's message
     if port_from != port_new:
         for f in git(repo, "diff", "--name-only", port_from, port_new).stdout.splitlines():
             if not tracked_change(f) or f in mine:
@@ -2334,6 +2398,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             if reuse_on() and change_taken_but_comments(body, d_f, f, *rules_now):
                 notes.append(f"{f}: the authors' change is in {t}'s file but for its // comment lines: no REMERGE.json "
                              "entry (no fixer)")
+                comment_taken.append(f)
                 continue
             if f.startswith("src/main/resources/data/") and f.endswith(".json") and blob_at(repo, port_new, f) and \
                     body.replace(b"\r\n", b"\n") in {fp().data_form_of(v, f[len("src/main/resources/"):], blob_at(repo, port_new, f))
@@ -2407,6 +2472,10 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
         git(work, "add", "--", bp.relative_to(work).as_posix())
     if already and git(work, "diff", "--cached", "--quiet").returncode == 0:
         return True, notes + ["nothing changed"], [], pending, items, mech
+    if comment_taken and msg.endswith(TRAILER):
+        msg = msg[:-len(TRAILER)] + "\n\n" + "\n".join(
+            f"{f}: the authors' change {port_from[:12]}..{port_new[:12]} is in {t}'s file but for its reworded // comment "
+            "lines (change_taken_but_comments): no REMERGE.json entry" for f in comment_taken) + TRAILER
     r = git(work, "commit", "-q", "--no-edit", "-m", msg)
     if r.returncode:
         if "nothing to commit" in r.stdout + r.stderr:
@@ -5570,6 +5639,7 @@ def _check_comment_carry(expect):
     one note, no stop); each precondition failing keeps today's entry and stop."""
     pl = "src/main/java/com/example/mod/Plain.java"
     keep_env = os.environ.get(REUSE_ENV)
+    log_ = ""
 
     def run(flag="1", code="int added() { return 7; }", block=False):
         with tempfile.TemporaryDirectory() as d:
@@ -5592,11 +5662,13 @@ def _check_comment_carry(expect):
                 os.environ[REUSE_ENV] = flag
             rc, out = _quiet(cascade, r, "1.21.3..1.21.4", "none")
             ents = [c for c in remerge_entries(blob_at(r, "neoforge-1.21.4", f"{REC}/1.21.4/REMERGE.json")) if c.get("overlay") == pl]
+            nonlocal log_
+            log_ = git(r, "log", "-1", "--format=%B", "neoforge-1.21.4").stdout
             return rc, out, ents
     try:
         rc, out, ents = run(None)
         expect(rc == 0 and not ents and f"{pl}: the authors' change is in 1.21.4's file but for its // comment lines" in out
-               and "re-apply by hand" not in out,
+               and "re-apply by hand" not in out and f"{pl}: the authors' change" in log_,
                f"THE MEASURED CASE (the flag unset: on): the change there but its comment: no entry, no stop: {rc} {ents} {out[-400:]}")
         for kw, why in (({"flag": "0"}, "MMVU_ROUND_REUSE=0"), ({"code": "int added() { return 8; }"}, "a code line differs"),
                         ({"block": True}, "the file has a text block")):
@@ -5605,17 +5677,53 @@ def _check_comment_carry(expect):
                    f"{why}: the entry and the stop for a fixer, as before: {rc} {ents} {out[-300:]}")
     finally:
         os.environ.pop(REUSE_ENV, None) if keep_env is None else os.environ.__setitem__(REUSE_ENV, keep_env)
-    # the rule's own preconditions, directly
-    f_, body = "A.java", b"class A {\n    // ours\n    int a() { return 1; }\n}\n"
-    d_ = "+    // theirs\n+    int a() { return 1; }\n"
-    expect(change_taken_but_comments(body, d_, f_) and not change_taken(body, d_, f_),
-           "a .java file with the code lines and another comment: taken but for the comment")
-    expect(not change_taken_but_comments(body, d_, "a.txt"), "not a .java file: never")
-    expect(not change_taken_but_comments(body, "+    // theirs only\n", f_), "a comment-only change: never")
-    expect(not change_taken_but_comments(body, "+    int a() { return 1; }\n", f_), "no comment line set aside: never")
-    expect(not change_taken_but_comments(body, "+    // theirs\n+    }\n", f_), "only a trivial line besides: never")
-    expect(not change_taken_but_comments(body + b'String s = """\n x\n """;\n', d_, f_), "a text block in the file: never")
-    expect(not change_taken_but_comments(None, d_, f_), "no file: never")
+    # the rule's own guards, directly: one base case that is a reworded comment, then each guard alone failing
+    f_ = "A.java"
+    H = "@@ -1,4 +1,7 @@\n class A {\n     int v = 1;\n \n"
+    T = "     int w = 2;\n }\n"
+    ok_d = H + "+    // the authors' note\n+    int added() { return 7; }\n+\n" + T
+    ok_b = "class A {\n    int v = 1;\n\n    // ours: the note\n    int added() { return 7; }\n\n    int w = 2;\n}\n"
+    cb = lambda body, d=ok_d, f=f_: change_taken_but_comments(body.encode("utf-8"), d, f)
+    expect(cb(ok_b) and not change_taken(ok_b.encode(), ok_d, f_), "a reworded comment, the code in place: taken")
+    expect(cb(ok_b.replace("\n", "\r\n"), ok_d.replace("\n", "\r\n")), "the same in CRLF")
+    for why, body, d, f in (
+            ("not a .java file", ok_b, ok_d, "a.txt"),
+            ("no file", None, ok_d, f_),
+            ("no hunk (@@) in the diff", ok_b, "+    // the authors' note\n+    int added() { return 7; }\n", f_),
+            ("a run with no context line next to it", ok_b, "@@ -0,0 +1,2 @@\n+    // the authors' note\n+    int added() { return 7; }\n", f_),
+            ("a text block in the file", ok_b.replace("int w = 2;", 'String s = """\n x\n """; int w = 2;'), ok_d, f_),
+            ("a text block in the diff", ok_b, ok_d.replace(" \n+    // the authors'", '-    String s = """;\n \n+    // the authors\''), f_),
+            ("a \\u escape in the comment set aside", ok_b, ok_d.replace("the authors' note", "note \\u000a evil(); here"), f_),
+            ("the comment slot is code in the file", ok_b.replace("// ours: the note", "int x = 0;"), ok_d, f_),
+            ("the comment slot is gone (deleted, not reworded)", ok_b.replace("    // ours: the note\n", ""), ok_d, f_),
+            ("a comment that reads like code (ends in ;)", ok_b, ok_d.replace("the authors' note", "added();"), f_),
+            ("a comment holding a removed line (a call commented out)",
+             ok_b, ok_d.replace(" \n+    // the authors' note", "-    legacy();\n \n+    // legacy(); crashes here"), f_),
+            ("a removed code line still live", ok_b + "class B {\n    void b() {\n        legacy();\n    }\n}\n",
+             ok_d.replace(" \n+    // the authors'", "-    legacy();\n \n+    // the authors'"), f_),
+            ("a code line of the run differs", ok_b.replace("return 7;", "return 8;"), ok_d, f_),
+            ("the block at the wrong place (another neighbour)", ok_b.replace("int w = 2;", "int z = 2;"), ok_d, f_),
+            ("the block twice", ok_b + "class B {\n\n    // again\n    int added() { return 7; }\n\n    int w = 2;\n}\n", ok_d, f_),
+            ("no comment in the change (code only: change_taken's alone)", ok_b,
+             ok_d.replace("+    // the authors' note\n", ""), f_),
+            ("a comment-only run: no code line", ok_b.replace("    int added() { return 7; }\n", ""),
+             ok_d.replace("+    int added() { return 7; }\n", ""), f_)):
+        expect(not (change_taken_but_comments(body.encode("utf-8"), d, f) if body is not None
+                    else change_taken_but_comments(None, d, f)), f"{why}: not taken, the fixer's")
+    two = ("@@ -1,2 +1,4 @@\n class A {\n+    // first note\n+    int a() { return 1; }\n     int v = 1;\n"
+           "@@ -5,2 +7,4 @@\n     int w = 2;\n+    // second note\n+    int b() { return 2; }\n }\n")
+    in_order = "class A {\n    // ours 1\n    int a() { return 1; }\n    int v = 1;\n    int w = 2;\n    // ours 2\n    int b() { return 2; }\n}\n"
+    swapped = ("class X {\n    int w = 2;\n    // ours 2\n    int b() { return 2; }\n}\n"
+               "class A {\n    // ours 1\n    int a() { return 1; }\n    int v = 1;\n}\n")
+    expect(cb(in_order, two) and not cb(swapped, two), "two hunks: in order taken, out of order not")
+    code_only_b, code_only_d = ok_b.replace("    // ours: the note\n", ""), ok_d.replace("+    // the authors' note\n", "")
+    expect(change_taken(code_only_b.encode(), code_only_d, f_) and not cb(code_only_b, code_only_d),
+           "a change with no comment, there exactly: change_taken's, never this rule's (its note names a comment)")
+    # diff_lines: only the file headers are skipped -- an added `++i;` and a removed `--i;` are content
+    dd = "--- a/A.java\n+++ b/A.java\n@@ -1,2 +1,2 @@\n ctx();\n---i;\n+++i;\n"
+    expect(diff_lines(dd) == (["++i;"], ["--i;"]), f"diff_lines keeps ++i; and --i;: {diff_lines(dd)}")
+    expect(not change_taken(b"ctx();\n--i;\n", dd, f_) and change_taken(b"ctx();\n++i;\n", dd, f_),
+           "change_taken: the added ++i; must be in the file, as any other line")
 
 
 def _check_check_done_rows(expect):

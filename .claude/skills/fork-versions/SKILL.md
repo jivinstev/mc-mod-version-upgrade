@@ -351,10 +351,14 @@ diff. Apply it by hand through the version's rows (the diff is in the port branc
 (`cascade <v>..<newest>`). **One invariant decides when an authors' change counts as taken at a version**: its added
 lines, through the version's rows, are in the version's file (in order), or an explicit clear names it
 (`cascade --apply-decisions`, or removing its entry). One narrow case besides, when the cascade records an untaken
-change (not with `MMVU_ROUND_REUSE=0`): a `.java` file with no text block that has every added line of the change in
-order but its `//` comment lines, at least one of them code, gets no entry and no stop, one note instead (a hand merge
-below reworded the change's comment; rounds #129/#130 stopped every version above for a fixer that found the code
-there). On a single-version fork the cascade never runs. An entry never closes because its file changed for another
+change (not with `MMVU_ROUND_REUSE=0`): in a `.java` file (no text block in it or in the diff), a change whose every
+run of added lines is in the file as one block -- line for line through the rows, between the same neighbouring
+context lines, exactly once and in order -- except that a prose `//` comment of the run (not ending like code, holding
+none of the change's removed lines, no `\u` escape) sits on another `//` line in the same place, at least one
+non-trivial, non-comment line among the runs, and none of its removed code lines left in the file, gets no entry and
+no stop: one note, and the merge commit's message names the file (a hand merge below reworded the change's comment;
+rounds #129/#130 stopped every version above for a fixer that found the code there). Anything else keeps the entry
+and the stop. On a single-version fork the cascade never runs. An entry never closes because its file changed for another
 reason, and `port_taken=` (below) moves on only after every change in the range is taken or held by an entry: a merge
 that is undone commits nothing, so the next run offers the change again, and a merge a person makes by hand (keeping
 ours) is caught by the next cascade, which records the change it lacks. With a real conflict as well, the merge is
