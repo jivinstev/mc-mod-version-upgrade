@@ -4113,6 +4113,11 @@ def _cmd_drive(a, out=print):
         live = any(it["status"] == "running" for it in st.items)
         left = [it for it in st.items if it["status"] in ("pending", "failed")]
         held = [x for x in runnable(st) if not x.get("close")]     # runnable now: only the deadline held them
+        if held and not live and time.monotonic() >= deadline:
+            # the deadline passed with steps that could run and none started (measured, round #130: twice the drive
+            # ended with only its summary line, exit 0, and nothing said that steps were waiting)
+            out(f"round: deadline: {len(held)} step(s) not started ({', '.join(x['id'] for x in held[:12])}"
+                + (" ..." if len(held) > 12 else "") + ") -- start drive --follow again")
         stuck = not live and left and not held and (getattr(a, "follow", False) or (not jobs and not ran))
         if stuck:
             for it in st.items:
@@ -6265,6 +6270,39 @@ def self_check():
             finally:
                 G_.update(keep2)
                 os.environ.pop(mod("fb").REUSE_ENV, None) if env_k is None else os.environ.__setitem__(mod("fb").REUSE_ENV, env_k)
+
+        # the deadline passes with a step runnable and none started: the drive says which (round #130: it ended with
+        # only its summary line, twice); a second drive finishes them. The drive is shared: a version-branch fork's
+        # items and a single-version fork's alike
+        for kind_ in ("branches", "single"):
+            with tempfile.TemporaryDirectory() as fd:
+                fd = pathlib.Path(fd)
+                fsp = fd / "round" / "STATE.json"
+                fsp.parent.mkdir(parents=True)
+                ver_ = "1.21.4" if kind_ == "branches" else "1.21.1"
+                fk_ = {"o/dl": {"name": "dl", "kind": kind_, "base": "1.21.1", "head": "neoforge-1.21.1", "dir": str(fd),
+                                "versions": ["1.21.4"] if kind_ == "branches" else []}}
+                mk_ = lambda step_, deps_: {"id": f"dl@{ver_}:{step_}", "fork": "o/dl", "version": ver_, "step": step_,
+                                            "kind": "tool", "deps": deps_, "dirs": [f"o/dl#{ver_}"], "status": "pending",
+                                            "fixes": 0, "extra": {}, "result": {}, "phase": "overhead", "lock": False}
+                fsp.write_text(json.dumps({"round_dir": str(fd), "forks": fk_, "data": {"allow": []}, "items": [
+                    mk_("dlfirst", []), mk_("dlsecond", [f"dl@{ver_}:dlfirst"])]}), encoding="utf-8")
+                keep_dl = {k: TOOL_IMPL.get(k) for k in ("dlfirst", "dlsecond")}
+                TOOL_IMPL["dlfirst"] = lambda st_, it_, log_: (time.sleep(0.6), ("first ran", {}))[1]
+                TOOL_IMPL["dlsecond"] = lambda st_, it_, log_: ("second ran", {})
+                try:
+                    rc1, o1 = q(cmd_drive, argparse.Namespace(state=str(fsp), max_hours=0.5 / 3600, follow=True))
+                    mid = {x["id"]: x["status"] for x in json.loads(fsp.read_text(encoding="utf-8"))["items"]}
+                    rc2, o2 = q(cmd_drive, argparse.Namespace(state=str(fsp), max_hours=1.0, follow=True))
+                finally:
+                    for k_, v_ in keep_dl.items():
+                        TOOL_IMPL.pop(k_, None) if v_ is None else TOOL_IMPL.__setitem__(k_, v_)
+                want_ = f"round: deadline: 1 step(s) not started (dl@{ver_}:dlsecond) -- start drive --follow again"
+                expect(rc1 == 0 and want_ in o1 and "ROUND DONE" not in o1 and mid == {f"dl@{ver_}:dlfirst": "ok",
+                                                                                     f"dl@{ver_}:dlsecond": "pending"},
+                       f"{kind_}: the deadline with a step not started: named, no ROUND DONE, it stays pending: {mid} {o1}")
+                expect(rc2 == 0 and "ROUND DONE" in o2 and "round: deadline" not in o2,
+                       f"{kind_}: the next drive --follow finishes it: {o2}")
 
         def rec(i, text, st_path=state):
             p_ = pathlib.Path(st_path).parent / "summaries" / f"{i}.md"

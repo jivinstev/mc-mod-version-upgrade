@@ -453,8 +453,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
 - **`round.py drive --follow`** (run in the background, its output watched by one Monitor) runs every mechanical step
   itself, prints each agent job the moment it is dispatched (`round: AGENT JOB {...}`), records each job itself when its
   summary file appears, and keeps going until nothing runs or waits (exit 0 with `ROUND DONE`, or exit 3 with its
-  BLOCKED lines); after 1.75 h it starts no new step and ends once the running ones end (`round: deadline`): start it again,
-  the jobs still out keep running (never start them twice). Only after a session or container restart, `round.py
+  BLOCKED lines); after 1.75 h it starts no new step and ends once the running ones end, exit 0, with a `round: deadline`
+  line -- `jobs still out -- <ids>` when agent jobs are out, `N step(s) not started (<ids>) -- start drive --follow again`
+  when steps could run and none started: start it again, the jobs still out keep running (never start them twice). Only after a session or container restart, `round.py
   resume` first: it prints an AGENT JOB line for each job whose worker died. **Versions are pipelined** (#206): a version's work starts once the version below has cascaded into it
   (its merge-up), not once that one has released; each item locks its version (`<fork>#<v>`), the steps that fetch or
   push also lock the fork's git, at most two local builds and three agent jobs run at once, and the version below's
