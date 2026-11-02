@@ -752,7 +752,7 @@ if [ "${PORT_TOOLS_PART:-all}" = all ]; then     # split (CI), its three thirds 
     || bad "round-audit self-check: $( (grep '^FAIL' <<<"$out" || true; tail -3 <<<"$out") | head -40)"
 fi
 out="$(python3 tools/check-budget.py --self-check 2>&1)"
-grep -q 'check-budget self-check: OK' <<<"$out" && ok "check-budget: a test over 1.5 x its budget (and its budget + 10 s) fails, a test with no budget on its OS fails, each named with its time and budget; budgets are per OS family; --enforce exits 1, a warning 0" \
+grep -q 'check-budget self-check: OK' <<<"$out" && ok "check-budget: a test over its budget + 30 s fails, a test with no budget on its OS fails, each named with its time and budget; budgets are per OS family; --enforce exits 1, a warning 0" \
   || bad "check-budget self-check: $(tail -5 <<<"$out")"
 # the round's lessons reach the migrator as a block in its closing comment (round of 2026-10-19: they were harvested by
 # hand), for every fork kind, and a follow-up session's worklist reads it -- the round itself still writes nothing here
@@ -2040,7 +2040,7 @@ for _third in 1 2 3; do    # split, round-audit's self-check runs as three third
   fi
 done
 # the time budget (tools/check-budget.py): enforced in CI (or PORT_TOOLS_BUDGET=enforce), a warning elsewhere, skipped
-# with PORT_TOOLS_BUDGET=off; a test over 1.5 x its budget (and its budget + 10 s), or with none on this OS, fails
+# with PORT_TOOLS_BUDGET=off; a test over its budget + 30 s, or with none on this OS, fails
 if [ "${PORT_TOOLS_BUDGET:-}" != off ]; then
   _enf=""; { [ -n "${CI:-}" ] || [ "${PORT_TOOLS_BUDGET:-}" = enforce ]; } && _enf="--enforce"
   python3 tools/check-budget.py --times "$TIMES" $_enf || fail=$((fail+1))

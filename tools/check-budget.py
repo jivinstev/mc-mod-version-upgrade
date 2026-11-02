@@ -11,11 +11,13 @@ WHY. The suite's wall time only grew (the owner: "We can't keep expanding test d
 and nobody saw it until a Windows job took 20 minutes. test-port-tools.sh writes every result's seconds (since the
 previous result, as its PASS/FAIL lines print them) to a file; this compares them with tools/test-budgets.tsv.
 
-THE RULE. A test fails its budget when it took more than 1.5 x its budget and more than its budget + 10 s (two CI runs
-of the same commit differed by up to 10 s on one test, so a 1 s test is not failed by a cold JVM); a test with no
-budget for this OS family
-fails too. Each line names the test, its time and its budget. Budgets were set from CI's measured times x 1.4 (runner
-variance is about +-40%), at least 2 s. With --enforce (test-port-tools.sh passes it when CI is set, or with
+THE RULE. A test fails its budget when it took more than its budget + 30 s; a test with no budget for this OS family
+fails too. Each line names the test, its time and its budget. A budget is the largest time CI measured for the test
+x 1.14, at least 2 s. Why these numbers (#222's runs): the same code's run-to-run spread reached 18 s on a small test
+(a cold JVM: 3-6 s, then 24 s on Windows) and 60 s on a heavy one (round.py's self-check, 138-198 s on Windows); a
+multiplicative allowance (1.5 x) let a 200 s test grow 100+ s unseen, so the slack is absolute. Each of the 1,601
+measurements of a later run stays within budgets set from the earlier runs alone, and a test of up to ~200 s that
+grows 60 s past its largest measured time fails. With --enforce (test-port-tools.sh passes it when CI is set, or with
 PORT_TOOLS_BUDGET=enforce) a problem exits 1; without, it is printed as a warning and exits 0 (a slower laptop is not
 a failure). PORT_TOOLS_BUDGET=off skips the check.
 
@@ -32,7 +34,7 @@ import argparse, math, pathlib, platform, re, sys, tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BUDGETS = ROOT / "tools" / "test-budgets.tsv"
 OSES = ("linux", "macos", "windows")
-FACTOR, FLOOR, HEADROOM, MIN_BUDGET = 1.5, 10, 1.4, 2
+FLOOR, HEADROOM, MIN_BUDGET = 30, 1.14, 2
 KEY_LEN = 100
 
 
@@ -82,7 +84,7 @@ def read_budgets(path):
 
 def write_budgets(path, budgets):
     lines = ["# tools/check-budget.py: per-test seconds of tools/test-port-tools.sh (key, linux, macos, windows; empty = no"
-             " budget there).", "# A test fails when it takes > 1.5 x its budget and > budget + 10 s, or has no budget on its"
+             " budget there).", "# A test fails when it takes > its budget + 30 s, or has no budget on its"
              " OS. Add one: python3 tools/check-budget.py --times FILE --add-missing"]
     for k in sorted(budgets):
         lines.append("\t".join([k] + [str(budgets[k][o]) if o in budgets[k] else "" for o in OSES]))
@@ -101,8 +103,8 @@ def problems(times, budgets, osf):
         if b is None:
             out.append(f"budget: NO BUDGET on {osf}: {t} s, no entry: {k} -- add it: python3 tools/check-budget.py "
                        "--times FILE --add-missing (tools/test-budgets.tsv)")
-        elif t > b * FACTOR and t > b + FLOOR:
-            out.append(f"budget: OVER on {osf}: {t} s against a budget of {b} s (allowed {max(b * FACTOR, b + FLOOR):.0f} s): {k}")
+        elif t > b + FLOOR:
+            out.append(f"budget: OVER on {osf}: {t} s against a budget of {b} s (allowed {b + FLOOR} s): {k}")
     return out
 
 
@@ -116,7 +118,7 @@ def self_check():
             print("FAIL:", msg)
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
-        (d / "times.tsv").write_text("3\tPASS\texamplemod: a quick test\n40\tPASS\texamplemod: a slow test (in 39.5 s): long text\n"
+        (d / "times.tsv").write_text("3\tPASS\texamplemod: a quick test\n60\tPASS\texamplemod: a slow test (in 59.5 s): long text\n"
                                      "1\texamplemod: a quick test\n0\tPASS\ta new test nobody budgeted\n"
                                      "132\tFAIL\texamplemod self-check: FAIL: the lock is still held\n", encoding="utf-8")
         failed = []
@@ -128,15 +130,19 @@ def self_check():
         b = {"examplemod: a quick test": {"linux": 2}, "examplemod: a slow test: long text": {"linux": 20, "windows": 60},
              "examplemod: a quick test #2": {"linux": 2}}
         p = problems(times, b, "linux")
-        expect(len(p) == 2 and any("OVER on linux: 40 s against a budget of 20 s" in x and "a slow test" in x for x in p)
+        expect(len(p) == 2 and any("OVER on linux: 60 s against a budget of 20 s (allowed 50 s)" in x and "a slow test" in x for x in p)
                and any("NO BUDGET on linux: 0 s" in x and "a new test nobody budgeted" in x for x in p),
                f"an over-budget test and an unbudgeted test fail, each named with its time and budget: {p}")
         p = problems(times[:3], b, "windows")
         expect(len(p) == 2 and all("NO BUDGET on windows" in x for x in p), f"budgets are per OS family: {p}")
-        expect(problems([("x", 12)], {"x": {"linux": 2}}, "linux") == [] and problems([("x", 13)], {"x": {"linux": 2}}, "linux"),
-               "a small test: over only past budget + 10 s too (runner jitter)")
-        expect(problems([("x", 30)], {"x": {"linux": 20}}, "linux") == [] and problems([("x", 31)], {"x": {"linux": 20}}, "linux"),
-               "the 50% line: 30 s on a 20 s budget passes, 31 s fails")
+        expect(problems([("x", 24)], {"x": {"linux": 9}}, "linux") == [],
+               "a small test's cold-start spike (24 s on a 9 s budget, Windows CI 2026-11-02) passes")
+        expect(problems([("x", 32)], {"x": {"linux": 2}}, "linux") == [] and problems([("x", 33)], {"x": {"linux": 2}}, "linux"),
+               "the line: budget + 30 s passes, one second more fails")
+        heavy = budget_for(198)                    # round.py's self-check on Windows: its largest measured time
+        expect(problems([("x", 198 + 60)], {"x": {"windows": heavy}}, "windows")
+               and not problems([("x", 198)], {"x": {"windows": heavy}}, "windows"),
+               f"a heavy test 60 s past its largest measured time fails (budget {heavy} s)")
         write_budgets(d / "b.tsv", b)
         expect(read_budgets(d / "b.tsv") == b, "the budgets file reads back as written")
         rc_enforce = main(["--times", str(d / "times.tsv"), "--os", "linux", "--budgets", str(d / "b.tsv"), "--enforce"])
@@ -159,7 +165,7 @@ def main(argv=None):
     ap.add_argument("--os", choices=OSES, help="the OS family (default: this machine's)")
     ap.add_argument("--budgets", default=str(BUDGETS))
     ap.add_argument("--enforce", action="store_true", help="exit 1 on a problem (CI)")
-    ap.add_argument("--add-missing", action="store_true", help="give each test with no budget on this OS one (x1.4)")
+    ap.add_argument("--add-missing", action="store_true", help="give each test with no budget on this OS one (x1.14)")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args(argv)
     if a.self_check:

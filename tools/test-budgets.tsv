@@ -1,11 +1,11 @@
 # tools/check-budget.py: per-test seconds of tools/test-port-tools.sh (key, linux, macos, windows; empty = no budget there).
-# A test fails when it takes > 1.5 x its budget and > budget + 10 s, or has no budget on its OS. Add one: python3 tools/check-budget.py --times FILE --add-missing
-#161 U1 on a single-branch clone of the head (single-version) and the version-branch fixture: port-c	2	6	13
-#161 U2 on a single-branch clone of the head (single-version) and version branch 1.21.4: ci-gates' m	13	19	33
-#161 U5 on a single-branch clone of the head (single-version) and the version-branch fixture: fork-b	3	20	35
-#161 U6 on a single-branch clone of the head made a 26.2 port (single-version) and on the version-br	2	12	20
+# A test fails when it takes > its budget + 30 s, or has no budget on its OS. Add one: python3 tools/check-budget.py --times FILE --add-missing
+#161 U1 on a single-branch clone of the head (single-version) and the version-branch fixture: port-c	2	6	11
+#161 U2 on a single-branch clone of the head (single-version) and version branch 1.21.4: ci-gates' m	11	16	35
+#161 U5 on a single-branch clone of the head (single-version) and the version-branch fixture: fork-b	3	16	42
+#161 U6 on a single-branch clone of the head made a 26.2 port (single-version) and on the version-br	2	11	16
 #forge: refs are found, neoforge: ids are not	2	2	2
-CONTROL: a clean 1.21.1 tree passes all three checks	2	2	2
+CONTROL: a clean 1.21.1 tree passes all three checks	2	2	4
 CONTROL: once fixed, the probe reports nothing (exit 0) -- and it did probe something	2	2	2
 EditBoxes (26.2): a rejected edit restores the last accepted value without calling the earlier respo	2	2	2
 H3: an entry's fixes counted across 3 mods, one shape covering all of them	2	2	2
@@ -13,7 +13,7 @@ README: round-table --session DIR, MMVU_GH_TIMEOUT and the REST fallback, round-
 RegIds (1.21.11): the entered name holds for every Properties its supplier builds, an un-entered reg	2	2	3
 RegIds (1.21.3): the entered name holds for every Properties its supplier builds, an un-entered regi	2	2	3
 RenderPasses (26.3): an open pass is refused with a message naming the pass-free stages and getRende	2	2	2
-a .multiversion/ layer at HEAD is refused (exit 2) by all 24 fork-taking tools (fork-kind, fork-port	3	6	10
+a .multiversion/ layer at HEAD is refused (exit 2) by all 24 fork-taking tools (fork-kind, fork-port	3	5	8
 a Gradle compile stopped at its 1000-error cap is NOT a count (X5g)	2	2	2
 a bare-string ingredient is caught on 1.21.1	2	2	2
 a broken member table exits non-zero	2	2	2
@@ -30,7 +30,7 @@ a trailing comma / a comment is caught as non-strict JSON	2	2	2
 an unprobed multi-line header is counted, not silently skipped	2	2	2
 audit-descriptors: a removed method, a changed signature and a moved class in a transformer's string	2	2	2
 audit-event-listeners: naming the concrete subclass passes, with the listener count printed	2	2	2
-audit-event-listeners: the abstract parameter is reported for the annotated listener AND the Cls::me	2	2	2
+audit-event-listeners: the abstract parameter is reported for the annotated listener AND the Cls::me	2	5	2
 audit-event-listeners: zero listeners checked exits 2, never a pass	2	2	2
 audit-mixin-targets: roots_of is recomputed for a new object reusing an id() and for a grown one (bo	2	2	2
 audit-mixin-targets: the sources jar of the build's neo_version is picked over an older version's le	2	2	2
@@ -40,12 +40,12 @@ audit-zero-uses: a 0-use tier (getUses() 0, a 0 constant, an enum tier constant,
 baseline GameTest: the template becomes a mod's test with no example names left	2	2	2
 behaviour tests: failures read from the GameTest log, a run with no summary is not a pass	2	2	2
 boot-smoke finds the instance from setup's per-version mods key	2	2	2
-boot-smoke sees a client already running on the instance	5	6	12
-bucketer: specific entries matched, generic + near-miss names left unmatched	2	2	2
+boot-smoke sees a client already running on the instance	4	5	10
+bucketer: specific entries matched, generic + near-miss names left unmatched	2	2	3
 census: field, prose-arrow and SRG-shape detectors attribute; comment-only and renames-with-no-entry	2	2	2
-check-budget: a test over 1.5 x its budget (and its budget + N s) fails, a test with no budget on it	2	3	4
+check-budget: a test over its budget + N s fails, a test with no budget on its OS fails, each named 	2	2	2
 check-compat: each rule fires on its pattern and not on the safe form	2	2	2
-check-compat: every tracked .py parses as Python 3.9 and no script or tool uses a pattern that break	3	3	6
+check-compat: every tracked .py parses as Python 3.9 and no script or tool uses a pattern that break	4	5	6
 checkout-lock: one run per checkout (a second refused naming the holder), the holder's child let thr	2	2	2
 ci-gates --mc on a version branch: a second run on a busy checkout is refused (exit 14) naming the h	2	2	2
 ci-gates without --mc (a single-version fork) ignores the lock entirely	2	2	2
@@ -84,32 +84,32 @@ fix-holders: the expression under javac's caret is unwrapped, retyped or resolve
 fix-json-strict: comment lines, trailing commas and a BOM are repaired byte-safe; a missing comma is	2	2	2
 fix-ledger: a ledger renders and validates; a legacy layer section is kept in the JSON and not rende	2	2	3
 fix-missing-members: a moved member is renamed only where javac names its owner type (incl. record f	2	2	3
-fix-optional-listeners: a subscriber method naming an optional mod moves to a helper and its callers	3	3	5
+fix-optional-listeners: a subscriber method naming an optional mod moves to a helper and its callers	3	3	4
 forge-shapes: tick phases, DistExecutor, modifiers, item NBT, hooks, GeckoLib colour rewritten idemp	2	2	2
 forge_import_codemod rewrites the slash form (descriptors, mixin targets)	2	2	2
 forge_import_codemod: a loader package-prefix string (a transform whitelist) follows the loader	2	2	2
-fork-branches self-check --platform, the OS leg -- Linux runs all of: on the frozen 3-version fixtur		16	16
-fork-branches self-check: on the frozen 3-version fixture each version branch is done from its migra	62	514	
-fork-kind: one port branch (and a single-branch clone of the head) is single-version; a neoforge-<v>	2	5	7
+fork-branches self-check --platform, the OS leg -- Linux runs all of: on the frozen 3-version fixtur		7	14
+fork-branches self-check: on the frozen 3-version fixture each version branch is done from its migra	51		
+fork-kind: one port branch (and a single-branch clone of the head) is single-version; a neoforge-<v>	2	4	7
 fork-port on a single-version fork: stops before any stage (exit 2); no freeze, no review, nothing w	2	2	2
-fork-port.py on version branches: --check-done done off the branch, a resume refused off it, --write	3	17	30
+fork-port.py on version branches: --check-done done off the branch, a resume refused off it, --write	3	14	24
 fork-port: a second run on a busy checkout is refused (exit 14)	2	2	2
-fork-port: stage selection, moves table, residue report, STOP block, every --from-stage resume re-me	3	9	24
+fork-port: stage selection, moves table, residue report, STOP block, every --from-stage resume re-me	3	7	20
 gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) stri	2	2	2
-gate loop: the deepest load-crash cause and the mod's own frames go to the worker	13	5	5
-gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary 	14	6	6
-gatec-carrier: one carrier per stable versions.json line (Java 21/25, JEI pin or the stand-in probe)	7	7	9
+gate loop: the deepest load-crash cause and the mod's own frames go to the worker	12	5	4
+gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary 	12	5	5
+gatec-carrier: one carrier per stable versions.json line (Java 21/25, JEI pin or the stand-in probe)	6	6	7
 hand-off: replaces itself, keeps other sections, carries the Scope choice and blockers	2	2	2
 hypotheses: repeats exact/loose, cross-port 2+/3+ mods, helper routing, file locality, optional code	2	2	2
-install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest	2	5	3
+install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest	2	4	3
 javac's ': expected' (no quotes) is a parse abort, not a count of 1	2	2	2
 keep-current, the close: a 'Lessons for the migrator' block in the closing comment, single-version a	2	2	2
 keep-current, the round's cost: fresh worker subagents with ~40-line summaries, one blocking wait, r	2	2	2
 keep-current, the weekly round: gates, then the review, then the merge, then the pre-release; an S1/	2	2	2
 keep-current, version branches: keep-current/<date>-<v> is pushed only after the lower version's PR 	2	2	2
-known-issues self-check: the rubric grades S1-S4 from its inputs and an owner override wins and is r	2	16	21
+known-issues self-check: the rubric grades S1-S4 from its inputs and an owner override wins and is r	2	13	18
 layer-deps: pinned mods resolved per target, a required miss stops (exit 15) and writes nothing, an 	2	2	2
-layer-inventory: the base build's mixin targets/injections (fork-port's hook_targets), event listene	2	2	2
+layer-inventory: the base build's mixin targets/injections (fork-port's hook_targets), event listene	2	2	3
 learn-pack: recurring renames become rows; one-offs and non-platform names never do	2	2	2
 local-maven: a jar a blocked maven would serve is laid out locally, sha1 from the registry	2	2	2
 manual-tests: the 10 manual tests no gate reaches, one per kind first (music, client packets, bosses	2	2	2
@@ -119,20 +119,20 @@ member table loads: era-26.2-members.tsv	2	2	2
 member table loads: forge-1.21.1-members.tsv	2	2	2
 minitoml: the TOML reader for Pythons without tomllib reads mods.toml forms (inline tables, every st	2	2	2
 mixin audit: a @Mixin(value = X.class, priority = N) file is checked (its stale pinned descriptor is	2	2	2
-mixin audit: a pinned descriptor naming a class that moved package (same simple name) is a mismatch;	2	2	2
+mixin audit: a pinned descriptor naming a class that moved package (same simple name) is a mismatch;	2	2	3
 mixin audit: an argsOnly @ModifyVariable on a name-only overload is judged against the FIRST declare	2	2	2
 normalise-imports: inline names a port wrote become imports; the author's own and colliding names ar	2	2	2
 offer-page: the handoff page shows each fork's install, distance from release, checks and its manual	2	2	2
 optional-dep-scan: a listener class naming an optional mod in a method type blocks; a mixin reaching	2	2	2
-orphaned overrides are reported (exit 1)	5	2	9
+orphaned overrides are reported (exit 1)	7	2	28
 park-optional: integration packages and datagen are parked, required-dep code is not	2	2	2
 playtest-lint: a script using every directive is clean, each malformed line (duration, kind, aim, ke	2	2	2
 playtest: script parse + lint (directives, --jar ids, --forbid), log verdicts, inventory, report and	2	2	2
 plural datapack dirs are caught	2	2	2
 port front door: jar metadata, the hoisted-config-SPEC fix	2	2	2
 port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from m	2	2	2
-port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit	3	16	37
-port-ci: without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (wit	5	12	34
+port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit	4	13	30
+port-ci: without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (wit	4	11	28
 port-cost: a session driving two version branches and a second fork (one subagent per version) is ch	2	2	3
 port-deps: dependency preflight -- blocked hosts, missing target builds, local-maven fill	2	2	2
 port-derive: a dev-branch port replayed onto the release, unreleased files and their port-only handl	2	2	3
@@ -141,27 +141,27 @@ port-manifest: refresh points the install manifest at the newest full Release (s
 port-offer: the authors see the port without our CI commit; port commits after a CI commit are repla	2	2	3
 port-profile: count the cost-driving port patterns per mod and name the tool covering each	2	2	2
 port-provenance: the release commit is matched by publish time and the unreleased commits on top are	2	2	2
-port-sync: the author's new commits merge into the dev port branch; a conflict stops with the files 	2	9	19
-port-upstream: an unlicensed or mismatched repo stops before spending; a dropped copyright line stop	3	5	7
+port-sync: the author's new commits merge into the dev port branch; a conflict stops with the files 	2	10	15
+port-upstream: an unlicensed or mismatched repo stops before spending; a dropped copyright line stop	3	4	6
 port.py and port-upstream.py both run tools/mechanical-hop.py's Forge and era stages; no route runs 	2	2	2
 port_gates.gate_a itself (Gradle faked): reads build/test-results/test and counts the tests run	2	2	2
 port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone	2	2	2
 propose-learnings --from-plan: the newest comment's Lessons block becomes a checklist (evidence link	2	2	2
 publish-port: single-version output and API calls byte-identical to the recorded golden; --platform 	2	2	2
-publish: refuses without permission, for a pre-release or foreign release, an open S1, an unknown ta	2	2	2
+publish: refuses without permission, for a pre-release or foreign release, an open S1, an unknown ta	2	2	3
 real-install: --mc narrows a saved plan to those versions and keeps the file whole; a version not in	2	2	2
 real-install: a per-version plan from fixture branches (the versions every fork has, each fork's var	2	2	2
 recipes: auto groups rewrite and count, a dead group is named, choice sites stay untouched	2	2	2
 review-metrics: stubbed bodies, import churn, the port's unused imports and voice measured; the auth	2	2	2
-round-audit self-check, third 1 of 3: the base case and every third mutation case (the full list: pa	35	136	251
-round-audit self-check, third 2 of 3: the base case and every third mutation case (the full list: pa	28	107	196
-round-audit self-check, third 3 of 3: the base case and every third mutation case (the full list: pa	30	114	209
-round-audit: a finished round audited from a stand-in GitHub (paged branch histories, runs with jobs	83		
-round-preflight: a missing fork clone says to attach it to the scheduled task; the GitHub way named 	16	31	30
-round-qdiff: two copies of round.py give no diff; one with a dependency edge cut gives exactly that 	5	17	34
-round.py: init on a library + dependent fixture (three and two version branches) builds the queue in	48	143	251
+round-audit self-check, third 1 of 3: the base case and every third mutation case (the full list: pa	29	70	182
+round-audit self-check, third 2 of 3: the base case and every third mutation case (the full list: pa	23	60	120
+round-audit self-check, third 3 of 3: the base case and every third mutation case (the full list: pa	24	80	100
+round-audit: a finished round audited from a stand-in GitHub (paged branch histories, runs with jobs	68		
+round-preflight: a missing fork clone says to attach it to the scheduled task; the GitHub way named 	13	26	24
+round-qdiff: two copies of round.py give no diff; one with a dependency edge cut gives exactly that 	4	14	28
+round.py: init on a library + dependent fixture (three and two version branches) builds the queue in	39	144	226
 route planner: every hop finished before the next, a missing pack or row is said, never guessed	2	2	2
-run-catalog-scans.sh works through a symlinked tools/ (the workspace layout)	2	2	5
+run-catalog-scans.sh works through a symlinked tools/ (the workspace layout)	2	2	4
 run-port: the stop contract's estimate and block, per-run spend on a resumed log	2	2	2
 scaffold-gatec: the client harness template becomes a mod's harness with no example names left	2	2	2
 scope menu: integration, commands and a mob family found; shares from the first-compile log	2	2	2
@@ -169,7 +169,7 @@ shared 1.21.5-26.3 render helpers (every version with LegacyRenderType): a Legac
 shared 26.3 render helpers (#120): LegacyGl draws into an open pass or given views and asserts befor	2	2	2
 shared MultiBufferSource (26.2, 26.3): a non-consolidating type's started builder is drawn before a 	2	2	2
 shared helpers: a REQUIRES-gated helper is skipped in a fork without the library, installed in one w	2	2	2
-shared helpers: for every version and every helper used alone, the copied set is closed under simple	6	7	7
+shared helpers: for every version and every helper used alone, the copied set is closed under simple	5	6	6
 shared rows (1.21.3): boolean hurt -> Hurt.server, hurt overrides, InteractionResult, cooldowns, Gec	2	2	2
 shared rows: R25 registry ids -- suppliers enter their name, Item/Block Properties are stamped, a co	2	2	2
 shared rows: Screen.hasControlDown/hasAltDown (1.21.10) and BLOCK_SHEET_MIPPED (1.21.11) rewrite the	2	2	2
@@ -183,7 +183,7 @@ shipped pack forge-1.20-to-neoforge-1.21.1.recipes.tsv parses and names only cat
 shipped-gate: a file that is not a jar exits 2	2	2	2
 shipped-gate: a jar that does not exist exits 2	2	2	2
 shipped-gate: a malformed --expect-log exits 2 before anything is downloaded	2	2	2
-shipped-gate: expectation parsing, log matching, JDK pick (JAVA_HOME first, then JAVA_HOME_<n>, /usr	5	6	6
+shipped-gate: expectation parsing, log matching, JDK pick (JAVA_HOME first, then JAVA_HOME_<n>, /usr	4	5	5
 single-version: --chain, --check-done and --write-test-items stop the same way (exit 2), nothing wri	2	2	2
 srcsets: every source set the author builds, their compile and jar tasks, and the target from the bu	2	2	2
 summary: catalogue groups, families, files, and GREW/NEW against the previous run	2	2	2
@@ -191,16 +191,16 @@ targets: one table of what each target needs -- unknown branch names listed, bui
 the Gradle error cap agrees in the init script, port_gates, file-loop and burndown-count	2	2	2
 the old-shaped getLightBlock(state) is named	2	2	2
 the same {item:} recipe is caught when the target is 1.21.4	2	2	2
-the sweep names a 0-use tier (tools/audit-zero-uses.py), not a 512-use one or a comment	2	2	5
+the sweep names a 0-use tier (tools/audit-zero-uses.py), not a 512-use one or a comment	2	2	4
 the sweep runs as valid shell (exit 0, no shell errors)	2	2	7
 the sweep runs to its end	2	2	2
-the sweep says a 0-use tier a ModifyDefaultComponentsEvent handler covers is handled, not a hit	2	2	5
-the sweep says the 0-use audit did not run when it cannot, and goes on	2	2	6
-the template compiles (JDK only; no Minecraft)	2	2	2
+the sweep says a 0-use tier a ModifyDefaultComponentsEvent handler covers is handled, not a hit	2	2	4
+the sweep says the 0-use audit did not run when it cannot, and goes on	2	2	5
+the template compiles (JDK only; no Minecraft)	2	2	3
 the uncapped recount is read from the same log (union of unique file:line)	2	2	2
 version-branch ladder: a hop crossing a converter's landing version runs it (1.21.1->1.21.3 the 1.21	2	2	3
 visual review: black, flat and missing-texture frames are findings without a model; verdict lines pa	2	2	2
-weekly-plan self-check: the workflow equals tools/golden/weekly-plan.yml (Tuesdays 15:00 and 16:00 U	9	27	66
+weekly-plan self-check: the workflow equals tools/golden/weekly-plan.yml (Tuesdays 15:00 and 16:00 U	7	30	54
 zipls -Z1 matches unzip -Z1	2	2	2
 zipls -l / -Z1 list the jar (31 classes), LF-terminated so grep's $ matches	2	2	2
 zipls -p prints a member	2	2	2
