@@ -3008,7 +3008,7 @@ def mark_ungated(repo, t, commit=None, why=None):
         f.unlink(missing_ok=True)
 
 
-# MMVU_ROUND_REUSE=1 (off by default; off, nothing below is read or written): a green A/B run's commit and what else its
+# On by default; MMVU_ROUND_REUSE=0 turns it off (then nothing below is read or written): a green A/B run's commit and what else its
 # verdict depends on, kept beside UNGATED_FILE, so a round's resync after a records-only merge and its t_gates on a
 # ci_record fork do not run Gate A/B again on a tree that run already passed (measured, round #129: ~12.5 min a
 # carry-only version). Gate C and PR CI are never reused.
@@ -3018,7 +3018,8 @@ AB_ENV_KEYS = ("JAVA_HOME", "GRADLE_OPTS", "GRADLE_USER_HOME", "MMVU_SHARED_DIR"
 
 
 def reuse_on():
-    return os.environ.get(REUSE_ENV) == "1"
+    """The one reader of the flag, for this tool and round.py: on unless MMVU_ROUND_REUSE=0 (unset or 1: on)."""
+    return os.environ.get(REUSE_ENV, "1") != "0"
 
 
 def kit_id():
@@ -3051,7 +3052,7 @@ def ab_key(repo, t, untaken_ok):
 
 def note_ab_green(repo, work, t, untaken_ok, rc):
     """After a green A/B run (fork-port.py exit rc) on version t's checkout `work`: its commit, key and exit recorded
-    (MMVU_ROUND_REUSE=1 only)."""
+    (not with MMVU_ROUND_REUSE=0)."""
     if not reuse_on():
         return
     key, c = ab_key(repo, t, untaken_ok), git(work, "rev-parse", "HEAD").stdout.strip()
@@ -3103,11 +3104,11 @@ def remerge_cleared_only(repo, c, h, t):
 
 def ab_reusable(repo, work, t, untaken_ok, ok=(0, 17, UNDONE_EXIT)):
     """(record, None) when version t's A/B green record ({"commit", "key", "exit"}) still stands for `work`'s HEAD, else
-    (None, why): MMVU_ROUND_REUSE=1; a record for t whose exit the caller accepts (ok) with the same ab_key, the authors'
+    (None, why): MMVU_ROUND_REUSE not 0; a record for t whose exit the caller accepts (ok) with the same ab_key, the authors'
     branch fetched first (the gate run's drift check fetches it); its commit an ancestor of HEAD with only records_only
     files changed since (a merge since included; .port/<t>/REMERGE.json too when it only lost entries)."""
     if not reuse_on():
-        return None, f"{REUSE_ENV} is not 1"
+        return None, f"{REUSE_ENV}=0"
     try:
         rec = json.loads((_ungated_path(repo) / AB_GREEN_FILE).read_text(encoding="utf-8")).get(t)
     except (OSError, ValueError, AttributeError):
@@ -3201,7 +3202,7 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
     CASCADE-PLAN.json / CASCADE-PLAN.md / ISSUE.md under out_dir (default build/fork-branches/plan). mode "apply": the
     same merges on the real branches, each decision file merged without the authors' change and an open REMERGE.json
     entry (or a default the tool carries out, logged in .port/DECISIONS.md); everything else goes on, the versions
-    above included; a red branch still stops. reuse_ab (round.py's resync, with MMVU_ROUND_REUSE=1): a merge whose change
+    above included; a red branch still stops. reuse_ab (round.py's resync, unless MMVU_ROUND_REUSE=0): a merge whose change
     is records-only on a tree with a standing A/B green record (ab_reusable) is not gated again. port_ref (FROM the port
     branch only): carry that commit in place of the
     port branch's tip -- a fix made on a branch cut from what the versions took, so none of the head's untaken authors'
@@ -5099,7 +5100,7 @@ def main():
     k.add_argument("--untaken-ok", metavar="FROZEN_JSON", help="a weekly round's frozen input (round/frozen.json), passed "
                    "to each version's gates (fork-port.py --untaken-ok): the authors' commits the plan does not take do "
                    "not stop them at the upstream freeze; recorded in that version's DRIFT.md")
-    k.add_argument("--reuse-ab", action="store_true", help="tools/round.py's resync step, with MMVU_ROUND_REUSE=1: a merge "
+    k.add_argument("--reuse-ab", action="store_true", help="tools/round.py's resync step (not with MMVU_ROUND_REUSE=0): a merge "
                    "that brings records only, on a tree whose A/B green record stands, is not gated again")
     un = sub.add_parser("untaken", help="the authors' code the head carries that a version branch has not taken")
     un.add_argument("--repo", required=True); un.add_argument("--upstream", required=True, metavar="REF",
@@ -5385,7 +5386,7 @@ def _check_ungated_rerun(expect):
 
 
 def _check_ab_reuse(expect):
-    """MMVU_ROUND_REUSE=1: the resync's records-only merge reuses the A/B green record of the tree (no gate run, one
+    """MMVU_ROUND_REUSE unset or 1 (the default): the resync's records-only merge reuses the A/B green record of the tree (no gate run, one
     "reused A/B" line); each precondition that fails runs the gates as before; with the flag off nothing is written."""
     global kit_id
     keep_kit, keep_env = kit_id, os.environ.get(REUSE_ENV)
@@ -5407,7 +5408,7 @@ def _check_ab_reuse(expect):
             return rc, out, list(calls)
         try:
             kit_id = lambda: "kit-a"
-            os.environ.pop(REUSE_ENV, None)
+            os.environ[REUSE_ENV] = "0"
             _authors(r, g, {"src/main/java/com/example/mod/Plain.java": ("int v = 1;", "int v = 2;")}, "authors: v = 2")
             rc0, out0 = _quiet(cascade, r, "port..1.21.5", "ab", runner=green, untaken_ok=frozen)
             rc, out, ran = resync("flag off", reuse=True)
@@ -5420,11 +5421,14 @@ def _check_ab_reuse(expect):
                    and "A/B runs: no A/B green record for 1.21.5" in out,
                    f"no record yet: the gates run, and the green run is recorded: {ran} {rec} {out[-300:]}")
             green_at = h5()
+            os.environ.pop(REUSE_ENV)               # unset is the default: on
             rc, out, ran = resync("records only")
             expect(rc == 0 and ran == [] and f"reused A/B from {AB_GREEN_FILE} (green at {green_at[:12]}" in out
                    and not ungated(r) and json.loads(rec_f.read_text(encoding="utf-8"))["1.21.5"]["commit"] == green_at
                    and "| 1.21.5 | merged, gates exit 0 |" in out,
-                   f"THE MEASURED CASE: a records-only resync merge on a recorded green tree reuses it: {ran} {out[-400:]}")
+                   f"THE MEASURED CASE, the flag unset (the default): a records-only resync merge on a recorded green tree "
+                   f"reuses it: {ran} {out[-400:]}")
+            os.environ[REUSE_ENV] = "1"
             # the reused run's own exit is what the cascade reports (an 18: green, the done list open)
             d18 = json.loads(rec_f.read_text(encoding="utf-8"))
             d18["1.21.5"]["exit"] = 18
@@ -5530,8 +5534,10 @@ def _check_ab_reuse(expect):
             git(r, "remote", "set-url", "authors", str(r), check=True)
             note_ab_green(r, w5, "1.21.5", frozen, 0)
             expect(ok_() == h5(), "fetchable again: reused")
+            os.environ[REUSE_ENV] = "0"
+            expect(ok_() is None and not reuse_on(), "MMVU_ROUND_REUSE=0: never reused")
             os.environ.pop(REUSE_ENV)
-            expect(ok_() is None, "flag off: never reused")
+            expect(ok_() == h5() and reuse_on(), "MMVU_ROUND_REUSE unset: on (the default)")
         finally:
             kit_id = keep_kit
             os.environ.pop(REUSE_ENV, None) if keep_env is None else os.environ.__setitem__(REUSE_ENV, keep_env)

@@ -190,7 +190,11 @@ run is green, and it is then gated against the dependency's NEW build.
    a merge as done while its push run is red or still running. Start the fork's release run (`release=true`) right
    after the merge, without waiting for the push run first: it cuts a pre-release, which dependents re-pin to (step 7),
    and its release job needs that run's own gates on the merged commit (the same workflow template on every kind of
-   fork). Wait for the push run and the release run together, in one blocking command. Promotion stays a
+   fork). Wait for the push run and the release run together, in one blocking command. The round driver
+   (`tools/round.py`) waits for that push run only when the merge changed `.github/` or the release cannot reuse the
+   PR's run (`from_run`: a `ci_record` workflow and a merge commit whose tree is the PR run's); otherwise the push run
+   tests the tree the PR run already passed and is not awaited. A version-branch fork's head the same, at its merge
+   (`MMVU_ROUND_REUSE=0`: it always waits there). Promotion stays a
    person's (stop 4). Without `automerge`, leave the PR open for the user.
    Once the pre-release exists, rename this reconcile's ledger column (`keep-current/<date>`) to its tag (joined
    with ` + ` in a ledger shared with a dependency): publishing (the publish-port skill) judges the column that
@@ -449,8 +453,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
 - **`round.py drive --follow`** (run in the background, its output watched by one Monitor) runs every mechanical step
   itself, prints each agent job the moment it is dispatched (`round: AGENT JOB {...}`), records each job itself when its
   summary file appears, and keeps going until nothing runs or waits (exit 0 with `ROUND DONE`, or exit 3 with its
-  BLOCKED lines); after 1.75 h it starts no new step and ends once the running ones end (`round: deadline`): start it again,
-  the jobs still out keep running (never start them twice). Only after a session or container restart, `round.py
+  BLOCKED lines); after 1.75 h it starts no new step and ends once the running ones end, exit 0, with a `round: deadline`
+  line -- `jobs still out -- <ids>` when agent jobs are out, `N step(s) not started (<ids>) -- start drive --follow again`
+  when steps could run and none started: start it again, the jobs still out keep running (never start them twice). Only after a session or container restart, `round.py
   resume` first: it prints an AGENT JOB line for each job whose worker died. **Versions are pipelined** (#206): a version's work starts once the version below has cascaded into it
   (its merge-up), not once that one has released; each item locks its version (`<fork>#<v>`), the steps that fetch or
   push also lock the fork's git, at most two local builds and three agent jobs run at once, and the version below's
@@ -557,7 +562,8 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   `ci`, `merge` (no push-run wait) and `release` (dispatched right after the merge; the merge's push run and the release
   run awaited together), and the final `ledger` (statuses; the README Ports block only on a fork with
   `.port/KNOWN-ISSUES.json`). A version-branch fork's head keeps its own order (gates before the review, the push run
-  awaited at the merge).
+  awaited at the merge only when the merge changed `.github/` or the release cannot reuse the PR run; always with
+  `MMVU_ROUND_REUSE=0`).
 
 0. **Preflight, before anything else:** `python3 tools/round-preflight.py --fork <owner/repo>=<clone> ...` (every fork of
    the set; read-only). It prints one line per need and `MISSING` with what to do: **each fork's clone** (a scheduled
@@ -781,7 +787,8 @@ it small, so the orchestration is a tool, which replaces the four rules above:
    - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
      `pre-release` in `allow`; without it, ask on the plan issue. Never before the review and its S1/S2 findings above.
      **Dispatch it right after the merge** (every kind of fork; for now a version-branch fork's HEAD is the exception:
-     the driver waits for its push run at the merge, "A single-version fork on the driver" above) instead of after the
+     the driver waits for its push run at the merge, "A single-version fork on the driver" above, but only when the merge
+     changed `.github/` or the release cannot reuse the PR run -- always with `MMVU_ROUND_REUSE=0`) instead of after the
      push run alone: the release run
      checks out the merged commit and its release job needs that run's own full gates (full, minimal and every variant
      leg), so no pre-release is cut without a green full-gate run on exactly the released tree. Wait for the push run
