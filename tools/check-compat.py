@@ -50,6 +50,9 @@ SH_RULES = [
      "a GNU-only option (grep -P, date -d, stat -c, readlink -e) -- BSD tools on macOS lack it"),
 ]
 SELF = "tools/check-compat.py"
+# keyword arguments newer than Python 3.9 (a TypeError at run time on macOS's /usr/bin/python3): (callable name, keyword)
+NEW_KWARGS = {("write_text", "newline"): "3.10", ("read_text", "newline"): "3.13", ("zip", "strict"): "3.10",
+              ("dataclass", "slots"): "3.10", ("dataclass", "kw_only"): "3.10"}
 
 
 def tracked():
@@ -92,9 +95,21 @@ def check_python(rel, text):
         if "tomllib" in names and not OK.search(text.splitlines()[node.lineno - 1]):
             found.append((rel, node.lineno, "tomllib", "module-level `import tomllib` (Python 3.11+): import it where "
                           "it is used, falling back to tools/minitoml.py, so the tool still starts on 3.9"))
+    lines = text.splitlines()
+    for node in ast.walk(tree):                         # a keyword argument Python 3.9 does not take
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else None
+        for kw in node.keywords:
+            v = NEW_KWARGS.get((name, kw.arg))
+            if v and not OK.search(lines[node.lineno - 1] if node.lineno <= len(lines) else ""):
+                found.append((rel, node.lineno, "py39-kwarg", f"`{name}(..., {kw.arg}=...)` needs Python {v} (macOS's "
+                              "/usr/bin/python3 is 3.9: a TypeError when it runs)" + (" -- use open(path, \"w\", "
+                              "encoding=\"utf-8\", newline=...)" if name in ("write_text", "read_text") else "")))
     if rel == SELF:
         return found
-    for n, line in enumerate(text.splitlines(), 1):
+    for n, line in enumerate(lines, 1):
         if OK.search(line):
             continue
         code = strip_strings_comments(line)
@@ -142,6 +157,12 @@ def self_check():
     expect("import tomllib\n", "py", ["tomllib"])
     expect("def f():\n    import tomllib\n", "py", [])                       # imported where it is used: fine
     expect("try:\n    import tomllib\nexcept ImportError:\n    tomllib = None\n", "py", [])
+    expect('p.write_text(t, encoding="utf-8", newline="\\n")\n', "py", ["py39-kwarg"])
+    expect('pathlib.Path(x).write_text(\n    t,\n    newline="")\n', "py", ["py39-kwarg"])     # across lines too
+    expect('p.read_text(encoding="utf-8", newline="")\n', "py", ["py39-kwarg"])
+    expect('list(zip(a, b, strict=True))\n', "py", ["py39-kwarg"])
+    expect('open(p, "w", encoding="utf-8", newline="\\n")\n', "py", [])
+    expect('p.write_text(t, encoding="utf-8")\n', "py", [])
     expect('subprocess.run(["bash", "gradlew"])\n', "py", ["bash-argv"])
     expect('subprocess.run([BASH, "gradlew"])  # the Git Bash\n', "py", [])
     expect('x = "bash"  # a word in a string is not an argv\n', "py", [])
