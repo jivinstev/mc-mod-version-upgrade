@@ -252,8 +252,10 @@ with no Claude session.
 
 Every skill that works on a specific mod (migrate-mod, install-mod when it migrates, port-fork, fork-versions,
 keep-current, publish-port) first runs `python3 tools/guard-names.py ensure --mod-repo DIR` (or `--jar JAR`), for
-the mod and every fork it depends on: it derives the mod's names (its toml, `gradle.properties`, root package and
-GitHub remote), merges them into the forbidden-names list outside this repository (`FORBIDDEN_NAMES_FILE`, default
+the mod and every fork it depends on: it derives the mod's names (its toml, `gradle.properties`, root package,
+GitHub remote and, from a `--mod-repo`'s known-issues ledger -- `.port/KNOWN-ISSUES.json` or `.port/<mod>/`, read
+with git from every branch, else the working tree -- each issue-id prefix as a `re:\b<PREFIX>-\d+\b` line, left out
+when this repository's own text would match it; a `--jar` has no ledger), merges them into the forbidden-names list outside this repository (`FORBIDDEN_NAMES_FILE`, default
 `~/.mmvu/forbidden-names.txt`; an existing line is never dropped or reordered, and a list inside a git repository is
 refused), writes that path into `.env.local` when it is unset, installs the git hooks when they are missing or stale,
 and checks this tree with `check-no-ip.py --strict`. `--dry-run` writes nothing; `guard-names.py check` (no writes)
