@@ -9,8 +9,12 @@
   1. derives the names that identify each mod: neoforge.mods.toml / mods.toml `modId`, `displayName`, `authors`;
      gradle.properties `mod_id`, `mod_name`, `mod_authors`, `mod_group_id`, `maven_group`, `archives_name`; the root Java
      package (dotted and slashed); the checkout's GitHub `owner/repo` (origin and upstream remotes; the owner of THIS
-     repository's origin -- the maintainer, named in its README -- is never added). A --jar gives its toml and package.
-  2. a short id (under check-no-ip.py's 6-character substring floor) or an ordinary word becomes a `re:\\b<id>\\b` line,
+     repository's origin -- the maintainer, named in its README -- is never added); and the issue-id prefix of the
+     fork's known-issues ledger (`.port/KNOWN-ISSUES.json`, or `.port/<mod>/` in a multi-mod repository, read with git
+     from every branch the checkout has, the head included -- else from the working tree), e.g. `ABC` of `ABC-061`,
+     a short code made from the mod's name. A --jar gives its toml and package (no ledger).
+  2. a ledger prefix becomes a `re:\\b<PREFIX>-\\d+\\b` line (left out, and reported, when it would match this
+     repository's own text); a short id (under check-no-ip.py's 6-character substring floor) or an ordinary word becomes a `re:\\b<id>\\b` line,
      matched as a whole word. An ordinary word that would still match this repository's own text is kept only in its
      mod-specific forms (`<id>:` resource locations, `assets/<id>/`...); an ordinary-word display name or author that
      would is left out. Both are reported, so a person can decide.
@@ -28,7 +32,7 @@
 Exit codes of `ensure`: 0 done and the tree is clean, 1 the tree names a listed name, 2 refused / could not run.
 Standard library only.
 """
-import argparse, importlib.util, os, pathlib, re, shutil, subprocess, sys, tempfile, zipfile
+import argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))   # tools/gitbash.py (Git Bash on Windows)
@@ -160,7 +164,52 @@ def derive_repo(repo):
         out.append(("github", f"{owner}/{name}"))
         out.append(("github_repo", name))
         out.append(("github_owner", owner))
+    for prefix in ledger_prefixes(repo):
+        out.append(("ledger_prefix", prefix))
     return out
+
+
+LEDGER_PATH = re.compile(r"^\.port/(?:[^/]+/)?KNOWN-ISSUES\.json$")
+ISSUE_ID = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-\d+$")
+
+
+def ledger_prefixes(repo):
+    """The id prefixes of a fork's known-issues ledger(s) (tools/known-issues.py: `.port/KNOWN-ISSUES.json`, or
+    `.port/<mod>/KNOWN-ISSUES.json`): read with git from every local and remote-tracking branch (the head branch, where
+    the ledger lives, among them), else from the working tree. -> sorted prefixes, [] with no ledger."""
+    texts = []
+    g = lambda *a, stdin=None: subprocess.run(["git", "-C", str(repo), *a], input=stdin, capture_output=True, text=True,
+                                              encoding="utf-8", errors="replace")
+    refs = g("for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes")
+    if refs.returncode == 0 and refs.stdout.strip():
+        # each branch's .port tree, once per distinct tree (one git call for all), then its ledger blobs (one more)
+        trees = g("cat-file", "--batch-check", stdin="".join(f"{r}:.port\n" for r in refs.stdout.split()))
+        ids = sorted({ln.split()[0] for ln in trees.stdout.splitlines() if ln.endswith(" tree") or " tree " in ln})
+        specs = []
+        for t in ids:
+            ls = g("ls-tree", "-r", "--name-only", t)
+            specs += [f"{t}:{n}" for n in ls.stdout.splitlines() if LEDGER_PATH.match(".port/" + n)]
+        if specs:
+            blobs = g("cat-file", "--batch-check=%(objectname)", stdin="".join(x + "\n" for x in specs))
+            uniq = sorted({b for b in blobs.stdout.split() if re.fullmatch(r"[0-9a-f]{40,64}", b)})
+            for b in uniq:
+                r = g("cat-file", "-p", b)
+                if r.returncode == 0:
+                    texts.append(r.stdout)
+    if not texts:
+        for f in sorted(pathlib.Path(repo).glob(".port/KNOWN-ISSUES.json")) + sorted(pathlib.Path(repo).glob(".port/*/KNOWN-ISSUES.json")):
+            texts.append(f.read_text(encoding="utf-8", errors="replace"))
+    out = set()
+    for t in texts:
+        try:
+            issues = json.loads(t).get("issues")
+        except (ValueError, AttributeError):
+            continue
+        for e in issues if isinstance(issues, list) else []:
+            m = ISSUE_ID.match(str((e or {}).get("id", "")) if isinstance(e, dict) else "")
+            if m:
+                out.add(m.group(1))
+    return sorted(out)
 
 
 def derive_jar(jar):
@@ -196,6 +245,10 @@ def candidates(kinds_values, maintainer=None):
         if kind == "package" or kind in ("mod_group_id", "maven_group"):
             vals = [x for x in vals if len(x.split(".")) >= 2] + [x.replace(".", "/") for x in vals if len(x.split(".")) >= 2]
         for x in vals:
+            if kind == "ledger_prefix":
+                if ("ledger", x.lower()) not in seen:
+                    seen.add(("ledger", x.lower())); out.append((kind, x))
+                continue
             if kind in ("mod_group_id", "maven_group") and x.lower().replace("/", ".") in ("com.example", "net.example"):
                 continue
             if kind == "github_owner" and maintainer and x.lower() == maintainer.lower():
@@ -223,6 +276,12 @@ def is_ordinary(word, texts):
 
 def entry_for(kind, x, texts):
     """-> ([list lines], note or None): the line(s) for one candidate, given this repository's own texts."""
+    if kind == "ledger_prefix":
+        line = r"re:\b%s-\d+\b" % re.escape(x)
+        rx = cni.load_names_lines([line])[0][1]
+        hits = sum(1 for t in texts if rx.search(t))
+        return ([], f"a ledger id prefix this repository's own text matches ({hits} file(s)): left out") if hits \
+            else ([line], None)
     single = re.fullmatch(r"[A-Za-z0-9_-]+", x) is not None
     if single and (len(x) < cni.SUBSTRING_MIN_LEN or is_ordinary(x, texts)):
         line = r"re:\b%s\b" % re.escape(x.lower())
@@ -293,7 +352,7 @@ def plan(sources, root, existing_lines):
     covered = cni.load_names_lines(existing_lines)
     added, notes = [], []
     for kind, x in candidates(sources, maint):
-        if any(rx.search(x) for _n, rx in covered):
+        if any(rx.search(f"{x}-001" if kind == "ledger_prefix" else x) for _n, rx in covered):
             continue                                    # an existing (or just-added) line already matches it
         lines, note = entry_for(kind, x, texts)
         lines = [l for l in lines if l.lower() not in {e.lower() for e in existing_lines + added}]
@@ -445,10 +504,45 @@ def _self_check():
             "package com.example.examplemod;\n@Mod(\"examplemod\")\npublic class ExampleMod {}\n", encoding="utf-8")
         sh("git", "init", "-q", str(mod))
         sh("git", "-C", str(mod), "remote", "add", "origin", "https://github.com/maintainer/ExampleModFork.git")
+        # its known-issues ledger, committed on the head branch only; the checkout is then on a branch without it
+        for k_, v_ in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+            sh("git", "-C", str(mod), "config", k_, v_)
+        (mod / ".port").mkdir()
+        (mod / ".port/KNOWN-ISSUES.json").write_text(json.dumps({"schema": 1, "issues": [
+            {"id": "EXM-001"}, {"id": "EXM-012"}, {"id": "not an id"}, {"id": "EXM"}]}), encoding="utf-8")
+        sh("git", "-C", str(mod), "checkout", "-q", "-b", "neoforge-1.21.1")
+        sh("git", "-C", str(mod), "add", "-A"); sh("git", "-C", str(mod), "commit", "-qm", "ledger")
+        sh("git", "-C", str(mod), "checkout", "-q", "--orphan", "elsewhere")
+        sh("git", "-C", str(mod), "rm", "-rq", "--cached", ".port")
+        shutil.rmtree(mod / ".port")
+        expect(ledger_prefixes(mod) == ["EXM"] and ("ledger_prefix", "EXM") in derive_repo(mod),
+               f"the ledger's id prefix, read with git from the head branch (not the checked-out one): {ledger_prefixes(mod)}")
         dep = tmp / "arena"; (dep / "src/main/resources/META-INF").mkdir(parents=True)
         (dep / "src/main/resources/META-INF/mods.toml").write_text(
             '[[mods]]\nmodId="arena"\ndisplayName="Arena"\n[[dependencies.arena]]\nmodId="zzotherlib"\n', encoding="utf-8")
         expect(("modId", "zzotherlib") not in derive_repo(dep), "a dependency table's modId is another mod: not derived")
+        expect(ledger_prefixes(dep) == [] and not any(k_ == "ledger_prefix" for k_, _v in derive_repo(dep)),
+               "no ledger: no prefix")
+        wt = tmp / "wtonly"; (wt / ".port/othermod").mkdir(parents=True)
+        (wt / ".port/othermod/KNOWN-ISSUES.json").write_text(json.dumps({"issues": [{"id": "OTM-3"}]}), encoding="utf-8")
+        (wt / ".port/KNOWN-ISSUES.json").write_text("{not json", encoding="utf-8")
+        expect(ledger_prefixes(wt) == ["OTM"], f"no git: the working tree's ledgers, the multi-mod form too, an unreadable "
+                                              f"one skipped: {ledger_prefixes(wt)}")
+        gm = tmp / "multimod"; (gm / ".port/examplemod").mkdir(parents=True)
+        (gm / ".port/examplemod/KNOWN-ISSUES.json").write_text(json.dumps({"issues": [{"id": "MMX-1"}]}), encoding="utf-8")
+        sh("git", "init", "-q", str(gm))
+        for k_, v_ in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+            sh("git", "-C", str(gm), "config", k_, v_)
+        sh("git", "-C", str(gm), "add", "-A"); sh("git", "-C", str(gm), "commit", "-qm", "ledger")
+        shutil.rmtree(gm / ".port")
+        expect(ledger_prefixes(gm) == ["MMX"], f"a multi-mod repository's .port/<mod>/ ledger, read with git: {ledger_prefixes(gm)}")
+        added_, _n = plan([("ledger_prefix", "EXM")], mm, [r"re:EXM-\d{3}"])
+        expect(added_ == [], f"a list line that already matches the prefix's ids covers it: {added_}")
+        # a prefix this repository's own text matches is left out, and said
+        texts_ = ["doc.md\nsee ZZQ-7 in the notes\n"]
+        expect(entry_for("ledger_prefix", "ZZQ", texts_)[0] == [] and "left out" in entry_for("ledger_prefix", "ZZQ", texts_)[1]
+               and entry_for("ledger_prefix", "EXM", texts_) == ([r"re:\bEXM-\d+\b"], None),
+               "a ledger prefix this repository's text matches is left out; another becomes its re: line")
         got = candidates(derive_repo(mod), "maintainer")
         vals = {v for _k, v in got}
         expect({"examplemod", "com.example.examplemod", "com/example/examplemod", "Example Mod Deluxe", "Ann Example",
@@ -483,6 +577,18 @@ def _self_check():
             expect("examplemod" in lines and "com.example.examplemod" not in lines,
                    f"a name an earlier line already matches is not added again: {lines}")
             expect(r"re:\bexa\b" in lines, f"a short id becomes a re:\\b..\\b line: {lines}")
+            expect(r"re:\bEXM-\d+\b" in lines and sum(1 for l in lines if "EXM" in l) == 1,
+                   f"the ledger's id prefix becomes one re:\\b<PREFIX>-\\d+\\b line: {lines}")
+            # the hook's check: a commit message naming a ledger id is refused
+            (mm / "note.md").write_text("a note\n", encoding="utf-8")
+            for k_, v_ in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+                sh("git", "-C", str(mm), "config", k_, v_)
+            sh("git", "-C", str(mm), "add", "-A"); sh("git", "-C", str(mm), "commit", "-qm", "base")
+            sh("git", "-C", str(mm), "commit", "-q", "--allow-empty", "-m", "fix the crash of EXM-012")
+            pr = subprocess.run([sys.executable, str(mm / "tools/check-no-ip.py"), "--root", str(mm), "--names", str(lst),
+                                 "--push-range", "HEAD~1..HEAD"], capture_output=True, text=True, encoding="utf-8")
+            expect(pr.returncode == 1 and "EXM" in pr.stderr, f"a commit message naming EXM-012 fails the push check: {pr.stderr}")
+            sh("git", "-C", str(mm), "reset", "-q", "--hard", "HEAD~1")
             expect(r"re:\barena\b" not in lines and r"re:\barena:[a-z0-9_/.]" in lines,
                    f"an ordinary word this repo uses is kept only in mod-specific forms: {lines}")
             expect(not any(l.lower() == "arena" for l in lines), "an ordinary-word display name is left out")

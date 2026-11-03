@@ -99,6 +99,7 @@ gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod
 gate loop: the deepest load-crash cause and the mod's own frames go to the worker	12	5	4
 gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary 	12	5	5
 gatec-carrier: one carrier per stable versions.json line (Java 21/25, JEI pin or the stand-in probe)	6	6	7
+guard-names self-check: a mod checkout's toml, gradle.properties, package and remote become list lin	2	6	12
 hand-off: replaces itself, keeps other sections, carries the Scope choice and blockers	2	2	2
 hypotheses: repeats exact/loose, cross-port 2+/3+ mods, helper routing, file locality, optional code	2	2	2
 install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest	2	4	3
