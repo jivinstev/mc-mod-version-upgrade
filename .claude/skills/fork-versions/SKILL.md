@@ -352,8 +352,9 @@ diff. Apply it by hand through the version's rows (the diff is in the port branc
 lines, through the version's rows, are in the version's file (in order), or an explicit clear names it
 (`cascade --apply-decisions`, or removing its entry). One narrow case besides, when the cascade records an untaken
 change (not with `MMVU_ROUND_REUSE=0`): in a `.java` file (no text block in it or in the diff), a change whose every
-run of added lines is in the file as one block -- line for line through the rows, between the same neighbouring
-context lines, exactly once and in order -- except that a prose `//` comment of the run (not ending like code, holding
+run of added lines is in the file as one block -- line for line through the rows, with its nearest context line
+on each side and, on one side, its context out to the first non-trivial line (a brace or blank alone pins nothing),
+exactly once and in order -- except that a prose `//` comment of the run (not ending like code, holding
 none of the change's removed lines, no `\u` escape) sits on another `//` line in the same place, at least one
 non-trivial, non-comment line among the runs, and none of its removed code lines left in the file, gets no entry and
 no stop: one note, and the merge commit's message names the file (a hand merge below reworded the change's comment;

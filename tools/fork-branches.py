@@ -1806,10 +1806,17 @@ def change_taken_but_comments(data, diff, f, rules=None, strip=False):
         code); every hunk a real one (an @@ line), every added run anchored by a context line next to it;
       - a comment is set aside only when it is prose: its text does not end like code (; { } )) and holds none of the
         change's removed lines;
-      - each run of added lines, through the rows, is in the file as one block, line for line, between the same
-        neighbouring context lines, exactly once, a set-aside comment matching only a `//` line in the same place, and
-        the runs in order; at least one comment was set aside, and at least one non-trivial line is code;
-      - no non-trivial, non-comment line the change removed is still in the file."""
+      - each run of added lines, through the rows, is in the file as one block, line for line, a set-aside comment
+        matching only a `//` line in the same place; with the nearest context line on each side, and on one side its
+        context out to the first non-trivial context line (a brace or a blank line alone pins nothing; a run with no
+        non-trivial context line next to it is never judged) -- that pattern in the file exactly once, the runs in
+        order; at least one comment was set aside, and at least one non-trivial line is code;
+      - no non-trivial, non-comment line the change removed is still in the file.
+    Known limits, both on the safe side or noted: a removed line still live only inside a reshaped line elsewhere
+    (`void c() { dangerous(true); }` for a removed `dangerous();`) is not seen by the whole-line check; `strip` is not
+    used -- with strip_onlyin an added @OnlyIn line is not in the file, so the rule does not fire. Requiring the full
+    context on both sides would clear none of round #130's 8 entries: the version's own code differs around the block
+    there (measured on the dependent fork's history)."""
     if data is None or not f.endswith(".java") or b'"""' in data or '"""' in (diff or ""):
         return False
     if rules is not None and getattr(rules, "cutout", False):
@@ -1846,22 +1853,43 @@ def change_taken_but_comments(data, diff, f, rules=None, strip=False):
             while e < len(h) and h[e][0] == "+":
                 e += 1
             run = [x for _k, x in h[k:e]]
+            def side(seq):
+                """The context lines next to the run on one side (removed lines skipped, another run ends it), nearest
+                first, up to and including the first non-trivial one: [] when none is non-trivial."""
+                out = []
+                for kind, x in seq:
+                    if kind == "+":
+                        break
+                    if kind == " ":
+                        out.append(x)
+                        if x.strip() and not TRIVIAL_LINE.match(x.strip()):
+                            return out
+                return []
             before = next((x for kind, x in reversed(h[:k]) if kind == " "), None)
             after = next((x for kind, x in h[e:] if kind == " "), None)
-            if before is None and after is None:
-                return False                           # nothing to anchor the run to
-            # the pattern: the run's lines through the rows (a prose comment: any // line), between its context lines
-            pat = ([("=", tr(before))] if before is not None else []) + \
-                  [("//", None) if prose(x) else ("=", tr(x)) for x in run] + \
-                  ([("=", tr(after))] if after is not None else [])
+            # no non-trivial context line next to the run: no side, nothing pins it, and found stays None below
+            sides = [s_ for s_ in (("before", side(reversed(h[:k]))), ("after", side(h[e:]))) if s_[1]]
+            body_pat = [("//", None) if prose(x) else ("=", tr(x)) for x in run]
             set_aside += sum(1 for x in run if prose(x))
             code = code or any(not x.strip().startswith("//") and x.strip() and not TRIVIAL_LINE.match(x.strip()) for x in run)
-            fits = lambda p0: all(have[p0 + q].startswith("//") if kind == "//" else have[p0 + q] == want
-                                  for q, (kind, want) in enumerate(pat))
-            hits = [p0 for p0 in range(len(have) - len(pat) + 1) if fits(p0)]
-            if len(hits) != 1 or hits[0] < at:
-                return False                           # not there, there twice, or out of order
-            at = hits[0] + len(pat) - (1 if after is not None else 0)
+            found = None
+            for where, ctx in sides:
+                # the pattern: the run's lines through the rows (a prose comment: any // line), and that side's context
+                # up to its first non-trivial line
+                # and the other side's nearest context line too, when the hunk has one
+                anchor = [("=", tr(x)) for x in ctx]
+                nb = [] if before is None else [("=", tr(before))]
+                na = [] if after is None else [("=", tr(after))]
+                pat = list(reversed(anchor)) + body_pat + na if where == "before" else nb + body_pat + anchor
+                fits = lambda p0: all(have[p0 + q].startswith("//") if kind == "//" else have[p0 + q] == want
+                                      for q, (kind, want) in enumerate(pat))
+                hits = [p0 for p0 in range(len(have) - len(pat) + 1) if fits(p0)]
+                if len(hits) == 1 and hits[0] >= at:
+                    found = hits[0] + (len(anchor) if where == "before" else len(nb)) + len(body_pat)
+                    break
+            if found is None:
+                return False                           # on no side there exactly once, in order
+            at = found
             k = e
     # set_aside == 0: change_taken already judged this change (an exact one); this rule is for a reworded comment only
     return set_aside > 0 and code
@@ -5703,13 +5731,27 @@ def _check_comment_carry(expect):
              ok_d.replace(" \n+    // the authors'", "-    legacy();\n \n+    // the authors'"), f_),
             ("a code line of the run differs", ok_b.replace("return 7;", "return 8;"), ok_d, f_),
             ("the block at the wrong place (another neighbour)", ok_b.replace("int w = 2;", "int z = 2;"), ok_d, f_),
-            ("the block twice", ok_b + "class B {\n\n    // again\n    int added() { return 7; }\n\n    int w = 2;\n}\n", ok_d, f_),
+            ("the block twice", ok_b + "class B {\n    int v = 1;\n\n    // again\n    int added() { return 7; }\n\n    int w = 2;\n}\n", ok_d, f_),
+            ("only trivial context next to the run (braces, blank lines)", ok_b.replace("    int w = 2;\n", ""),
+             "@@ -1,3 +1,6 @@\n \n+    // the authors' note\n+    int added() { return 7; }\n+\n }\n", f_),
+            # the review's probe B: git's nearest context lines are braces; the version lacks the return in b(), and a()
+            # has the same braces, a comment and a return -- the nearest lines alone matched the decoy
+            ("a weak run anchored by braces: a decoy elsewhere, missing in place",
+             "class A {\n    void a() {\n        if (x) {\n            go();\n        }\n        // ours\n        return;\n    }\n"
+             "    void b() {\n        if (y) {\n            run();\n        }\n    }\n}\n",
+             "@@ -6,5 +6,7 @@\n     void b() {\n         if (y) {\n             run();\n         }\n+        // bail out\n"
+             "+        return;\n     }\n }\n", f_),
             ("no comment in the change (code only: change_taken's alone)", ok_b,
              ok_d.replace("+    // the authors' note\n", ""), f_),
             ("a comment-only run: no code line", ok_b.replace("    int added() { return 7; }\n", ""),
              ok_d.replace("+    int added() { return 7; }\n", ""), f_)):
         expect(not (change_taken_but_comments(body.encode("utf-8"), d, f) if body is not None
                     else change_taken_but_comments(None, d, f)), f"{why}: not taken, the fixer's")
+    in_place = ("class A {\n    void b() {\n        if (y) {\n            run();\n        }\n        // ours\n        return;\n"
+                "    }\n}\n")
+    expect(cb(in_place, "@@ -1,5 +1,7 @@\n     void b() {\n         if (y) {\n             run();\n         }\n"
+                        "+        // bail out\n+        return;\n     }\n }\n"),
+           "the same weak run in its place, under its non-trivial context line: taken")
     two = ("@@ -1,2 +1,4 @@\n class A {\n+    // first note\n+    int a() { return 1; }\n     int v = 1;\n"
            "@@ -5,2 +7,4 @@\n     int w = 2;\n+    // second note\n+    int b() { return 2; }\n }\n")
     in_order = "class A {\n    // ours 1\n    int a() { return 1; }\n    int v = 1;\n    int w = 2;\n    // ours 2\n    int b() { return 2; }\n}\n"
