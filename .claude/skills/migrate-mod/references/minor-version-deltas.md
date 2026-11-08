@@ -529,6 +529,74 @@ L39. **1.21.2-1.21.4 render state a compile loop gets wrong, and a 1.21.5 row's 
 L40. **1.21.6 GUI: alpha-0 text colours draw nothing, and the GUI is deferred (CATALOG M75, M76)** · text draws skip a colour with no alpha byte (`0xRRGGBB` → `0xFFRRGGBB`, the shared 1.21.8 row for literals; `ARGB.opaque(c)` for a computed one); immediate draws during GUI rendering (`endBatch`, `drawWithShader`) need a `PictureInPictureRenderer`; time-animated GUI items need `ItemStackRenderState.setAnimated()`; a screen's own `renderBackground` is M61. · **Anticipates:** §V (26.x keeps the deferred GUI).
 L41. **1.21.4: a Curios accessory's bonuses silently vanish, and target selectors / sensors take the `ServerLevel` (CATALOG M90, M91)** · Curios 10.0.1+ (through 17 on 26.3) never calls the per-slot `getAttributeModifiers(SlotContext, ResourceLocation, ItemStack)`: the attribute stays at `0.0` while `curioTick` runs; move the modifiers into `ICurioItem.getDefaultCurioAttributeModifiers(stack)` or the `curios:attribute_modifiers` component. A one-argument target-goal selector lambda fails with `incompatible parameter types in lambda expression` (it is `TargetingConditions.Selector`, `(target, ServerLevel)`), and a sensor's `isMatchingEntity` is `(ServerLevel, LivingEntity, LivingEntity)`: add the parameter. No rows for either. · **Anticipates:** §V40 (the same selector, recorded at 26.2).
 L42. **1.21.1 on: a 0-use tier makes an unbreakable tool break on its first hit (CATALOG 177)** · a 1.20.1 tier with 0 uses was unbreakable; `TieredItem` (1.21.1) and the `ToolMaterial` property builders (1.21.2 on) pass it to `Item.Properties.durability(0)`, which sets `MAX_DAMAGE` 0 and `DAMAGE` 0, so the stack is damageable and the first `hurtAndBreak` destroys it (fine in creative). On 1.21.1-1.21.4 a subclass sets `DataComponents.UNBREAKABLE` (`new Unbreakable(false)`) on the properties before `super(...)`; from 1.21.5, where the port builds the properties, a 0-durability item gets no durability components. `tools/audit-zero-uses.py` finds them. No row. · **Anticipates:** every later version (the component rule stands).
+L43. **1.21.4 → 1.21.8 in one hop: the `@GameTest` suite moves by ONE adapter and ONE codemod, not a rewrite (CATALOG M92)** ·
+vanilla 1.21.5 deleted `@GameTest`/`GameTestRegistry`/`TestFunction`; NeoForge 21.8 still takes tests from code through
+`RegisterGameTestsEvent.registerEnvironment/registerTest`. · **Unlike V5 (26.x), on 1.21.8 a mod CAN register test functions:**
+a `RegisterEvent` listener for `Registries.TEST_FUNCTION` runs early enough (measured: 1256 tests registered and run on a real
+21.8.57 server). · **Fix:** keep an annotation with the old three settings (`template`, `batch`, `timeoutTicks` -- a ~1270-test
+suite used no others) in the mod's own package, and one adapter that scans it (`ModList` scan data), registers a
+`FunctionGameTestInstance` per method and one `TestEnvironmentDefinition` per (namespace, batch). The runner groups by
+environment, so batches stay strictly sequential (asserted across 132 probe starts) and the namespace filter still selects a
+shard. The helper bodies need a codemod: `assertTrue/assertFalse/assertValueEqual(…, String)` and `fail(String…)` take a
+`Component` (~4900 call sites in one suite, all `Component.literal(msg)`), `new GameTestAssertException(String)` became
+`(Component, int tick)`, `getBlockEntity(pos)` takes a `Class`, `assertBlock`'s message is a `Function<Block, Component>`,
+`GameTestInfo.getTick()` is an `int`. Test ids keep the `<ns>:<class>.<method>` shape, so a test history keeps its records.
+· **Three runtime traps the compile cannot show:** (1) **instance-method tests** -- NeoForge 1.21.4 ran a non-static `@GameTest`
+on a fresh instance; an adapter that takes only static methods silently drops them (here 109 of 1256) and the gate stays green;
+(2) **a large batch is cut into chunks of 50** run one after another; (3) **vanilla adds one test of its own**
+(`minecraft:default`, 1 test), so every required count is the mod's + 1. The summary line (`All N required tests passed :)`)
+is unchanged.
+
+L44. **1.21.5+: an exception in a test CRASHES the test server (CATALOG M93)** · 1.21.4's `GameTestInfo.fail(Throwable)` caught
+anything a test sequence threw; 1.21.8's `fail` takes only a `GameTestException`, so an NPE in a `runAfterDelay`/`succeedWhen`/
+`startSequence` step escapes the tick: "Exception in server tick loop", a crash report, and NO result line for any test.
+· **Fix:** a MixinExtras `@WrapMethod` on `GameTestInfo.tick(GameTestRunner)` that rethrows a `GameTestException` and turns
+anything else into `fail(new GameTestAssertException(Component, 0))`; the adapter does the same around the method itself.
+
+L45. **NeoForge 21.8: a respawned mock player crashes the server through `ConfigSync` (CATALOG M94)** · `syncPendingConfigs`
+throws `configsToSync should contain an entry for player …` for an EXACT `ServerPlayer` on a connection that claims the
+config channel and was never recorded -- which is what `PlayerList.respawn` makes for a mock player (a vanilla test player is a
+subclass and is skipped). · **Fix:** the harness records its mock connection the way the configuration phase does (reflective
+put into `ConfigSync.configsToSync` under its `lock`); a mock connection must not pretend to be a memory connection, which
+other vanilla paths read.
+
+L46. **1.21.5 item-component spellings in COMMANDS: one is refused, one is silently wrong (CATALOG M95)** ·
+`dyed_color={rgb:N}` → `dyed_color=N` (old: `Malformed 'minecraft:dyed_color'`; in a datapack function that drops the whole
+function at load); `attribute_modifiers={modifiers:[…],show_in_tooltip:false}` → a bare list, the hiding moved to
+`tooltip_display={hidden_components:["minecraft:attribute_modifiers"]}`; and text in a component is SNBT, so
+`custom_name='{"text":"X"}'`/`lore=['…']` is ACCEPTED and names the item literally `{"text":"X"}` -- unquote it (a JSON object
+is valid SNBT). Sign `messages` and `enchantments` (no `levels:` wrapper) change the same way. · **Fix:** a writer in the mod
+emits the new spelling; a compiler/tool the mod shells out to corrects the old spelling in what a model writes (gated on the
+target version); stored commands need a migration.
+
+L47. **NeoForge 21.8: `AnvilMenu.createResult` is `final` (CATALOG M96)** · a custom anvil menu overriding it no longer
+compiles ("overridden method is final"). · **Fix:** set the result from `AnvilUpdateEvent` (fired after vanilla's result on
+every change while the left slot holds something; `setOutput`, `setXpCost`, `setMaterialCost`), guarded on
+`player.containerMenu instanceof YourMenu`. `LivingShieldBlockEvent` is no longer cancellable on 21.8 either.
+
+L48. **1.21.6: the pause menu's server links are a DIALOG (CATALOG M97)** · `ServerLinksScreen` is gone; the pause menu's
+button opens a `ServerLinksDialogScreen` built from a `ServerLinksDialog`. A client test that opened the screen directly opens
+the `PauseScreen` and presses the button instead.
+
+L49. **1.21.5: a container click carries HASHED stacks (CATALOG M98)** · `ServerboundContainerClickPacket(int, int, short,
+byte, ClickType, Int2ObjectMap<HashedStack>, HashedStack)`; a server-side test that forges a click builds the hashes the way
+`ServerPlayer` does: `registryAccess().createSerializationContext(HashOps.CRC32C_INSTANCE)` and
+`typed -> typed.encodeValue(ops).getOrThrow().asInt()` for `HashedStack.create(stack, hasher)`.
+`ClientboundContainerSetContentPacket` is a record (`carriedItem()`).
+
+L50. **1.21.8: `RenderLevelStageEvent.AfterLevel` carries no projection matrix (CATALOG M99)** · (L19 found it keeps the
+pose stack, camera and model-view.) A listener that needed the projection takes `GameRenderer.getProjectionMatrix(fov)`.
+
+L51. **1.21.5-1.21.6 shape changes with a one-class compat each (CATALOG M100)** · entity/block-entity NBT through
+`TagValueOutput.createWithContext(ProblemReporter.DISCARDING, registryAccess)` / `TagValueInput.create(…)`; an `ItemStack`
+or `MobEffectInstance` to/from NBT through its `CODEC` with `registries.createSerializationContext(NbtOps.INSTANCE)`;
+`SavedData.Factory` → `SavedDataType(id, ctx -> new T(), ctx -> CompoundTag.CODEC.xmap(load, save), null)` keeps the file's
+bytes; `getRespawnPosition/Dimension/Angle/isRespawnForced` → `RespawnConfig` (null = none); `ClickEvent`/`HoverEvent` are
+records (`new ClickEvent.RunCommand(cmd)`, `OpenUrl(URI)`, `HoverEvent.ShowText`); `Inventory.armor/offhand` → the entity's
+equipment; `Item.appendHoverText(stack, ctx, TooltipDisplay, Consumer, flag)`; `inventoryTick(stack, ServerLevel, entity,
+EquipmentSlot)`; `ItemModelResolver.updateForTopItem` lost its boolean; `TicketType` is an unregistered record
+(`new TicketType(timeout, persist, TicketUse)`) used through `addTicketWithRadius`. A version-reporting accessor:
+`WorldVersion.name()/dataVersion()/packVersion(PackType)`.
 
 **Tally (1.21.5 → 1.21.8 against the 26.2 era jump):** of the 11 changes above, 10 have a 26.2 counterpart (§V93, §V6, §V92,
 §X33, R17 (f), §V79, §V38b, §V31, §V6, R17 (a), §V81); 1 does not (L26, `send`'s listener). Adding L16 (Player.setItemSlot,
@@ -556,9 +624,9 @@ candidate only if the live registry resolves it: strip a prefix, or try each pre
 pattern alone.
 
 U15. **A bundled tool pinned to one version silently UNDOES the Java-side fix** · **Pattern:** a compiler
-or generator the mod shells out to (here CBScript's `attribute_ids.py`) with its own version table ·
+or generator the mod shells out to (here the bundled compiler's attribute-id table) with its own version table ·
 **Runtime:** none at compile; the tool rewrote `minecraft:armor` back to `minecraft:generic.armor` after the
-mod had corrected it, and the datapack died at load · **Fix:** pass the target in (`CBSCRIPT_MC`) and make
+mod had corrected it, and the datapack died at load · **Fix:** pass the target in (an env var naming the version) and make
 the tool's table version-aware. **Every tool the mod shells out to is a third dialect table.**
 
 U16. **NeoForge custom ingredients dispatch on `neoforge:ingredient_type` (21.4), not `type` (21.1)** ·
