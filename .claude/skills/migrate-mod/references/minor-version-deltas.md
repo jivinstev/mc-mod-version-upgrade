@@ -598,6 +598,27 @@ EquipmentSlot)`; `ItemModelResolver.updateForTopItem` lost its boolean; `TicketT
 (`new TicketType(timeout, persist, TicketUse)`) used through `addTicketWithRadius`. A version-reporting accessor:
 `WorldVersion.name()/dataVersion()/packVersion(PackType)`.
 
+
+L52. **1.21.5: an NBT PREDICATE on text matches nothing (CATALOG M101)** · text components are stored as SNBT, so a sign
+line saved by 1.21.4 as JSON-in-a-string (`messages:['"id"']`) is now the bare string (`messages:["id"]`). Every `nbt`
+predicate written the old way — an advancement's `location_check` block predicate, `execute if block … {…}`, `if data` —
+silently matches no block: no error, no log line, the feature is simply dead. Found as a lever-driven machine whose
+handle never answered, in every world. Correct the predicate where the commands are corrected, AND in stored packs'
+advancement JSON.
+
+L53. **1.21.5: a force-loaded chunk random-ticks with no player near it (CATALOG M102)** · 1.21.4 random-ticked only chunks
+near a player, so a test lane 90 000 blocks out never ticked; on 1.21.5+ grass under a placed block dies to dirt mid-test
+and a "the world comes back exactly" assertion fails on cells the mod never touched. Give that batch a
+`TestEnvironmentDefinition.SetGameRules(randomTickSpeed 0)` environment rather than loosening the assertion.
+
+L54. **1.21.5: the test plot's barrier ROOF sits directly on the structure (CATALOG M103)** ·
+`TestInstanceBlockEntity.encaseStructure` roofs at the structure's top unless the test's `TestData.skyAccess` is true. A 9-high
+plot stopped a scaled mount's six-block leap at four, which read as a weaker jump. Pass `skyAccess` through the adapter for
+tests that leave the plot vertically.
+
+L55. **1.21.5: vanilla ships a test of its own (CATALOG M104)** · `minecraft:always_pass` is in the vanilla data pack and runs
+beside the mod's, so `All N required tests passed` is one more than the mod holds. A gate that checks the count against its
+own shard must take tests outside its namespace off (read the per-test list, never subtract a constant).
 **Tally (1.21.5 → 1.21.8 against the 26.2 era jump):** of the 11 changes above, 10 have a 26.2 counterpart (§V93, §V6, §V92,
 §X33, R17 (f), §V79, §V38b, §V31, §V6, R17 (a), §V81); 1 does not (L26, `send`'s listener). Adding L16 (Player.setItemSlot,
 no 26.2 entry) the minor hops 1.21.6-1.21.8 carry roughly a dozen of the changes 26.2 then lists as "era jump" changes:
