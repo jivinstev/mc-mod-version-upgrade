@@ -1006,6 +1006,10 @@ Shared rows/helpers: `templates/fork-layer/shared/1.21.8/`. Each line says which
 - **M98. 1.21.5: container clicks carry hashed stacks (L49)** · `HashedStack.create(stack, hasher)` with CRC32C hash ops over the registry context.
 - **M99. 1.21.8: `RenderLevelStageEvent.AfterLevel` has no projection (L50)** · `GameRenderer.getProjectionMatrix(fov)`.
 - **M100. 1.21.5-1.21.6 shape changes, one compat class each (L51)** · ValueInput/ValueOutput through `TagValueOutput/TagValueInput`, item/effect codecs, `SavedDataType` from load/save, `RespawnConfig`, ClickEvent/HoverEvent records, equipment, `appendHoverText`/`inventoryTick` signatures, `TicketType` records.
+- **M101. 1.21.5: an `nbt` predicate on sign text matches nothing (L52)** · `messages:['"id"']` → `messages:["id"]`; fix commands AND stored advancement JSON. Silent: the feature is dead in every world.
+- **M102. 1.21.5: force-loaded chunks random-tick with no player near (L53)** · a test world drifts (grass → dirt); a `SetGameRules` environment per batch.
+- **M103. 1.21.5: the test plot's barrier roof sits on the structure (L54)** · `TestData.skyAccess` for tests that leave the plot vertically.
+- **M104. 1.21.5: vanilla's `minecraft:always_pass` runs beside the mod's tests (L55)** · take foreign-namespace tests off a count check.
 
 ## S. Silent-resource patterns (compile clean, run clean, *silently wrong*)
 > **Axis:** neither the compiler nor the crash gates can see these. Java has a compiler; resources do
