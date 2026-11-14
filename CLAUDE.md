@@ -49,6 +49,46 @@ Only the repository's human maintainer merges pull requests into main. An agent 
 drives it to green (CI, review comments), but never merges, approves or enables auto-merge on this repository -- even
 when every check is green and even when the merge is needed to publish a kit.
 
+## Driving a real client: there is already a scripting language — do not write a second one
+
+**PLAYTEST** runs a script of Minecraft commands and `@` directives in a REAL client, on every
+carrier version, and **it already drives MENUS**. It is the thing to reach for whenever a check needs
+a key pressed, a screen opened, a slot clicked or a button pushed — the whole class a GameTest and a
+headless gate structurally cannot see.
+
+- **Grammar + checker:** `tools/playtest-lint.py` — its docstring IS the grammar, and it checks a
+  script with no Minecraft. Run it before every run. `playtest.py lint` adds the mod checks.
+- **The guide:** README → **"Playtests: scripted play in the real game"**. It is complete: the
+  directive list there already includes `@click slot N | button "text"`.
+- **The runner:** `templates/smoke-harness/.../PlaytestRunner.java`, one line per client tick.
+- **The carrier:** `tools/gatec-carrier.py` builds it as one jar per Minecraft version that loads in a
+  player's real NeoForge install; CI publishes `gatec-carrier-<mc>.jar`.
+- **Worked fixture:** `templates/gatec-carrier/playtests/vanilla.playtest`. Its `@step inventory` is
+  the menu pattern end to end — open a screen, `@expect screen`, `@click slot`, then
+  `@assert execute if items entity @s …`. Copy that idiom rather than inventing one.
+
+⚠ **This section exists because the README was not enough.** An agent asked to make the harness
+"drive chests and dialog boxes" spent an afternoon building a parallel mode in
+`templates/neoforge-mod/test-templates/ClientBootSmokeTest.java.example` — a worse one, matching
+buttons by label with no reflection — before finding PLAYTEST. Every fact it needed was in README
+§Playtests. CLAUDE.md is the file an agent reads first and said nothing, so the README's completeness
+bought nothing. **Before writing anything that drives a client, `grep -ri playtest` this repo.**
+
+Two traps that are properties of the HARNESS, not of any mod, and each cost a run:
+
+1. **A client needs the FOREGROUND GUI session.** The early display (`fmlearlywindow`) opens a GLFW
+   window. With another user fast-user-switched in — or the machine sitting at the login/switch
+   screen — it blocks forever at `ThemeLoader: Loading built-in theme default`, leaving a ~410-byte
+   log and no error, indistinguishable from a hung mod. On macOS check `stat -f %Su /dev/console`: it
+   must be the user running the test, not `root` (the login window) and not somebody else. Measured:
+   four runs and three wrong hypotheses (the carrier jar, the system properties, the mod under test)
+   before anyone looked at the session.
+2. **Assert STATE, not events.** `@expect <kind>` is an observation of something that HAPPENS, so a
+   line emitted by an asynchronous path can land in the *previous* step and the expect then misses a
+   result that did arrive. Where the outcome is state — an item in a slot, an entity present, a score
+   — `@assert <command>` is true however the timing falls. Prefer it, and `@wait` for async work
+   first.
+
 ## Keep fork identities out of this repository
 
 This repository names no mod, mod id, mod package, author or mod repository: not in files, fixtures, comments or
