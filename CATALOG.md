@@ -3937,6 +3937,23 @@ hook if one exists) — prove it with a Gate C photograph, and only then general
 half (`convert-core-shaders`) and the RenderType half given a state type (`convert-rendertypes`) are already
 automated; the piece in between has never been done here.
 
+**V121. 26.2 shapes a 1.21.8 server-side tree met that the 1.21.1 tables did not (cluster, both jars read).** ·
+**Pattern:** a mod already on 1.21.8 (ValueInput/ValueOutput, `SavedDataType`, 1.21.5 components) moved to 26.2 ·
+**Fix (rows in `26.2.renames.hand.tsv`, X176-X178, where one is mechanical):**
+`Entity.hasImpulse` → `needsSync` (a rename: `ServerEntity` reads it where 1.21.8 read `hasImpulse`; not `hurtMarked`) ·
+`AbstractContainerMenu.clicked(…, ClickType, …)` → `ContainerInput` · `ServerLevel.getSharedSpawnPos()` →
+`getRespawnData().pos()` · `ServerPlayer.RespawnConfig(dim, pos, angle, forced)` → `RespawnConfig(RespawnData.of(dim,
+pos, yaw, pitch), forced)` and its getters → `respawnData().pos()/dimension()/yaw()` · `Player.hasPermissions(n)` →
+`permissions().hasPermission(Permissions.COMMANDS_MODERATOR|GAMEMASTER|ADMIN|OWNER)` · the whitelist, op and ban lists
+are keyed by `NameAndId` (`isWhiteListed`, `isOp`, `get`, `remove`, `new UserWhiteListEntry/UserBanListEntry(NameAndId…)`;
+`new NameAndId(uuid, name)` or `new NameAndId(profile)`) and `ServerOpListEntry.getLevel()` → `permissions()` ·
+`new EntityReference<>(uuid)` → `EntityReference.of(uuid)` · `DisplayInfo.getIcon()` is an `ItemStackTemplate`
+(`.item().value()` for the Item) · `ClientboundAddEntityPacket.getXa/Ya/Za()` → `getMovement()` ·
+`DedicatedServer.pauseWhileEmptySeconds()` → `pauseWhenEmptySeconds()` — a mixin target, so the compile is green and
+the boot fails with `InvalidInjectionException` (run `tools/audit-mixin-targets.py`, or boot; X178) ·
+`SoundEvent.location()` stays `location()` (a record accessor) while `ResourceKey.location()` → `identifier()`: the
+plain `.location()` row turns the first into a missing `identifier()`; revert at each such error.
+
 ## W. ONE SOURCE TREE, TWO MINECRAFT VERSIONS — the shape that makes an era jump survivable
 > **Axis:** build architecture. Everything above ports a mod *from* A *to* B and leaves A behind.
 > This is what to do when the mod must keep running on **both** — which is the normal case for a
@@ -7050,3 +7067,33 @@ field from main code. The stub kept no fields, so each read became its own error
 keep fields with type defaults would have silently turned `true` into `false`: for a data class, the values are the
 behaviour. park-optional now refuses to stub a class with a non-private instance field, so it stays parked and listed,
 as it was before X172.
+
+**X176. The 1.21.1 NBT-accessor rows must not touch a call already consumed as an Optional.** **Pattern:** the
+`.getString(k)` → `.getStringOr(k, "")` family (written for 1.21.1 `CompoundTag`, whose getters returned the value)
+run over 1.21.6+ code, where `ValueInput.getString(k)` already returns `Optional` · **Symptom:**
+`in.getString(K).ifPresent(…)` became `in.getStringOr(K, "").ifPresent(…)` — `cannot find symbol: ifPresent` on a
+String · **Fix:** each row carries a negative lookahead for `.ifPresent/.isPresent/.orElse…/.map/.filter`; 1.21.1
+source never has those after a primitive getter, so its output is unchanged.
+
+**X177. `hasImpulse` → `needsSync`, not `hurtMarked`.** **Pattern:** the hand row mapped `this.hasImpulse = true;` to
+`this.hurtMarked = true;` · **Evidence:** 1.21.8 `ServerEntity.sendChanges` reads `entity.hasImpulse` at three places
+(update interval, motion send, reset); 26.2's reads `entity.needsSync` at the same three, and `Entity.push` /
+`addDeltaMovement` set it. `hurtMarked` is `markHurt`'s flag and sends a velocity packet to the entity's own client —
+a different behaviour that compiles. **Fix:** a plain rename row, `\bhasImpulse\b` → `needsSync`.
+
+**X178. A renamed mixin TARGET is invisible to the compile.** **Pattern:** `@Inject(method = "pauseWhileEmptySeconds")`
+on `DedicatedServer` (1.21.8) · **Symptom:** compile green, Gate A green; the server dies at boot with
+`InvalidInjectionException … could not find any targets matching 'pauseWhileEmptySeconds'` (26.2:
+`pauseWhenEmptySeconds`) · **Fix:** a string row for the target, and the rule that a port is not done until a server
+has booted (or `tools/audit-mixin-targets.py` has passed) — a compile proves nothing about a mixin's `method =`.
+
+**X179. Keeping a long-lived version branch in step with its upstream: 3-way merge in RENAMED space.** **Pattern:** a
+26.2 branch cut from a mod's 1.21.4 main, re-synced after main had taken ~1,500 commits and its own 1.21.4 → 1.21.8
+bump. A plain `git merge` conflicts on every line both sides renamed. **Fix:** per file,
+`git merge-file(rename(main), rename(base), branch)`, with `rename()` being `fork-branches.py`'s `apply_rules` over
+the branch's own table (the one that made it). A file the branch never hand-edited is just `rename(main)`; one it did
+conflicts only where a hand edit meets a real upstream change (57 of ~1,000 changed source files). Then a
+**caret-precise fixer** for the compile residue: javac's caret column names the exact token, so a rewrite whose
+correctness depends on the receiver's TYPE (`x.getServer()` on an Entity vs on an event, `getName()` on a
+GameProfile) is applied only where the compiler flagged it, which a regex row cannot do. ~100 errors → 0 in two
+rounds plus ~25 by hand. Same idea as `fork-branches.py remake`, for a branch whose base is not a fork-layer branch.
