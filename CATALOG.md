@@ -3938,7 +3938,8 @@ half (`convert-core-shaders`) and the RenderType half given a state type (`conve
 automated; the piece in between has never been done here.
 
 **V121. 26.2 shapes a 1.21.8 server-side tree met that the 1.21.1 tables did not (cluster, both jars read).** ·
-**Pattern:** a mod already on 1.21.8 (ValueInput/ValueOutput, `SavedDataType`, 1.21.5 components) moved to 26.2 ·
+**Pattern:** a mod already on 1.21.8 (ValueInput/ValueOutput, `SavedDataType`, 1.21.5 components) moved to 26.2 · **Symptom:** `cannot find symbol` / `incompatible types` on the names below after the 1.21.1 → 26.2
+tables ran (and, for the mixin target, `InvalidInjectionException` at boot) ·
 **Fix (rows in `26.2.renames.hand.tsv`, X176-X178, where one is mechanical):**
 `Entity.hasImpulse` → `needsSync` (a rename: `ServerEntity` reads it where 1.21.8 read `hasImpulse`; not `hurtMarked`) ·
 `AbstractContainerMenu.clicked(…, ClickType, …)` → `ContainerInput` · `ServerLevel.getSharedSpawnPos()` →
@@ -7076,7 +7077,8 @@ String · **Fix:** each row carries a negative lookahead for `.ifPresent/.isPres
 source never has those after a primitive getter, so its output is unchanged.
 
 **X177. `hasImpulse` → `needsSync`, not `hurtMarked`.** **Pattern:** the hand row mapped `this.hasImpulse = true;` to
-`this.hurtMarked = true;` · **Evidence:** 1.21.8 `ServerEntity.sendChanges` reads `entity.hasImpulse` at three places
+`this.hurtMarked = true;` · **Symptom:** none at compile time: it compiles, and motion sync rides `markHurt`'s flag
+instead of the one 26.2's `ServerEntity` reads for it · **Evidence:** 1.21.8 `ServerEntity.sendChanges` reads `entity.hasImpulse` at three places
 (update interval, motion send, reset); 26.2's reads `entity.needsSync` at the same three, and `Entity.push` /
 `addDeltaMovement` set it. `hurtMarked` is `markHurt`'s flag and sends a velocity packet to the entity's own client —
 a different behaviour that compiles. **Fix:** a plain rename row, `\bhasImpulse\b` → `needsSync`.
@@ -7089,7 +7091,7 @@ has booted (or `tools/audit-mixin-targets.py` has passed) — a compile proves n
 
 **X179. Keeping a long-lived version branch in step with its upstream: 3-way merge in RENAMED space.** **Pattern:** a
 26.2 branch cut from a mod's 1.21.4 main, re-synced after main had taken ~1,500 commits and its own 1.21.4 → 1.21.8
-bump. A plain `git merge` conflicts on every line both sides renamed. **Fix:** per file,
+bump. **Symptom:** a plain `git merge` of main into the branch conflicts on every line both sides renamed. **Fix:** per file,
 `git merge-file(rename(main), rename(base), branch)`, with `rename()` being `fork-branches.py`'s `apply_rules` over
 the branch's own table (the one that made it). A file the branch never hand-edited is just `rename(main)`; one it did
 conflicts only where a hand edit meets a real upstream change (57 of ~1,000 changed source files). Then a
