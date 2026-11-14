@@ -57,6 +57,20 @@ re:\.getOffset\(\s*(?:this\.)?(?:level|world|getter|reader|blockGetter|levelRead
 # -- X164: EventHooks.canEntityGrief takes a ServerLevel on 26.x; a client level answers false (no client-side grief)
 re:(?<![\w.])EventHooks\.canEntityGrief\(\s*(?!_griefLevel\b)([\w$.()]+?)\s*,\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	(\1 instanceof net.minecraft.server.level.ServerLevel _griefLevel && net.neoforged.neoforge.event.EventHooks.canEntityGrief(_griefLevel, \2))
 
+# X178: shapes a 1.21.8 -> 26.2 sync of a ~1,000-file server-side mod reached the compiler with (each confirmed in
+# both decompiled jars). ClickType (AbstractContainerMenu.clicked's fourth parameter) is ContainerInput; the
+# shared spawn is one RespawnData record; DedicatedServer.pauseWhileEmptySeconds is pauseWhenEmptySeconds -- a
+# @Inject naming the old one COMPILES and fails only at boot (InvalidInjectionException), so the string row
+# matters; Player.hasPermissions(level) is a PermissionSet query (the five Permissions constants).
+re:(?<![\w.])ClickType(?!\w)	ContainerInput
+net.minecraft.world.inventory.ClickType	net.minecraft.world.inventory.ContainerInput
+re:\.getSharedSpawnPos\(\)	.getRespawnData().pos()
+re:method\s*=\s*"pauseWhileEmptySeconds"	method = "pauseWhenEmptySeconds"
+re:\.hasPermissions\(1\)	.permissions().hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_MODERATOR)
+re:\.hasPermissions\(2\)	.permissions().hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_GAMEMASTER)
+re:\.hasPermissions\(3\)	.permissions().hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_ADMIN)
+re:\.hasPermissions\(4\)	.permissions().hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_OWNER)
+
 #!strict` WITH A REASON.
 #     A warning that is never zero is decoration.
 #
@@ -336,13 +350,17 @@ re:\.setScreen\(	.setScreenAndShow(
 # -- type is never touched -- Brigadier's StringArgumentType.getString(ctx, "name") being the
 # -- one that would otherwise be silently mangled. Written for the whole accessor
 # -- family defensively, so an unused member is expected rather than a bug.
-re:\.getInt\(([^,()]+)\)	.getIntOr(\1, 0)
-re:\.getString\(([^,()]+)\)	.getStringOr(\1, "")
+# -- X176: a call already consumed as an Optional is left alone (the lookahead). On 1.21.1 these returned a
+# -- primitive or a tag, so `.getString(k).ifPresent(…)` never occurs in 1.21.1 source -- but 1.21.6+ ValueInput
+# -- returns Optional from the SAME names, and a 1.21.6+ tree ported or merged through these rows had
+# -- `in.getString(K).ifPresent(…)` rewritten to `in.getStringOr(K, "").ifPresent(…)`, which does not compile.
+re:\.getInt\(([^,()]+)\)(?!\s*\.(?:ifPresent|isPresent|isEmpty|orElse|orElseGet|orElseThrow|map|filter|flatMap)\b)	.getIntOr(\1, 0)
+re:\.getString\(([^,()]+)\)(?!\s*\.(?:ifPresent|isPresent|isEmpty|orElse|orElseGet|orElseThrow|map|filter|flatMap)\b)	.getStringOr(\1, "")
 re:(?<!Boolean)\.getBoolean\(("[^"]*")\)	.getBooleanOr(\1, false)
-re:\.getLong\(([^,()]+)\)	.getLongOr(\1, 0L)
-re:\.getDouble\(([^,()]+)\)	.getDoubleOr(\1, 0.0)
-re:\.getFloat\(([^,()]+)\)	.getFloatOr(\1, 0.0F)
-re:\.getCompound\(([^,()]+)\)	.getCompoundOrEmpty(\1)
+re:\.getLong\(([^,()]+)\)(?!\s*\.(?:ifPresent|isPresent|isEmpty|orElse|orElseGet|orElseThrow|map|filter|flatMap)\b)	.getLongOr(\1, 0L)
+re:\.getDouble\(([^,()]+)\)(?!\s*\.(?:ifPresent|isPresent|isEmpty|orElse|orElseGet|orElseThrow|map|filter|flatMap)\b)	.getDoubleOr(\1, 0.0)
+re:\.getFloat\(([^,()]+)\)(?!\s*\.(?:ifPresent|isPresent|isEmpty|orElse|orElseGet|orElseThrow|map|filter|flatMap)\b)	.getFloatOr(\1, 0.0F)
+re:\.getCompound\(([^,()]+)\)(?!\s*\.(?:ifPresent|isPresent|isEmpty|orElse|orElseGet|orElseThrow|map|filter|flatMap)\b)	.getCompoundOrEmpty(\1)
 # getList lost its element-type argument; both arities collapse to getListOrEmpty.
 # The single-arg form has no call site in this mod today; it is kept as coverage of the
 # documented change rather than deleted, so it is marked rather than left to look dead.
@@ -999,8 +1017,11 @@ re:setPersistentAngerTarget\((\w+)\.getUUID\(\)\)	setPersistentAngerTarget(new n
 # noCollission -> noCollision (26.2 fixed the long-standing typo).
 re:\.noCollission\(	.noCollision(
 
-# Entity.hasImpulse is gone; hurtMarked is what actually forced the position resync.
-re:this\.hasImpulse = true;	this.hurtMarked = true;
+# Entity.hasImpulse is RENAMED needsSync (X177). 26.2's ServerEntity.sendChanges reads `entity.needsSync` at
+# exactly the three places 1.21.8's read `entity.hasImpulse` (the update-interval test, the motion send, the
+# reset), and Entity's own push/addDeltaMovement set it. hurtMarked is a different flag (markHurt: it sends a
+# velocity packet to the entity's OWN client), which this row used to substitute.
+re:\bhasImpulse\b	needsSync
 
 # Registry.getHolderOrThrow(key) -> getOrThrow(key). NOT `get(` -- 26.2's get(ResourceKey) returns
 # Optional<Holder.Reference<T>> (V26), so a bare rename to `get` hands every caller an Optional where
