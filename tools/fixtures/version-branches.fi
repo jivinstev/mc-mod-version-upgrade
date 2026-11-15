@@ -836,14 +836,14 @@ data 75
 
 blob
 mark :62
-data 18810
+data 18796
 # ---- shared 1.21.5
 # Shared rows for a fork layer's 1.21.5 target (and every later one that inherits it).
 # 1.21.5 is where CompoundTag/ListTag getters started returning Optional -- the same change 26.2 carries
 # (CATALOG §V12), so these rows come from templates/multi-version/versions/26.2.renames.hand.tsv.
 # ⚠ NOT copied verbatim: the 26.2 rows matched `.getInt(<anything without a comma>)`, which also rewrites a
-# ByteBuffer read (`bytes.getInt(at)` -> `bytes.getIntOr(at, 0)`) -- the first fork through here had no binary readers, the
-# second (a Blender/glTF loader) has eight. A shared row cannot know the receiver's
+# ByteBuffer read (`bytes.getInt(at)` -> `bytes.getIntOr(at, 0)`) -- the first fork through here had no binary
+# readers, the second (a Blender/glTF loader) has eight. A shared row cannot know the receiver's
 # type, so it anchors on what the NBT API guarantees and a byte offset never is: a string literal key, or an
 # UPPER_CASE constant (bare or Class.CONST). A key held in a variable, and a ListTag index, are left to the
 # fork's own rows or its workers.
@@ -1136,12 +1136,12 @@ data 720
  "port_commit": "14ceadb0af783b41124eb7c7ef38c6c6d9526d8c",
  "branch_commit": "12843898f0f9fa31a1c83358115056775f21ea8a",
  "digest": "046d90fd9bbf74b15ce108004a9339a5adae49e8e6902a0e903e6421b6387215",
- "review_inputs": "e7954d42542df7930888389d1c5b3e13226bf275108c9ab9a1ef1b466e4077df",
+ "review_inputs": "384d2d8cd88abde4f5bff3813b73e280a431e482240aaa80de105a4fc355ba2a",
  "with_modes": true,
  "recorded": {
   "5be0fca0eb2b31f57131c4c1770b8051c1680dd2": {
    "digest": "046d90fd9bbf74b15ce108004a9339a5adae49e8e6902a0e903e6421b6387215",
-   "review_inputs": "e7954d42542df7930888389d1c5b3e13226bf275108c9ab9a1ef1b466e4077df",
+   "review_inputs": "384d2d8cd88abde4f5bff3813b73e280a431e482240aaa80de105a4fc355ba2a",
    "with_modes": true
   }
  }
