@@ -2,8 +2,8 @@
 # 1.21.5 is where CompoundTag/ListTag getters started returning Optional -- the same change 26.2 carries
 # (CATALOG §V12), so these rows come from templates/multi-version/versions/26.2.renames.hand.tsv.
 # ⚠ NOT copied verbatim: the 26.2 rows matched `.getInt(<anything without a comma>)`, which also rewrites a
-# ByteBuffer read (`bytes.getInt(at)` -> `bytes.getIntOr(at, 0)`) -- Battle of Lord had no binary readers, the
-# first fork that went through here (a Blender/glTF loader) has eight. A shared row cannot know the receiver's
+# ByteBuffer read (`bytes.getInt(at)` -> `bytes.getIntOr(at, 0)`) -- the first fork through here had no binary
+# readers, the second (a Blender/glTF loader) has eight. A shared row cannot know the receiver's
 # type, so it anchors on what the NBT API guarantees and a byte offset never is: a string literal key, or an
 # UPPER_CASE constant (bare or Class.CONST). A key held in a variable, and a ListTag index, are left to the
 # fork's own rows or its workers.
