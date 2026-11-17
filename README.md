@@ -298,7 +298,12 @@ new): ticked by default, unticked with the reason shown when the new build is an
 drops a Minecraft version the fork builds or switches provider; for a version-branch fork also each dependency a
 version DROPPED (DEPS.md "dropped: no <v> build") that has a build for it now, as an unticked **restore** box (ticked,
 the same `--bump` pins it again, and its integration code then has to compile and be reviewed); a lookup that fails is
-listed as "could not check" and never fails the plan. The round applies the ticked ones once, at setup, with `tools/layer-deps.py resolve --bump`, and
+listed as "could not check" and never fails the plan. The boxes are split by the dependency's role in the fork's
+port-install.json (under `.github`), read as `layer-deps.py resolve` reads it: **Production (players install these)** -- a
+`required` one (any dependency of a fork with no manifest, and an implementation/api/jarJar one it does not name) and
+every restore box -- comes first; the **Dev-only** ones -- `extra`, or a compileOnly/runtimeOnly one the manifest does
+not name -- sit in a collapsed block, as does the "could not check" list; the boxes, their default ticks and what
+`read-plan` takes from them are the same wherever they sit. The round applies the ticked ones once, at setup, with `tools/layer-deps.py resolve --bump`, and
 nothing else moves a dependency: every resolve (fork-port.py's setup included) keeps a pinned one as it is, and a
 single-version fork's pins (its build.gradle coordinates) move only by `--bump` too -- the same for every kind of fork, a
 deliberate change to single-version forks, decided by the maintainer. For a version-branch fork the issue also has

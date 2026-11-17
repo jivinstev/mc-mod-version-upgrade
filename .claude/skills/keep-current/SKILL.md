@@ -15,7 +15,9 @@ tool (exit 2, naming the last migrator commit that supports it: fork-versions, "
 tell the user. **Dependency updates are explicit for every kind of fork** (a deliberate change to
 single-version forks, decided by the maintainer): no step re-picks a pinned CurseForge/Modrinth dependency by itself --
 `layer-deps.py resolve` keeps every pin, and a single-version fork's build.gradle pins move only by `layer-deps.py
-resolve --bump` -- so a dependency moves only when the plan's "Dependency updates" box is ticked (or the user asks). A
+resolve --bump` -- so a dependency moves only when the plan's "Dependency updates" box is ticked (or the user asks);
+that section lists Production bumps (role `required` in port-install.json, and every restore) first and the Dev-only ones
+(`extra`, or an unnamed compileOnly/runtimeOnly) collapsed, the same tickable boxes either way. A
 version-branch fork is also kept on this repository's shared tables and helpers each round (`fork-branches.py sync-shared`,
 run by `round.py`); a single-version fork has no shared library to sync, and nothing of this changes it.
 A fork that has version branches AND a legacy layer branch with `.multiversion/` (one migrated to branches) is a

@@ -78,7 +78,9 @@ maintainer): per fork and per Minecraft version it builds (the head's build.grad
 build.gradle), each pinned CurseForge/Modrinth dependency with a newer compatible build (tools/layer-deps.py
 dependency_updates). The plan lists them under "Dependency updates", ticked by default, unticked with the reason when
 the newer build is an alpha/beta, a major-version jump, drops a Minecraft version the fork builds, or switches provider;
-a lookup that fails is listed as "could not check" and never fails the plan. read-plan returns the ticked ones as each
+a lookup that fails is listed as "could not check" and never fails the plan. Each row carries the pin's role, read as
+resolve reads it (port-install.json; layer-deps.py pin_roles): "required" ones and every restore box are listed under
+Production, "extra" / "build-only" ones in a collapsed Dev-only block, the "could not check" list collapsed too. read-plan returns the ticked ones as each
 fork's `dep_bumps`, and the round applies each once at setup with `layer-deps.py resolve --bump`; nothing else moves a
 pin.
 
@@ -887,6 +889,26 @@ def fork_pins(f, fb, ld):
     return out
 
 
+def fork_roles(f, fb, ld, lk=None):
+    """{mc: {group:module: role}}: each pin's role, read where fork_pins reads the pin (the head commit, each version
+    branch's tip) from that ref's build.gradle and .github/port-install.json, as resolve reads them
+    (layer-deps.py pin_roles): the plan's Dependency updates section puts a "required" one under Production and an
+    "extra" / "build-only" one under Dev-only."""
+    clone = f["clone"]
+    show = lambda ref, p: git(clone, "show", f"{ref}:{p}").stdout if git(clone, "cat-file", "-e", f"{ref}:{p}").returncode == 0 else ""
+    roles = lambda ref: ld.pin_roles(show(ref, "build.gradle"), show(ref, "gradle.properties"),
+                                     show(ref, ".github/port-install.json"), lk)
+    hc = f["head_commit"]
+    mc = ld.read_props_text(show(hc, "gradle.properties")).get("minecraft_version") or (
+        f["head"][len("neoforge-"):] if f["head"].startswith("neoforge-") else "?")
+    out = {mc: roles(hc)}
+    for v in sorted(fb.version_branches(clone), key=fb.mc_key):
+        ref = fb.resolve_branch(clone, fb.branch_name(v))
+        if ref and v not in out:
+            out[v] = roles(ref)
+    return out
+
+
 def fork_dropped(f, fb, ld):
     """{mc: {group:module: the authors' base coordinate}}: the registry dependencies each version branch dropped (its
     layer-deps block excludes them: DEPS.md "dropped: no <v> build"). A single-version fork has none."""
@@ -914,6 +936,12 @@ def step_deps(work, lk=None):
     for f in inp["forks"]:
         try:
             f["dep_updates"] = ld.dependency_updates(fork_pins(f, fb, ld), lk, fork_dropped(f, fb, ld))
+            try:
+                rl = fork_roles(f, fb, ld, lk)
+            except Exception:           # noqa: BLE001 -- no role: the row is listed under Production (fail closed)
+                rl = {}
+            for r in f["dep_updates"]["rows"]:
+                r["role"] = (rl.get(r["mc"]) or {}).get(r["ga"])
         except Exception as e:          # noqa: BLE001 -- fail soft: the plan goes on, the section says so
             f["dep_updates"] = {"rows": [], "checked": 0,
                                 "unchecked": [{"mc": "?", "ga": "*", "coord": "", "why": f"the pins could not be read ({e})"}]}
@@ -1384,7 +1412,7 @@ def self_check():
             if p == "down":
                 raise OSError("HTTP Error 503: the lookup failed")
             return vfiles
-        dlk = {"mr_files": mr_files, "cf": lambda: None}
+        dlk = {"mr_files": mr_files, "cf": lambda: None, "mr_id": lambda slug: None}
         with contextlib.redirect_stdout(io.StringIO()):
             step_fetch(conf, lib, w, now=summer, clone=lambda r: str(dep))
             step_cascade(w)
@@ -1397,6 +1425,8 @@ def self_check():
                and [u["ga"] for u in du0["unchecked"]] == ["maven.modrinth:down"] and du1 == {"rows": [], "unchecked": [], "checked": 0},
                f"deps, a single-version fork: the gradle.properties-keyed pin's newer build ticked, a failed lookup listed, "
                f"the plan going on: {du0} {du1}")
+        expect([r.get("role") for r in du0["rows"]] == ["required"],
+               f"deps, a single-version fork with no port-install.json: every pin required (Production): {du0}")
         f0 = inp["forks"][0]
         expect(f0["new_count"] == 1 and f0["new_commits"][0]["subject"] == "authors: a new feature" and f0["authors_merged"]
                and inp["deadline"] == "2026-07-15T" + c2["round"]["time"] + "-07:00",
@@ -1435,6 +1465,8 @@ def self_check():
         (vb / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
         (vb / "build.gradle").write_text('dependencies {\n    runtimeOnly "maven.modrinth:viewer:a1"\n'
                                          '    compileOnly "maven.modrinth:extra:a2"\n}\n', encoding="utf-8")
+        (vb / ".github").mkdir(exist_ok=True)       # names neither: both a dev-time (build-only) dependency
+        (vb / ".github/port-install.json").write_text(json.dumps({"files": [{"role": "self", "url": "x"}]}), encoding="utf-8")
         gq(vb, "add", "-A"); gq(vb, "commit", "-qm", "port")
         x = gq(vb, "rev-parse", "HEAD")
         gq(vb, "checkout", "-q", "-b", "neoforge-1.21.3")
@@ -1464,7 +1496,8 @@ def self_check():
                == [("1.21.1", "maven.modrinth:viewer:a2", True, False), ("1.21.3", "maven.modrinth:viewer:a4", False, True),
                    ("1.21.3", "maven.modrinth:extra:a3", False, False)]
                and [r.get("restore", False) for r in fv["dep_updates"]["rows"]] == [False, False, True]
-               and fv["dep_updates"]["rows"][2]["from"] == "maven.modrinth:extra:a2",
+               and fv["dep_updates"]["rows"][2]["from"] == "maven.modrinth:extra:a2"
+               and [r.get("role") for r in fv["dep_updates"]["rows"]] == ["build-only"] * 3,
                f"deps, a version-branch fork: per version, the branch's own pin (its block) checked, a beta unticked; the "
                f"dependency 1.21.3 dropped, with a build now, an unticked restore box: {fv['dep_updates']}")
         with contextlib.redirect_stdout(io.StringIO()):
