@@ -246,6 +246,31 @@ public final class LegacyGl {
         draw(mesh, shader, current(), target != null ? target : Minecraft.getInstance().gameRenderer.mainRenderTarget());
     }
 
+    // ---- output override -----------------------------------------------------------------------------------------
+    // 26.3 removed RenderSystem.outputColorTextureOverride / outputDepthTextureOverride, which 1.21.6-26.2's
+    // PictureInPictureRenderer.prepare set around renderToTexture so immediate draws landed in its texture. The fork layer
+    // keeps its own: while set (PictureInPictureRendererMixin, around renderToTexture), a draw this layer would make into
+    // the main target goes to these views instead.
+    private static GpuTextureView outputColor, outputDepth;
+
+    /** Sets the output override (null colour: none); returns the previous one, {colour, depth}, for {@link #setOutput}. */
+    public static GpuTextureView[] setOutput(GpuTextureView colour, GpuTextureView depth) {
+        GpuTextureView[] prior = {outputColor, outputDepth};
+        outputColor = colour;
+        outputDepth = colour == null ? null : depth;
+        return prior;
+    }
+
+    /** The colour view a draw into the main target uses now (the override when set). */
+    public static GpuTextureView mainColorView() {
+        return outputColor != null ? outputColor : Minecraft.getInstance().gameRenderer.mainRenderTarget().getColorTextureView();
+    }
+
+    /** The depth view a draw into the main target uses now (the override's when set; null: no depth). */
+    public static GpuTextureView mainDepthView() {
+        return outputColor != null ? outputDepth : Minecraft.getInstance().gameRenderer.mainRenderTarget().getDepthTextureView();
+    }
+
     /**
      * The current shader and state, drawn INTO a render pass that is already open (it stays open): an in-pass
      * {@code RenderLevelStageEvent}'s {@code getRenderPass()}, or one vanilla opened on an offscreen texture (26.3's GUI
@@ -336,7 +361,7 @@ public final class LegacyGl {
      * {@link LegacyRenderType#setupRenderState} loads the type's shader and state here so {@link #drawWithShader} does
      * too, into the type's output target; {@link LegacyRenderType#clearRenderState} restores the state and the shader it
      * replaced. Only a shader object this layer draws with (a {@link ShaderInstance} or a {@link Vanilla}) is loaded: a type
-     * with no shader state of its own keeps the one {@code setShader} set, as 1.21.4's did. As the shared 1.21.5-1.21.10 copies do.
+     * with no shader state of its own keeps the one {@code setShader} set, as 1.21.4's did.
      */
     static Saved load(Object owner, Key key, Object shaderObj, RenderTarget into) {
         Saved s = new Saved(owner, blend, blendFunction, depthTest, depthFunction, depthWrite, writeColor, writeAlpha, cull,
@@ -555,7 +580,12 @@ public final class LegacyGl {
             mesh.close();
             return;
         }
-        // 26.3 has no output override: the target's own views (no depth view when it has no depth)
+        // 26.3 has no vanilla output override: the target's own views (no depth view when it has no depth), or the fork
+        // layer's override for the main target (see setOutput)
+        if (outputColor != null && target == Minecraft.getInstance().gameRenderer.mainRenderTarget()) {
+            draw(mesh, shaderObj, key, outputColor, outputDepth, null, outputColor.texture().getFormat());
+            return;
+        }
         draw(mesh, shaderObj, key, target.getColorTextureView(), target.getDepthTextureView(), null, colorTexture.getFormat());
     }
 

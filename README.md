@@ -306,7 +306,8 @@ deliberate change to single-version forks, decided by the maintainer. For a vers
 to this repository's current shared tables and helpers, the copies the fork edited by hand while the template moved (an
 agent reconciles them; nothing overwrites them), a box per hand-written copy of what the shared library now ships --
 NOT ticked by default, as adopting changes the fork's code -- and the code the fork marks `MV-AHEAD-OF-TEMPLATE`, which
-the closing comment's Lessons block lists to harvest; a single-version fork's issue has no such section. Wednesday morning Pacific a Claude scheduled
+the closing comment's Lessons block lists to harvest (a marked copy equal to the library's apart from its marker lines is
+harvested already: its box says so, and it is no longer listed to harvest); a single-version fork's issue has no such section. Wednesday morning Pacific a Claude scheduled
 task runs the round from that issue, at a minute jittered per fork set (`round.time` in the fork's config). Every fork
 set -- single-version, version-branch or mixed -- runs on a driver, `tools/round.py` (`weekly-plan.py round-task` puts it
 in the prompt; `--version-branches`, which older setups pass, changes nothing): from the frozen plan and the clones it builds `round/STATE.json` (per fork and version,

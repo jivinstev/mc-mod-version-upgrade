@@ -248,7 +248,7 @@ public final class LegacyGl {
      * {@link LegacyRenderType#setupRenderState} loads the type's shader and state here so {@link #drawWithShader} does
      * too, into the type's output target; {@link LegacyRenderType#clearRenderState} restores the state and the shader it
      * replaced. Only a shader object this layer draws with (a {@link ShaderInstance} or a {@link Vanilla}) is loaded: a type
-     * with no shader state of its own keeps the one {@code setShader} set, as 1.21.4's did. As the shared 1.21.5-1.21.10 copies do.
+     * with no shader state of its own keeps the one {@code setShader} set, as 1.21.4's did.
      */
     static Saved load(Object owner, Key key, Object shaderObj, RenderTarget into) {
         Saved s = new Saved(owner, blend, blendFunction, depthTest, depthFunction, depthWrite, writeColor, writeAlpha, cull,
