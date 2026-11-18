@@ -1080,6 +1080,8 @@ def cmd_resolve(a):
     if not branch_target(repo, a.target):
         if getattr(a, "bump", None) or getattr(a, "bump_all", False):
             return cmd_bump_single(repo, a.target, a.bump, a.bump_all, a.dry_run)
+        if getattr(a, "neoforge", None):      # a NeoForge move alone (a dependent's, round.py implied_neo_bumps): done
+            return 0
         print(f"layer-deps: the checkout is not version branch {a.target} (a single-version fork has nothing to resolve; "
               "its pins are build.gradle's, moved only by --bump)")
         return 2
@@ -2279,8 +2281,13 @@ def _check_bump_requirements(expect):
         expect(set_neoforge(sv, "26.3", "26.3.0.113", say.append) == 0
                and (sv / "gradle.properties").read_bytes() == b"minecraft_version=26.3\nneo_version=26.3.0.113\nmod_id=examplemod\n",
                "single-version: gradle.properties' neo_version moved, nothing else")
+        ns = argparse.Namespace(repo=str(sv), target="26.3", neoforge="26.3.0.120", bump=[], bump_all=False, dry_run=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc_ = cmd_resolve(ns)
+        expect(rc_ == 0 and b"neo_version=26.3.0.120" in (sv / "gradle.properties").read_bytes(),
+               f"single-version: resolve --neoforge alone (a library's implied move) moves it and succeeds: {rc_}")
         expect(set_neoforge(sv, "26.3", "26.2.0.90", say.append) == 2
-               and b"26.3.0.113" in (sv / "gradle.properties").read_bytes(),
+               and b"26.3.0.120" in (sv / "gradle.properties").read_bytes(),
                "a NeoForge build of another Minecraft line is refused, nothing written")
 
 

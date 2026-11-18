@@ -299,7 +299,9 @@ drops a Minecraft version the fork builds or switches provider. Each new build's
 when its `neoforge.mods.toml` asks for a newer NeoForge than that version builds, the box says so and, ticked, moves
 NeoForge to the newest build of that line in the same command (`resolve --bump ... --neoforge V`), so the round never
 stops on it; when no NeoForge build meets it the box is unticked with the reason; its other required mods are listed
-for reading. For a version-branch fork also each dependency a
+for reading. A dependent's NeoForge move at a version moves each library it depends on to that NeoForge there too, in
+the library's own cycle (`round.py` adds the move to the library's version), so the library is fixed, gated and
+released on it before the dependent re-pins. For a version-branch fork also each dependency a
 version DROPPED (DEPS.md "dropped: no <v> build") that has a build for it now, as an unticked **restore** box (ticked,
 the same `--bump` pins it again, and its integration code then has to compile and be reviewed); a lookup that fails is
 listed as "could not check" and never fails the plan. The boxes are split by the dependency's role in the fork's
