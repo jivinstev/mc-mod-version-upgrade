@@ -724,7 +724,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      is then a full Port CI run (2026-10-19 round: nine, 8-14 minutes each, on a head still on a kit-v23 workflow --
      re-pins keep a workflow's kit, and nothing regenerated the head). Regenerate it first, before the round's first
      ledger commit: `fork-branches.py ci --repo DIR --head --run` (the head's own pins, variants and gates read
-     back, only the kit moved to the newest), pushed under `push-version-branches`; else ask;
+     back, only the kit moved to the newest), pushed under `push-version-branches`; else ask. `round.py`'s `ci-check`
+     item does this itself when the head has no PR this round and only its kit is behind (a fixer job cannot: jobs
+     never push, and the check reads the head branch, not the work branch);
    - (a single-version fork, once per round, before its first commit) `python3 tools/port-ci.py check --repo DIR`: the
      same check of the port branch's workflow (an older kit -- new gates reach a fork only from the first kit that ships
      them -- or no records ignore), a WARNING that never blocks, with the command that regenerates it at the newest kit
@@ -772,7 +774,12 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      TEST-ITEMS.md), instead of a review table in the PR body; a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
      "Done" item 4 lists, plus the behaviour-inventory account (item 7) -- then the fixer fixes the `not-ok` rows and
      **one re-check of the changed rows only** follows (the rows `check-done` reports stale since the review). That is
-     the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5).
+     the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5). One
+     exception, so the owner is not asked to triage the round's own mistake: when every S1/S2 the re-check finds is in a
+     line one of this round's fix commits wrote (the re-checker names that commit on a `regression: <ID> <commit>`
+     line), it goes back to the fixer once and is re-checked once more -- `round.py` does this by itself
+     (`OWN_REGRESSION_PASSES`), and a round run without it (a single-version fork) does the same by hand; what that
+     re-check still finds, and any S1/S2 the fix did not cause, blocks as below.
      **The round must run where it can start subagents** -- one fresh reviewer per version, never the fixer reviewing
      its own work; a scheduled task's cloud session can. If this session cannot start one, stop at the review step for
      that version: comment on the plan issue (@owner) that the version is gated and waits for its review, go on only with
