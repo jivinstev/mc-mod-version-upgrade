@@ -1045,11 +1045,38 @@ def parse_bumps(specs, bump_all, deps):
     return out
 
 
+def set_neoforge(repo, target, to, say=print):
+    """Move the version's NeoForge to `to` (a build of the same Minecraft line): gradle.properties' neo_version and, on
+    a version branch, .port/<target>/branch.properties' prop.neo_version, every other byte kept. -> 0, or 2 refused."""
+    repo = pathlib.Path(repo)
+    nl = _fb().neo_line(to) if SAFE_COORD.match(to or "") else None
+    if not nl or nl[0] != target:
+        say(f"layer-deps: --neoforge {to}: not a NeoForge build for Minecraft {target}"); return 2
+    done = []
+    for rel, key in (("gradle.properties", "neo_version"), (f".port/{target}/branch.properties", "prop.neo_version")):
+        f = repo / rel
+        if not f.is_file():
+            continue
+        with open(f, encoding="utf-8", newline="") as fh:
+            text = fh.read()
+        new, n = re.subn(r"(?m)^(" + re.escape(key) + r"\s*=\s*)[^\r\n]*", lambda m: m.group(1) + to, text, count=1)
+        if n:
+            with open(f, "w", encoding="utf-8", newline="") as fh:
+                fh.write(new)
+            done.append(rel)
+    if not done:
+        say(f"layer-deps: --neoforge {to}: no neo_version key in gradle.properties"); return 2
+    say(f"layer-deps: NeoForge at {target} -> {to} ({', '.join(done)})")
+    return 0
+
+
 def cmd_resolve(a):
     repo = pathlib.Path(a.repo).resolve()
     why = _fork_kind().refuse_layer(repo, "layer-deps")
     if why:
         print(why); return 2
+    if getattr(a, "neoforge", None) and not a.dry_run and set_neoforge(repo, a.target, a.neoforge):
+        return 2
     if not branch_target(repo, a.target):
         if getattr(a, "bump", None) or getattr(a, "bump_all", False):
             return cmd_bump_single(repo, a.target, a.bump, a.bump_all, a.dry_run)
@@ -1286,7 +1313,7 @@ def dropped_pins(build_text, props_text, branch_props_text=""):
 SAFE_COORD = re.compile(r"^[A-Za-z0-9._+:-]+$")     # what a coordinate may hold to be written into a command (and a box)
 
 
-def dependency_updates(pins_by_mc, lk=None, dropped_by_mc=None):
+def dependency_updates(pins_by_mc, lk=None, dropped_by_mc=None, neo_by_mc=None):
     """{"rows": [{"id", "mc", "ga", "from", "to", "from_name", "to_name", "channel", "default", "why"}],
     "unchecked": [{"mc", "ga", "coord", "why"}], "checked": n} for {mc: {group:module: coordinate}}. A row is ticked
     (default) unless the newer build is an alpha or beta, a major-version jump, drops a Minecraft version the fork builds
@@ -1296,6 +1323,9 @@ def dependency_updates(pins_by_mc, lk=None, dropped_by_mc=None):
     its code, the owner's call."""
     built = sorted(pins_by_mc, key=lambda v: tuple(int(x) for x in re.findall(r"\d+", v)))
     rows, unchecked, n, cache = [], [], 0, {}
+    # the requirement check reads each newer build's jar: with real lookups (lk None), or a stand-in that supplies one
+    if lk is not None and "jar_reqs" not in lk and "get" not in lk:
+        neo_by_mc = None
     for mc in built:
         for ga, coord in sorted(pins_by_mc[mc].items()):
             n += 1
@@ -1330,6 +1360,8 @@ def dependency_updates(pins_by_mc, lk=None, dropped_by_mc=None):
             rows.append({"id": f"D{len(rows) + 1}", "mc": mc, "ga": ga, "from": coord, "to": to,
                          "from_name": cur.get("name"), "to_name": new.get("name"), "channel": new.get("channel"),
                          "default": not why, "why": "; ".join(why)})
+            if neo_by_mc is not None:
+                bump_requirements(rows[-1], neo_by_mc.get(mc), lk)
     for mc in sorted(dropped_by_mc or {}, key=lambda v: tuple(int(x) for x in re.findall(r"\d+", v))):
         for ga, coord in sorted(dropped_by_mc[mc].items()):
             n += 1
@@ -1355,14 +1387,117 @@ def dependency_updates(pins_by_mc, lk=None, dropped_by_mc=None):
             rows.append({"id": f"D{len(rows) + 1}", "mc": mc, "ga": ga, "from": coord, "to": to, "restore": True,
                          "from_name": "dropped", "to_name": new.get("name"), "channel": new.get("channel"),
                          "default": False, "why": "; ".join(why)})
+            if neo_by_mc is not None:
+                bump_requirements(rows[-1], neo_by_mc.get(mc), lk)
     return {"rows": rows, "unchecked": unchecked, "checked": n}
 
 
-def bump_command(mc, ga, to, checkout="<checkout of neoforge-{mc}>"):
-    """The one command that applies a bump, the same for every kind of fork."""
+def jar_requirements(jar):
+    """[{"mod", "range", "required"}] the jar's META-INF/neoforge.mods.toml (else mods.toml) declares in its
+    [[dependencies.<id>]] tables: what that build needs at run time, NeoForge's own minimum included."""
+    import io, zipfile
+    with zipfile.ZipFile(io.BytesIO(jar)) as z:
+        names = set(z.namelist())
+        name = next((n for n in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml") if n in names), None)
+        text = z.read(name).decode("utf-8", "replace") if name else ""
+    out, cur = [], None
+    for ln in text.splitlines():
+        s = ln.split("#", 1)[0].strip() if not ln.strip().startswith('"') else ln.strip()
+        if s.startswith("[["):
+            cur = {"mod": None, "range": "", "required": True} if s.startswith("[[dependencies.") else None
+            if cur is not None:
+                out.append(cur)
+            continue
+        if s.startswith("["):
+            cur = None
+            continue
+        m = re.match(r'(\w+)\s*=\s*"([^"]*)"', s) or re.match(r"(\w+)\s*=\s*(\w+)", s)
+        if cur is not None and m:
+            k, v = m.group(1), m.group(2)
+            if k == "modId":
+                cur["mod"] = v
+            elif k == "versionRange":
+                cur["range"] = v
+            elif k == "type":
+                cur["required"] = v.lower() == "required"
+            elif k == "mandatory":
+                cur["required"] = v.lower() == "true"
+    return [d for d in out if d["mod"]]
+
+
+def range_floor(rng):
+    """The lowest version a Maven range admits ("[26.3.0.97,)" -> "26.3.0.97"), or None when it has no lower bound."""
+    m = re.match(r"\s*[\[(]\s*([^,\])]*)", rng or "")
+    v = (m.group(1).strip() if m else (rng or "").strip()) or None
+    return v if v and SAFE_COORD.match(v) else None
+
+
+def _vkey(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or ""))
+
+
+def coord_jar(coord, lk=None):
+    """The jar bytes of a CurseForge (curse.maven) or Modrinth (maven.modrinth) coordinate."""
+    lk = lk or {}
+    p = coord.split(":")
+    if coord.startswith("maven.modrinth:") and len(p) == 3:
+        v = json.loads((lk.get("get") or _get)(f"{MODRINTH}/version/{p[2]}"))
+        f = next((x for x in v.get("files", []) if x.get("primary")), (v.get("files") or [None])[0])
+        if not f:
+            raise LookupError(f"{coord}: the Modrinth version lists no file")
+        return (lk.get("get") or _get)(f["url"])
+    if coord.startswith("curse.maven:") and len(p) == 3:
+        return (lk.get("get") or _get)(f"{CURSEMAVEN}/{p[1]}/{p[2]}/{p[1]}-{p[2]}.jar")
+    raise LookupError(f"{coord}: not a CurseForge or Modrinth coordinate")
+
+
+_NEO_NEWEST = {}
+
+
+def neo_newest(mc):
+    """The newest stable NeoForge build for Minecraft `mc` on the NeoForge maven (fork-branches.py newest_stable), or None."""
+    if "all" not in _NEO_NEWEST:
+        xml = _get("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml").decode("utf-8")
+        _NEO_NEWEST["all"] = _fb().newest_stable(xml)
+    return _NEO_NEWEST["all"].get(mc)
+
+
+def bump_requirements(row, neo_now, lk=None):
+    """What the newer build of a bump row needs beyond it (keep-current: a ticked bump never stops the round on a
+    requirement nobody saw -- weekly round 2026-11-18: a Curios build needing NeoForge 26.3.0.97 on a branch at .76).
+    Fills row["neo"] = {"from", "needs", "to"} when it needs a newer NeoForge than `neo_now` (to: the newest stable
+    build of that line, which the same box moves to; None when no build meets it, and the row is then not ticked by
+    default) and row["requires"] with its other required mods and their ranges, for the owner to read. A jar that
+    cannot be read leaves row["requires_unchecked"] with why; nothing is raised."""
+    lk = lk or {}
+    try:
+        reqs = (lk.get("jar_reqs") or (lambda c: jar_requirements(coord_jar(c, lk))))(row["to"])
+    except Exception as e:      # noqa: BLE001 -- fail soft: the box is offered as before, said unchecked
+        row["requires_unchecked"] = str(e)[:160] or type(e).__name__
+        return row
+    neo = next((d for d in reqs if d["mod"] == "neoforge" and d["required"]), None)
+    floor = range_floor(neo["range"]) if neo else None
+    if floor and neo_now and _vkey(floor) > _vkey(neo_now):
+        to = (lk.get("neo_newest") or neo_newest)(row["mc"])
+        ok = bool(to) and SAFE_COORD.match(to) and _vkey(to) >= _vkey(floor)
+        row["neo"] = {"from": neo_now, "needs": floor, "to": to if ok else None}
+        if not ok:
+            row["default"] = False
+            row["why"] = "; ".join(x for x in (row.get("why"), f"needs NeoForge {floor} or newer and no NeoForge build "
+                                                f"for {row['mc']} meets it yet") if x)
+    other = [f"{d['mod']} {d['range']}".strip() for d in reqs
+             if d["required"] and d["mod"] not in ("neoforge", "minecraft", "java")]
+    if other:
+        row["requires"] = other
+    return row
+
+
+def bump_command(mc, ga, to, checkout="<checkout of neoforge-{mc}>", neo=None):
+    """The one command that applies a bump, the same for every kind of fork; `neo`, a NeoForge version the bump's build
+    needs, moves the version's NeoForge in the same command (resolve --neoforge)."""
     import shlex
     return (f"python3 tools/layer-deps.py resolve --repo {shlex.quote(checkout.format(mc=mc))} --target {shlex.quote(mc)} "
-            f"--bump {shlex.quote(f'{ga}={to}')}")
+            f"--bump {shlex.quote(f'{ga}={to}')}" + (f" --neoforge {shlex.quote(neo)}" if neo else ""))
 
 
 def _mask_comments(text):
@@ -1515,15 +1650,21 @@ def cmd_updates(a):
     why = _fork_kind().refuse_layer(pathlib.Path(a.repo), "layer-deps")
     if why:
         print(why); return 2
-    res = dependency_updates(checkout_pins(pathlib.Path(a.repo), a.target), None,
-                             checkout_dropped(pathlib.Path(a.repo), a.target))
+    gp = pathlib.Path(a.repo) / "gradle.properties"
+    pins = checkout_pins(pathlib.Path(a.repo), a.target)
+    neo = read_props_text(gp.read_text(encoding="utf-8") if gp.is_file() else "").get("neo_version")
+    res = dependency_updates(pins, None, checkout_dropped(pathlib.Path(a.repo), a.target), {mc: neo for mc in pins})
     if a.json:
         print(json.dumps(res, indent=1))
         return 0
     for r in res["rows"]:
         print(f"layer-deps: {'restore' if r.get('restore') else 'update'} {r['mc']} {r['ga']}: {r['from']} -> {r['to']} "
               f"({r['from_name']} -> {r['to_name']}, "
-              f"{r['channel']})" + (f" -- look first: {r['why']}" if r["why"] else "") + f"\n    {bump_command(r['mc'], r['ga'], r['to'], a.repo)}")
+              f"{r['channel']})" + (f" -- look first: {r['why']}" if r["why"] else "")
+              + (f" -- needs NeoForge {r['neo']['needs']} (now {r['neo']['from']}): also moves it to {r['neo']['to']}"
+                 if (r.get("neo") or {}).get("to") else "")
+              + (f" -- requires {', '.join(r['requires'])}" if r.get("requires") else "")
+              + f"\n    {bump_command(r['mc'], r['ga'], r['to'], a.repo, (r.get('neo') or {}).get('to'))}")
     for u in res["unchecked"]:
         print(f"layer-deps: could not check {u['mc']} {u['ga']} ({u['coord']}): {u['why']}")
     print(f"layer-deps: {res['checked']} pinned registry dependenc{'y' if res['checked'] == 1 else 'ies'} checked, "
@@ -2080,6 +2221,67 @@ def _check_pins_and_bumps(expect):
            and res["checked"] == 2 and not res["unchecked"]
            and dependency_updates({"1.21.4": {}}, {"mr_files": lambda p_: rf[p_]}) == {"rows": [], "unchecked": [], "checked": 0},
            f"restore: a dropped dependency with a build now is an unticked restore row; one still without none: {res}")
+    _check_bump_requirements(expect)
+
+
+def _check_bump_requirements(expect):
+    """A bump's newer build is read for what it needs (weekly round 2026-11-18): a NeoForge minimum above the version's
+    NeoForge puts the move on the same row and command; none meeting it unticks the row; an unreadable jar is said, not
+    raised; resolve --neoforge moves the version's NeoForge on a version branch and on a single-version checkout."""
+    import contextlib, io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("META-INF/neoforge.mods.toml", 'modLoader="javafml"\n[[mods]]\nmodId="examplemod"\n'
+                   '[[dependencies.examplemod]]\nmodId="neoforge"\ntype="required"\nversionRange="[26.3.0.97,)"\n'
+                   '[[dependencies.examplemod]]\nmodId="minecraft"\ntype="required"\nversionRange="[26.3,26.3.1)"\n'
+                   '[[dependencies.examplemod]]\nmodId="examplelib"\ntype="required"\nversionRange="[2.0,)"\n'
+                   '[[dependencies.examplemod]]\nmodId="viewer"\ntype="optional"\nversionRange="[1,)"\n')
+    reqs = jar_requirements(buf.getvalue())
+    expect([(d["mod"], d["range"], d["required"]) for d in reqs] == [("neoforge", "[26.3.0.97,)", True),
+           ("minecraft", "[26.3,26.3.1)", True), ("examplelib", "[2.0,)", True), ("viewer", "[1,)", False)],
+           f"jar_requirements reads each [[dependencies]] table: {reqs}")
+    expect(range_floor("[26.3.0.97,)") == "26.3.0.97" and range_floor("(,2.0]") is None and range_floor("1.2") == "1.2",
+           "range_floor: the lowest version a range admits")
+    files = {"cur": [{"id": "c1", "name": "16.0", "mcs": ["26.3"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                     {"id": "c2", "name": "16.1", "mcs": ["26.3"], "loaders": ["neoforge"], "channel": "release", "date": "2026-05"}]}
+    pins = {"26.3": {"maven.modrinth:cur": "maven.modrinth:cur:c1"}}
+    lk = lambda newest, jr=None: {"mr_files": lambda p_: files[p_], "neo_newest": lambda mc: newest,
+                                  "jar_reqs": jr or (lambda c: jar_requirements(buf.getvalue()))}
+    r = dependency_updates(pins, lk("26.3.0.113"), None, {"26.3": "26.3.0.76"})["rows"][0]
+    expect(r["neo"] == {"from": "26.3.0.76", "needs": "26.3.0.97", "to": "26.3.0.113"} and r["default"]
+           and r["requires"] == ["examplelib [2.0,)"],
+           f"a bump whose build needs a newer NeoForge carries the move, still ticked: {r}")
+    expect(bump_command("26.3", "maven.modrinth:cur", r["to"], neo=r["neo"]["to"]).endswith(
+           "--bump maven.modrinth:cur=maven.modrinth:cur:c2 --neoforge 26.3.0.113"), "the one command moves both")
+    r = dependency_updates(pins, lk("26.3.0.113"), None, {"26.3": "26.3.0.100"})["rows"][0]
+    expect("neo" not in r and r["default"], f"a NeoForge already new enough: no move: {r}")
+    r = dependency_updates(pins, lk("26.3.0.90"), None, {"26.3": "26.3.0.76"})["rows"][0]
+    expect(r["neo"]["to"] is None and not r["default"] and "no NeoForge build for 26.3 meets it" in r["why"],
+           f"no NeoForge build meets it: unticked, said: {r}")
+    r = dependency_updates(pins, lk("26.3.0.113", lambda c: (_ for _ in ()).throw(OSError("offline"))), None,
+                           {"26.3": "26.3.0.76"})["rows"][0]
+    expect(r["default"] and "offline" in r.get("requires_unchecked", "") and "neo" not in r,
+           f"an unreadable jar is said, the box offered as before: {r}")
+    r = dependency_updates(pins, {"mr_files": lambda p_: files[p_]}, None, {"26.3": "26.3.0.76"})["rows"][0]
+    expect("neo" not in r and "requires_unchecked" not in r, "a stand-in lookup with no jar reader skips the check")
+    with tempfile.TemporaryDirectory() as td:
+        vb, sv = pathlib.Path(td) / "vb", pathlib.Path(td) / "sv"
+        (vb / ".port/26.3").mkdir(parents=True); sv.mkdir()
+        (vb / "gradle.properties").write_bytes(b"minecraft_version=26.3\r\nneo_version=26.3.0.76\r\n")
+        (vb / ".port/26.3/branch.properties").write_bytes(b"prop.minecraft_version=26.3\nprop.neo_version=26.3.0.76\n")
+        (sv / "gradle.properties").write_bytes(b"minecraft_version=26.3\nneo_version=26.3.0.76\nmod_id=examplemod\n")
+        say = []
+        expect(set_neoforge(vb, "26.3", "26.3.0.113", say.append) == 0
+               and (vb / "gradle.properties").read_bytes() == b"minecraft_version=26.3\r\nneo_version=26.3.0.113\r\n"
+               and (vb / ".port/26.3/branch.properties").read_bytes()
+               == b"prop.minecraft_version=26.3\nprop.neo_version=26.3.0.113\n",
+               f"version branch: both keys moved, line endings kept: {say}")
+        expect(set_neoforge(sv, "26.3", "26.3.0.113", say.append) == 0
+               and (sv / "gradle.properties").read_bytes() == b"minecraft_version=26.3\nneo_version=26.3.0.113\nmod_id=examplemod\n",
+               "single-version: gradle.properties' neo_version moved, nothing else")
+        expect(set_neoforge(sv, "26.3", "26.2.0.90", say.append) == 2
+               and b"26.3.0.113" in (sv / "gradle.properties").read_bytes(),
+               "a NeoForge build of another Minecraft line is refused, nothing written")
 
 
 # port-ci.py dep_jars' rendering of one --dep-jar step, for the self-check where port-ci.py is not beside this file
@@ -2281,6 +2483,8 @@ def main():
                         "group:module:version), else to the newest compatible build. Without it a pinned dependency is "
                         "kept as it is; on a single-version fork it edits build.gradle (or the gradle.properties key)")
     r.add_argument("--bump-all", action="store_true", help="move every pinned registry dependency to its newest compatible build")
+    r.add_argument("--neoforge", metavar="VERSION", help="move the version's NeoForge to VERSION first (a build of the same "
+                   "Minecraft line): what a ticked bump's build needs, as the weekly plan names it")
     r.add_argument("--allow-undone-library", action="store_true",
                    help="development only: build against a --port-checkout sibling whose target is not done (recorded in DEPS.md)")
     ld = sub.add_parser("library-done", help="is a sibling library's target done? exit 0 yes, 18 no")

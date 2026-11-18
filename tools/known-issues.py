@@ -835,6 +835,10 @@ def dep_lines(repo, du, carried):
         return (f"- [{'x' if on else ' '}] " + ("**restore** " if r.get("restore") else "")
                 + f"`{r['ga']}` at {r['mc']}: `{r['from']}` -> `{r['to']}`{names}"
                 + ("" if r["default"] else f" -- not ticked by default: {esc(r['why'])}")
+                + (f" -- needs NeoForge `{r['neo']['needs']}` (the branch has `{r['neo']['from']}`): ticked, it also "
+                   f"moves NeoForge to `{r['neo']['to']}`" if (r.get("neo") or {}).get("to")
+                   and all(SAFE_COORD.match(str(r["neo"].get(k) or "")) for k in ("needs", "from", "to")) else "")
+                + (f" -- requires {esc(', '.join(r['requires']))}" if r.get("requires") else "")
                 + f" <!-- dep:{repo}:{r['id']} {'default' if r['default'] else 'candidate'} -->")
     dev = [r for r in rows if r.get("role") in DEV_ROLES and not r.get("restore")]
     prod = [r for r in rows if r not in dev]
@@ -1122,7 +1126,7 @@ def render_plan(inp):
         if c is None and n:          # a single-version fork: its trial merge's conflicts, like a head's cascade.head_merge_conflicts
             data_forks[-1]["head_merge_conflicts"] = len(f.get("merge_conflicts") or [])
         if du is not None:           # every kind of fork: the dependency updates the step found
-            data_forks[-1]["dep_updates"] = [{k: r.get(k) for k in ("id", "mc", "ga", "from", "to", "default", "why")}
+            data_forks[-1]["dep_updates"] = [{k: r.get(k) for k in ("id", "mc", "ga", "from", "to", "default", "why", "neo")}
                                              for r in du.get("rows", [])]
         if sh is not None:
             data_forks[-1]["adopt"] = [{k: a.get(k) for k in ("id", "version", "kind", "path")} for a in sh.get("adopt") or []]
@@ -1270,10 +1274,13 @@ def read_plan(issue, comments, allowed, now=None):
             on = {d["id"]: dticks[r].get(d["id"], bool(d.get("default"))) for d in f["dep_updates"]}
             import shlex
             safe = lambda d: all(SAFE_COORD.match(str(d.get(k) or "")) for k in ("mc", "ga", "to"))
+            # the NeoForge the bump's build needs (weekly-plan's requirement check): moved by the same command
+            neo_to = lambda d: (lambda v: v if v and SAFE_COORD.match(str(v)) else None)((d.get("neo") or {}).get("to"))
             o["dep_bumps"] = [{"id": d["id"], "mc": d["mc"], "ga": d["ga"], "from": d["from"], "to": d["to"],
                                "command": f"python3 mmvu/tools/layer-deps.py resolve --repo "
                                           f"{shlex.quote('<checkout of neoforge-' + d['mc'] + '>')} --target "
-                                          f"{shlex.quote(d['mc'])} --bump {shlex.quote(d['ga'] + '=' + d['to'])}"}
+                                          f"{shlex.quote(d['mc'])} --bump {shlex.quote(d['ga'] + '=' + d['to'])}"
+                                          + (f" --neoforge {shlex.quote(neo_to(d))}" if neo_to(d) else "")}
                               for d in f["dep_updates"] if on[d["id"]] and safe(d)]
             o["dep_kept"] = [d["id"] for d in f["dep_updates"] if not on[d["id"]]]
             o["dep_ticks"] = {f"{d['mc']} {d['ga']} {d['to']}": on[d["id"]] for d in f["dep_updates"]}
@@ -3107,6 +3114,21 @@ def plan_check(expect, cli):
                    and all(f"--bump {x['ga']}={x['to']}" in x["command"] and f"--target {x['mc']}" in x["command"]
                            for x in l2["dep_bumps"]) and len(l2.get("dep_ticks", {})) == 2,
                    f"read-plan: the ticked dependency bumps, each with its command: {l2.get('dep_bumps')} {l2.get('dep_kept')}")
+        # a bump whose build needs a newer NeoForge (layer-deps.py bump_requirements): the box says so and the one
+        # command moves both; a NeoForge value with shell syntax is never carried into the command
+        neo_inp = json.loads(json.dumps(inp2))
+        neo_inp["forks"][0]["dep_updates"]["rows"][0].update(
+            neo={"from": "21.1.1", "needs": "21.1.9", "to": "21.1.20"}, requires=["examplelib [2.0,)"])
+        b5 = render_plan(neo_inp)["body"]
+        fr5 = read_plan({"number": 10, "body": b5}, [], lambda u: True, "t")["forks"][0]
+        expect("needs NeoForge `21.1.9` (the branch has `21.1.1`): ticked, it also moves NeoForge to `21.1.20`" in b5
+               and "requires examplelib [2.0,)" in b5
+               and fr5["dep_bumps"][0]["command"].endswith("--neoforge 21.1.20"),
+               f"a bump's NeoForge need: in the box and in its command: {fr5.get('dep_bumps')}")
+        neo_inp["forks"][0]["dep_updates"]["rows"][0]["neo"]["to"] = "21.1.20;$(x)"
+        fr6 = read_plan({"number": 11, "body": render_plan(neo_inp)["body"]}, [], lambda u: True, "t")["forks"][0]
+        expect("--neoforge" not in fr6["dep_bumps"][0]["command"] and "$(x)" not in fr6["dep_bumps"][0]["command"],
+               f"an unsafe NeoForge value is never put in a command: {fr6['dep_bumps']}")
         # review S2 (security): registry text cannot open a code span or a mention, and a coordinate with shell syntax
         # is never a bump; every command is quoted
         bad_inp = json.loads(json.dumps(inp2))
