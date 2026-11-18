@@ -1467,9 +1467,9 @@ def neo_newest(mc):
 def bump_requirements(row, neo_now, lk=None):
     """What the newer build of a bump row needs beyond it (keep-current: a ticked bump never stops the round on a
     requirement nobody saw -- weekly round 2026-11-18: a Curios build needing NeoForge 26.3.0.97 on a branch at .76).
-    Fills row["neo"] = {"from", "needs", "to"} when it needs a newer NeoForge than `neo_now` (to: the newest stable
-    build of that line, which the same box moves to; None when no build meets it, and the row is then not ticked by
-    default) and row["requires"] with its other required mods and their ranges, for the owner to read. A jar that
+    Fills row["neo"] = {"from", "needs", "to"} when it needs a newer NeoForge than `neo_now` (to: the build it needs,
+    which the same box moves to -- the newest stable build of that line only when the floor names no build of it; None
+    when no build meets it, and the row is then not ticked by default) and row["requires"] with its other required mods and their ranges, for the owner to read. A jar that
     cannot be read leaves row["requires_unchecked"] with why; nothing is raised."""
     lk = lk or {}
     try:
@@ -1480,8 +1480,11 @@ def bump_requirements(row, neo_now, lk=None):
     neo = next((d for d in reqs if d["mod"] == "neoforge" and d["required"]), None)
     floor = range_floor(neo["range"]) if neo else None
     if floor and neo_now and _vkey(floor) > _vkey(neo_now):
-        to = (lk.get("neo_newest") or neo_newest)(row["mc"])
-        ok = bool(to) and SAFE_COORD.match(to) and _vkey(to) >= _vkey(floor)
+        # the move is to the build the jar asks for, not the newest: the smallest change that meets it (weekly round
+        # 2026-11-18: the newest 26.3 build, .113, also refuses a wildcard Entity access transformer that .101 starts)
+        newest = (lk.get("neo_newest") or neo_newest)(row["mc"])
+        ok = bool(newest) and SAFE_COORD.match(newest) and _vkey(newest) >= _vkey(floor)
+        to = floor if ok and (_fb().neo_line(floor) or [None])[0] == row["mc"] else newest
         row["neo"] = {"from": neo_now, "needs": floor, "to": to if ok else None}
         if not ok:
             row["default"] = False
@@ -2250,11 +2253,11 @@ def _check_bump_requirements(expect):
     lk = lambda newest, jr=None: {"mr_files": lambda p_: files[p_], "neo_newest": lambda mc: newest,
                                   "jar_reqs": jr or (lambda c: jar_requirements(buf.getvalue()))}
     r = dependency_updates(pins, lk("26.3.0.113"), None, {"26.3": "26.3.0.76"})["rows"][0]
-    expect(r["neo"] == {"from": "26.3.0.76", "needs": "26.3.0.97", "to": "26.3.0.113"} and r["default"]
+    expect(r["neo"] == {"from": "26.3.0.76", "needs": "26.3.0.97", "to": "26.3.0.97"} and r["default"]
            and r["requires"] == ["examplelib [2.0,)"],
            f"a bump whose build needs a newer NeoForge carries the move, still ticked: {r}")
     expect(bump_command("26.3", "maven.modrinth:cur", r["to"], neo=r["neo"]["to"]).endswith(
-           "--bump maven.modrinth:cur=maven.modrinth:cur:c2 --neoforge 26.3.0.113"), "the one command moves both")
+           "--bump maven.modrinth:cur=maven.modrinth:cur:c2 --neoforge 26.3.0.97"), "the one command moves both")
     r = dependency_updates(pins, lk("26.3.0.113"), None, {"26.3": "26.3.0.100"})["rows"][0]
     expect("neo" not in r and r["default"], f"a NeoForge already new enough: no move: {r}")
     r = dependency_updates(pins, lk("26.3.0.90"), None, {"26.3": "26.3.0.76"})["rows"][0]

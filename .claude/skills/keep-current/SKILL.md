@@ -344,7 +344,7 @@ and version-branch forks alike:
   each pinned CurseForge/Modrinth dependency with a newer compatible build, current -> new, ticked by default and
   unticked with the reason when the new build is an alpha/beta, a major-version jump, drops a Minecraft version the fork
   builds or switches provider; each new build's jar read for what it needs -- a newer NeoForge than the version builds
-  rides on the same box and command (`--neoforge V`, the newest build of that line; unticked with the reason when none
+  rides on the same box and command (`--neoforge V`, the build it needs, not the newest; unticked with the reason when none
   meets it), its other required mods listed; a dependent's NeoForge move at a version is its libraries' too, at
   that version, transitively (`round.py` implied_neo_bumps: the library is fixed, gated and released on it first); on a version-branch fork also each dependency a version dropped that has a build for it
   now, an unticked **restore** box -- ticked, the round pins it again with the same `--bump`, and that version's

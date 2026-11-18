@@ -297,7 +297,7 @@ Minecraft version the fork builds, each pinned CurseForge/Modrinth dependency wi
 new): ticked by default, unticked with the reason shown when the new build is an alpha or beta, a major-version jump,
 drops a Minecraft version the fork builds or switches provider. Each new build's jar is read for what it needs:
 when its `neoforge.mods.toml` asks for a newer NeoForge than that version builds, the box says so and, ticked, moves
-NeoForge to the newest build of that line in the same command (`resolve --bump ... --neoforge V`), so the round never
+NeoForge to the build it needs in the same command (`resolve --bump ... --neoforge V`), so the round never
 stops on it; when no NeoForge build meets it the box is unticked with the reason; its other required mods are listed
 for reading. A dependent's NeoForge move at a version moves each library it depends on to that NeoForge there too, in
 the library's own cycle (`round.py` adds the move to the library's version), so the library is fixed, gated and
