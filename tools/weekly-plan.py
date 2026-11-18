@@ -889,6 +889,21 @@ def fork_pins(f, fb, ld):
     return out
 
 
+def fork_neo(f, fb, ld):
+    """{mc: neo_version}: the NeoForge each Minecraft version the fork builds is on, read where fork_pins reads the pins
+    (gradle.properties at the head commit and at each version branch's tip): what a bump's build may need more than."""
+    clone = f["clone"]
+    show = lambda ref, p: git(clone, "show", f"{ref}:{p}").stdout if git(clone, "cat-file", "-e", f"{ref}:{p}").returncode == 0 else ""
+    hp = ld.read_props_text(show(f["head_commit"], "gradle.properties"))
+    mc = hp.get("minecraft_version") or (f["head"][len("neoforge-"):] if f["head"].startswith("neoforge-") else "?")
+    out = {mc: hp.get("neo_version")}
+    for v in sorted(fb.version_branches(clone), key=fb.mc_key):
+        ref = fb.resolve_branch(clone, fb.branch_name(v))
+        if ref and v not in out:
+            out[v] = ld.read_props_text(show(ref, "gradle.properties")).get("neo_version")
+    return out
+
+
 def fork_roles(f, fb, ld, lk=None):
     """{mc: {group:module: role}}: each pin's role, read where fork_pins reads the pin (the head commit, each version
     branch's tip) from that ref's build.gradle and .github/port-install.json, as resolve reads them
@@ -935,7 +950,11 @@ def step_deps(work, lk=None):
     fb, ld = fb_mod(), ld_mod()
     for f in inp["forks"]:
         try:
-            f["dep_updates"] = ld.dependency_updates(fork_pins(f, fb, ld), lk, fork_dropped(f, fb, ld))
+            try:
+                neo = fork_neo(f, fb, ld)
+            except Exception:           # noqa: BLE001 -- no NeoForge known: the requirement check is skipped
+                neo = None
+            f["dep_updates"] = ld.dependency_updates(fork_pins(f, fb, ld), lk, fork_dropped(f, fb, ld), neo)
             try:
                 rl = fork_roles(f, fb, ld, lk)
             except Exception:           # noqa: BLE001 -- no role: the row is listed under Production (fail closed)

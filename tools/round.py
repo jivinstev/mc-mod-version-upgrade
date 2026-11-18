@@ -413,6 +413,49 @@ class Q:
         return iid
 
 
+NEO_ARG = re.compile(r"--neoforge\s+'?([0-9][0-9.]*)'?(?:\s|$)")
+
+
+def implied_neo_bumps(fz, forks, deps_of):
+    """{library fork: [bump]}: a dependent's ticked bump that moves NeoForge at a version (layer-deps.py resolve
+    --neoforge V, weekly-plan's requirement check) moves every library it depends on, transitively, to at least V at
+    that version too, in the library's own cycle -- its fixer, review, gates and release run on V before the dependent
+    re-pins (weekly round 2026-11-18: the dependent moved to NeoForge 26.3.0.113 for a Curios build and only its last
+    gate found that the library's released jar does not start there). A library's own move to V or newer is kept."""
+    want = {}                   # (library, mc) -> (V, the bump id that needs it)
+    for slug in forks:
+        for b in (fz.get(slug) or {}).get("dep_bumps", []):
+            m = NEO_ARG.search(b.get("command") or "")
+            if not m:
+                continue
+            todo, seen = list(deps_of.get(slug, [])), set()
+            while todo:
+                lb = todo.pop(0)
+                if lb in seen:
+                    continue
+                seen.add(lb)
+                todo += deps_of.get(lb, [])
+                if b["mc"] not in [forks[lb]["base"], *forks[lb]["versions"]]:
+                    continue
+                cur = want.get((lb, b["mc"]))
+                if not cur or _vkey(m.group(1)) > _vkey(cur[0]):
+                    want[(lb, b["mc"])] = (m.group(1), f"{slug.split('/', 1)[-1]}:{b.get('id')}")
+    out = {}
+    for (lb, mc), (v, why) in sorted(want.items()):
+        own = [NEO_ARG.search(b.get("command") or "") for b in (fz.get(lb) or {}).get("dep_bumps", []) if b.get("mc") == mc]
+        if any(o and _vkey(o.group(1)) >= _vkey(v) for o in own):
+            continue
+        out.setdefault(lb, []).append({
+            "id": f"neo-{mc}", "mc": mc, "ga": "net.neoforged:neoforge", "to": v, "implied_by": why,
+            "command": f"python3 mmvu/tools/layer-deps.py resolve --repo '<checkout of neoforge-{mc}>' --target {mc} "
+                       f"--neoforge {v}"})
+    return out
+
+
+def _vkey(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or ""))
+
+
 def build_queue(frozen, cfg, forks, date):
     """forks: {slug: {"dir", "kind", "head", "base", "versions", ...}} in config order (library first); a single-version
     fork has no versions (its head alone). A version gets its segment only when it has work this round: the head cascade of the authors' code the plan
@@ -427,6 +470,7 @@ def build_queue(frozen, cfg, forks, date):
         """A single-version dependent whose one version is v: gated before the library's merge at v too."""
         return forks[dep]["kind"] == "single" and forks[dep]["base"] == v
     release_of = {}            # (fork, version) -> the release item id
+    implied = implied_neo_bumps(fz, forks, deps_of)
     # LOWEST FIRST: one job per fork whose fixes need an agent's look below their version; every fork waits for them
     lowest_items = []
     for slug, F in forks.items():
@@ -446,7 +490,7 @@ def build_queue(frozen, cfg, forks, date):
         lowest_fix = min((rank[v] for v in at), default=None)
         grades = [g for g in frozen.get("grades", []) if g.get("fork") == slug]
         bumps = {}
-        for b in f.get("dep_bumps", []):
+        for b in f.get("dep_bumps", []) + implied.get(slug, []):
             bumps.setdefault(b["mc"], []).append(b)
         libs = deps_of.get(slug, [])
         casc = f.get("cascade") or {}
@@ -6064,6 +6108,24 @@ def self_check():
                and by["examplemod@1.21.4:mergeup"]["extra"]["from"] == "neoforge-1.21.1"
                and by["examplemod@1.21.4:mergeup"]["extra"]["head_cascade"],
                "the dependent re-pins each version to the library's release of this round; the ticked bump at its version")
+        # a dependent's bump that moves NeoForge at a version moves its library there first, in the library's own cycle
+        with State.tx(state, write=False) as st_:
+            forks_ = json.loads(json.dumps(st_.data["forks"]))
+        fzn = fz()
+        fzn["forks"][1]["dep_bumps"][0]["command"] += " --neoforge 21.5.99"
+        byn = {x["id"]: x for x in build_queue(fzn, cfg, forks_, "2026-10-21")}
+        lb_ = (byn.get("examplelib@1.21.5:repin") or {}).get("extra", {}).get("bumps", [])
+        expect("examplelib@1.21.5:repin" not in by
+               and [b_["command"].split("--target ")[1] for b_ in lb_] == ["1.21.5 --neoforge 21.5.99"]
+               and lb_[0]["implied_by"] == "examplemod:b1"
+               and "examplelib@1.21.5:release" in byn["examplemod@1.21.5:repin"]["deps"]
+               and "examplelib@1.21.5:review" in byn and "examplelib@1.21.4:repin" not in byn,
+               f"a dependent's NeoForge move at 1.21.5 is the library's too, at 1.21.5 only, before the re-pin: {lb_}")
+        fzo = json.loads(json.dumps(fzn))
+        fzo["forks"][0]["dep_bumps"] = [dict(fzn["forks"][1]["dep_bumps"][0], id="own",
+                                             command=fzn["forks"][1]["dep_bumps"][0]["command"].replace("21.5.99", "21.5.120"))]
+        lo_ = {x["id"]: x for x in build_queue(fzo, cfg, forks_, "2026-10-21")}["examplelib@1.21.5:repin"]["extra"]["bumps"]
+        expect([b_["id"] for b_ in lo_] == ["own"], f"a library's own newer NeoForge move is kept, none added: {lo_}")
         lr = "examplemod@1.21.4:librecord:examplelib"
         expect(lr in by and "examplemod@1.21.4:gates" in by[lr]["deps"] and "examplemod@1.21.4:release" in by[lr]["deps"]
                and by["examplelib@1.21.1:ledger"].get("final") and by["examplelib@1.21.1:ledger"]["deps"] == [],
