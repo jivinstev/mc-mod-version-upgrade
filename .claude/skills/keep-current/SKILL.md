@@ -869,14 +869,14 @@ it small, so the orchestration is a tool, which replaces the four rules above:
    meet it. On a version-branch set the close job also lists each file a fork marks `MV-AHEAD-OF-TEMPLATE` (its copy of
    a shared helper is ahead of the migrator's template): one row each, `ahead of MMVU's shared template: harvest`.
    A round that met none writes one row `| none | | | |`. Then close the issue (state completed). An issue the round
-   closed is never carried forward. **Then harvest, by default every round** (the round prompt's step 10): one PR
-   into the migrator from its own `claude/harvest-<date>` branch -- each `MV-AHEAD-OF-TEMPLATE` copy that still
-   differs from the library (`fork-branches.py sync-shared --check`) into `templates/fork-layer/shared/<v>/` with a
-   test pinning it, and each general Lessons row as a catalogue entry or AUGMENT, starting from `python3
-   tools/propose-learnings.py --from-plan <owner/repo>#<N>` (a worklist; it writes nothing), the census updated
-   (`check-catalog-fidelity.py --update`) and the name, IP and README gates run. The round pushes only that branch,
-   drives the PR's CI to green and never merges it (the maintainer does); one comment on the plan issue links it, or
-   says there was nothing to harvest, or that the migrator was not writable here and the harvest is due by hand.
+   closed is never carried forward. **Then hand the lessons to the migrator, by default every round** (the round prompt's step
+   10), by ONE path for every owner: one more comment on the plan issue with a ready-to-file issue link on the
+   migrator, `python3 tools/propose-learnings.py --from-plan <owner/repo>#<N> --issue-url <migrator owner/repo>`
+   (the rows and a link to the closing comment; no model work, nothing written anywhere else). The owner opens it
+   with their own account; the migrator's side turns the issue into a pull request -- each `MV-AHEAD-OF-TEMPLATE`
+   copy that still differs from the library into `templates/fork-layer/shared/<v>/` with a test, each general row a
+   catalogue entry, starting from `propose-learnings.py --from-plan` (a worklist) -- and the round itself never
+   writes the migrator.
 7. **Afterwards:** set the ledger statuses on each head branch (`known-issues.py status <ID> --set <v>,<v>=fixed@<commit>`,
    or `--set <from>..<to>=fixed@<commit>`, for every version a fix reached, in one call per issue, committed alone), then refresh the README Ports block ("README Ports block" below).
 
