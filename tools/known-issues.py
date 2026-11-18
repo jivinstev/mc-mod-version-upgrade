@@ -881,7 +881,9 @@ def shared_lines(repo, sh, carried):
                 "its gates:", ""]
         for a in ad:
             what = (f"the fork's own copy of MMVU's shared helper `{esc(a.get('helper'))}` (library {esc(a.get('library'))}"
-                    + (", byte-identical" if a.get("same") else "") + ")" if a.get("kind") == "helper" else
+                    + (", byte-identical" if a.get("same") else "")
+                    + (", byte-identical apart from its marker lines: MMVU has harvested it" if a.get("marked_same") else "")
+                    + ")" if a.get("kind") == "helper" else
                     f"the row `{esc(a.get('row'))}` duplicates MMVU's shared table")
             out.append(f"- [{'x' if carried.get(a['id'], False) else ' '}] {esc(a['path'])} at {a['version']}: {what}"
                        + (" -- marked ahead of MMVU: harvest it first" if a.get("ahead") else "")
@@ -3071,6 +3073,13 @@ def plan_check(expect, cli):
         expect(l3.get("adopt") == ["A0123456789"] and l3.get("adopt_ticks") == {"A0123456789": True, "Abcdef01234": False}
                and "adopt" not in d3 and "adopt" not in read_plan({"number": 7, "body": b}, [], lambda u: True, "t")["forks"][0],
                f"read-plan: the ticked adopt box only; no adopt key without the section: {l3.get('adopt_ticks')} {sec}")
+        # a marked copy MMVU has harvested (equal apart from its marker lines): no "harvest it first", said as harvested
+        inp4 = json.loads(json.dumps(inp3))
+        inp4["forks"][0]["shared"]["adopt"][0].update(ahead=False, marked_same=True)
+        inp4["forks"][0]["shared"]["ahead"] = []
+        sec4 = render_plan(inp4)["body"].split("### Adopt MMVU's shared code", 1)[-1].split("###", 1)[0]
+        expect("byte-identical apart from its marker lines: MMVU has harvested it" in sec4 and "harvest it first" not in sec4
+               and "Marked ahead of MMVU" not in sec4, f"render-plan: a harvested marked copy is adoptable as it is: {sec4}")
         # dependency updates (every kind of fork): ticked by default, unticked with the reason; ticks read back
         du_lib = {"checked": 3, "rows": [
             {"id": "D1", "mc": "1.21.1", "ga": "maven.modrinth:viewer", "from": "maven.modrinth:viewer:a1",

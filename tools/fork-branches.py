@@ -4435,7 +4435,8 @@ def adopt_candidates(t, plan):
     """The fork's hand-written copies of what the shared library now ships at version t: a .java file under the
     version's mv package (or carrying a shared helper's own header or `// REQUIRES:` line) named like a helper of t's
     library that is not installed as that helper; a row of .port/<t>/renames.tsv that a shared table of t already has.
-    -> [{id, kind: helper|row, path, helper|row, library, same}] (`id` is stable while the candidate is)."""
+    -> [{id, kind: helper|row, path, helper|row, library, same, marked_same}] (`id` is stable while the candidate is;
+    `marked_same`: a helper copy equal to the library's apart from its MV-AHEAD-OF-TEMPLATE / MV-STAND-IN lines)."""
     files, read = plan["files"], plan["read"]
     build = files.get("build.gradle", b"").decode("utf-8", "replace") + files.get("gradle.properties", b"").decode("utf-8", "replace")
     nearest = {}
@@ -4456,8 +4457,11 @@ def adopt_candidates(t, plan):
             continue
         if not (p_.startswith(mv_dir) or SHARED_HEADER in data or re.search(rb"(?m)^// REQUIRES: ", data)):
             continue
+        # equal apart from its marker comment lines (MV-AHEAD-OF-TEMPLATE, MV-STAND-IN): the library carries what the
+        # fork marked ahead of it (harvested), so adopting it drops nothing but those lines
+        bare = re.sub(rb"(?m)^// MV-(?:AHEAD-OF-TEMPLATE|STAND-IN):.*\r?\n", b"", data)
         out.append({"id": ident(p_), "kind": "helper", "path": p_, "helper": name, "library": nearest.get(name, "?"),
-                    "same": data == lib[name]})
+                    "same": data == lib[name], "marked_same": data != lib[name] and bare == lib[name]})
     norm = lambda ln: "\t".join(x.strip() for x in ln.split("\t"))
     shared_rows = {norm(ln) for ln in plan["new_text"].splitlines() if ln.strip() and not ln.lstrip().startswith("#")}
     for ln in read(f"{REC}/{t}/renames.tsv").splitlines():
@@ -4484,7 +4488,8 @@ def ahead_marks(files):
 def shared_status(repo, targets=None):
     """sync-shared --check, read-only (no checkout touched): per version branch (its newest commit, local or origin's)
     -> {t: {"ref", "changes": [paths a sync would write], "edited": [...], "reconcile": [the edited ones whose library
-    copy moved: an agent's job, never overwritten], "own": [...], "adopt": adopt_candidates, "ahead": ahead_marks}}
+    copy moved: an agent's job, never overwritten], "own": [...], "adopt": adopt_candidates, "ahead": ahead_marks,
+    "harvested": the ahead_marks whose file the library now carries (marked_same: not ahead any more)}}
     ({"error": why} for a version that could not be read)."""
     repo = pathlib.Path(repo).resolve()
     have = version_branches(repo)
@@ -4500,6 +4505,11 @@ def shared_status(repo, targets=None):
                       "reconcile": [e["path"] for e in plan["edited"] if e["reconcile"]],
                       "own": [o["path"] for o in plan["own"]], "kept": plan["kept"],
                       "adopt": adopt_candidates(t, plan), "ahead": ahead_marks(plan["files"])}
+            # a file marked ahead whose code the library now carries (equal apart from its marker lines) is harvested:
+            # no longer ahead, and adopting it drops nothing
+            done = {a["path"] for a in out[t]["adopt"] if a.get("marked_same")}
+            out[t]["harvested"] = [a for a in out[t]["ahead"] if a["path"] in done]
+            out[t]["ahead"] = [a for a in out[t]["ahead"] if a["path"] not in done]
             ahead = {a["path"] for a in out[t]["ahead"]}
             for a in out[t]["adopt"]:
                 a["ahead"] = a["path"] in ahead       # adopting it would drop what the fork has and the library lacks
@@ -4529,7 +4539,8 @@ def status_lines(st, who="sync-shared --check"):
                             if e["reconcile"] else "the library's copy has not moved since: nothing to reconcile"))
         for a in s["adopt"]:
             lines.append(f"{h} adopt: " + (f"{a['path']} is the fork's own copy of the shared helper {a['helper']} "
-                                            f"(library {a['library']}{', byte-identical' if a['same'] else ''})"
+                                            f"(library {a['library']}{', byte-identical' if a['same'] else ''}"
+                                            f"{', byte-identical apart from its marker lines: the library carries its fix' if a.get('marked_same') else ''})"
                                             + (" -- marked ahead of the library: harvest it first, adopting it would drop "
                                                "the fork's fix" if a.get("ahead") else "")
                                             if a["kind"] == "helper" else
@@ -7571,6 +7582,21 @@ def self_check():
                        and f3s[orel] == (w3c / orel).read_bytes() and "was edited by hand: left alone" in out,
                        f"sync-shared: the stand-in follows the library and is listed; the edited section and the fork's own "
                        f"class are left as they were: {out[-500:]}")
+                # the library harvests the marked copy (equal now apart from its marker line): adoptable as it is, no
+                # longer ahead, and no "harvest it first"
+                (lib / "1.21.3/java/Other.java").write_text("package @MVPKG@;\npublic class Other { int better; }\n", encoding="utf-8")
+                gl("add", "-A"); gl(*ident, "commit", "-qm", "library: harvested Other")
+                rc, out = env_lib(sync_shared, r, ["1.21.3"], check=True, json_out=str(jf))
+                st3 = json.loads(jf.read_text(encoding="utf-8")).get("1.21.3", {})
+                oa = [a for a in st3.get("adopt", []) if a.get("path") == orel]
+                expect(oa and oa[0]["marked_same"] and not oa[0]["same"] and not oa[0]["ahead"]
+                       and not any(a["path"] == orel for a in st3.get("ahead", []))
+                       and [a["path"] for a in st3.get("harvested", [])] == [orel]
+                       and "byte-identical apart from its marker lines" in out and "harvest it first" not in out
+                       and "ahead of the library (harvest)" not in out,
+                       f"sync-shared --check: a marked copy the library now carries is adoptable, not ahead: {out[-600:]}")
+                (lib / "1.21.3/java/Other.java").write_text("package @MVPKG@;\npublic class Other { }\n", encoding="utf-8")
+                gl("add", "-A"); gl(*ident, "commit", "-qm", "library: Other back")
                 git(w3c, "reset", "-q", "--hard", pre3c)
                 # a LISTED helper reverted on purpose to an older library text (no longer its listing) stays edited --
                 # the history match is for unlisted copies only
