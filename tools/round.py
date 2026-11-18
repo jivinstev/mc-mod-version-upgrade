@@ -69,7 +69,8 @@ forks already on the current shared library, builds nothing but the close):
       PR's CI is the gate of record, its release's gates-<env>.md the record check-done reads)
       -> freeze (and, after a clean fresh review, its reviewed changes in .port/CHANGE-REVIEWS.md) -> resync (once the
       version below has MERGED: its merge brought up again, one cascade hop, before anything of this version is pushed;
-      before nochange when the version has one) -> pr (only what the gates certified: code after the gated commit sends the version back to its gates)
+      before nochange when the version has one) -> pr (only what the gates certified: code after the gated commit sends the version back to its gates; code the version below
+      brought up by its resync also sends it back to its review-reuse check)
       -> ci -> depgate:<dependent> (a LIBRARY version: the dependent's Gate C against this candidate jar, before the
       merge; on a ci_record fork the dependent's CI dispatched with dep_override naming the PR run's jar by its annotated
       sha256) -> merge (its
@@ -230,6 +231,18 @@ class Blocked(Exception):
     def __init__(self, msg="", res=None):
         super().__init__(msg)
         self.res = res or {}
+
+
+REVIEW_AGAIN = ("reviewref", "review", "fix", "recheck")
+
+
+def resettable(y, ids):
+    """Whether a Reset puts item y back to pending: a step that ran (ok, failed) or waits; a review step the
+    review-reuse check skipped too, when the reset names the reuse check itself (t_pr: code from below)."""
+    if y["status"] in ("ok", "failed", "pending"):
+        return True
+    return (y["status"] == "skipped" and y["step"] in REVIEW_AGAIN
+            and any(i.endswith(":reviewref") and i.split(":")[0] == y["id"].split(":")[0] for i in ids))
 
 
 class Reset(Exception):
@@ -3203,8 +3216,18 @@ def t_pr(st, it, log):
         raise Reset(seg_ids(st, it, ("gates", "depgate")), "no gated commit recorded: the gates run first")
     moved = code_changes(d, gated, local)
     if moved:
-        raise Reset(seg_ids(st, it, ("gates", "depgate")), f"code committed after the gated commit {gated[:12]} "
-                    f"({', '.join(moved[:4])}): the gates run again before the push")
+        ids, why = seg_ids(st, it, ("gates", "depgate")), (f"code committed after the gated commit {gated[:12]} "
+                                                          f"({', '.join(moved[:4])}): the gates run again before the push")
+        below = sorted(set(moved) & set(((seg_item(st, it, "resync") or {}).get("result") or {}).get("moved") or []))
+        if below:
+            # code the version below brought up after this version's review (its own fix, reviewed and merged there):
+            # the review-reuse check runs again, so REVIEW.md names the reviewed commit -- by reference when the
+            # change was reviewed below file for file, else a fresh review (weekly round 2026-11-18: a fix made at
+            # 1.21.5 after the higher versions' reviews reached them by resync; their gates ran again, their REVIEW.md
+            # stayed on the old commit and round-audit's I3 failed at every one)
+            ids = seg_ids(st, it, REVIEW_AGAIN) + ids
+            why += f"; {', '.join(below[:4])} came up from the version below: its review is checked again first"
+        raise Reset(ids, why)
     ledger_guard(st, it, d, base, local)
     work = f"keep-current/{st.data['date']}-{v}" if is_vb(st, it) else f"keep-current/{st.data['date']}"
     owner = slug.split("/")[0]
@@ -3776,7 +3799,7 @@ def run_tool(state_path, iid):
             else:
                 for r in reset:
                     y = st.item(r)
-                    if y["status"] in ("ok", "failed", "pending"):
+                    if resettable(y, reset):
                         y["status"], y["note"] = "pending", f"runs again: {note}"[-1500:]
         if status == "failed" and x["fixes"] >= MAX_FIX:
             x["status"] = "blocked"
@@ -5508,6 +5531,29 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
             want(False, "code after the gated commit was pushed")
         except Reset as e:
             want(set(e.ids) == {"examplesvlib@1.21.1:gates", dga}, f"code after the gates sends them back: {e.ids}")
+        # the same code brought up by the version below (its resync): the review-reuse check runs again first
+        with State.tx(sa2) as st_:
+            st_.items.append({"id": "examplesvlib@1.21.1:resync", "fork": SL, "version": "1.21.1", "step": "resync",
+                              "arg": "", "kind": "tool", "status": "ok", "deps": [], "dirs": [SL],
+                              "result": {"moved": ["Main.java"]}})
+            st_.items.append({"id": "examplesvlib@1.21.1:reviewref", "fork": SL, "version": "1.21.1", "step": "reviewref",
+                              "arg": "", "kind": "tool", "status": "ok", "deps": [], "dirs": [SL], "result": {}})
+        try:
+            step(sa2, "examplesvlib@1.21.1:pr")
+            want(False, "code from below after the gates was pushed")
+        except Reset as e:
+            rv_ = [i for i in e.ids if i.split(":")[1] in REVIEW_AGAIN]
+            want("examplesvlib@1.21.1:reviewref" in rv_ and "examplesvlib@1.21.1:gates" in e.ids
+                 and "came up from the version below" in str(e),
+                 f"code brought up from below after the review sends the review-reuse check back too: {e.ids} {e}")
+            want(resettable({"id": "examplesvlib@1.21.1:review", "step": "review", "status": "skipped"}, e.ids)
+                 and not resettable({"id": "examplesvlib@1.21.1:review", "step": "review", "status": "skipped"},
+                                    ["examplesvlib@1.21.1:gates"])
+                 and not resettable({"id": "examplesvlib@1.21.1:merge", "step": "merge", "status": "skipped"}, e.ids),
+                 "a skipped review step goes back to pending only when the reset names its reuse check")
+        with State.tx(sa2) as st_:
+            st_.data["items"] = [x for x in st_.items if x["id"] not in ("examplesvlib@1.21.1:resync",
+                                                                         "examplesvlib@1.21.1:reviewref")]
         git(sl, "reset", "-q", "--hard", "HEAD~1", check=True)
         # the release right after the merge: the merge waits for no push run; the release waits for both together
         prs["sha"] = head(sl)
