@@ -1169,6 +1169,24 @@ def version_pins(build_text, props_text, branch_props_text=""):
     return pins
 
 
+def pin_roles(build_text, props_text, manifest_text, lk=None):
+    """{group:module: role} of build.gradle's registry pins, as resolve gives them (port-install.json's role, else
+    "required" for an implementation/api/jarJar one or with no manifest, "build-only" for a compileOnly/runtimeOnly one
+    it does not name): what the weekly plan sorts its dependency boxes by -- "required" (players install it) or a
+    dev-time one ("extra", "build-only"). An unreadable manifest is no manifest (every dependency required)."""
+    try:
+        manifest = json.loads(manifest_text) if (manifest_text or "").strip() else None
+    except ValueError:
+        manifest = None
+    roles, ids = manifest_roles(manifest), {}
+    lk = {"mr_id": mr_project_id, **(lk or {})}
+    out = {}
+    for d in build_pins(build_text, props_text):
+        unnamed = "required" if manifest is None or d["conf"] in RUNTIME_CONFS else "build-only"
+        out[f"{d['group']}:{d['module']}"] = registry_role(d, roles, unnamed, manifest, ids, lk)
+    return out
+
+
 def _major(name, mcs):
     """The first number of a build's own version (its name with the Minecraft versions and loader words taken out)."""
     s = name or ""
@@ -2031,6 +2049,20 @@ def _check_pins_and_bumps(expect):
                         f"port_jar.com.example\\:lib=u s\n{END}\n") == {"curse.maven:somelib-111": "curse.maven:somelib-111:222",
                                                                     "maven.modrinth:viewer": "maven.modrinth:viewer:v9"},
            "version_pins: the block's substitutes over build.gradle's, an exclude dropped, a sibling port not a registry pin")
+    # pin_roles: the plan's production / dev-only split reads resolve's roles, nothing of its own
+    pb = ('dependencies {\n    implementation "curse.maven:somelib-111:222"\n    compileOnly "curse.maven:extra-333:444"\n'
+          '    runtimeOnly "maven.modrinth:devmod:abc123"\n    implementation "maven.modrinth:corelib:x1"\n}\n')
+    man_ = json.dumps({"files": [{"role": "self", "url": "x"},
+                                 {"role": "required", "url": "https://www.curseforge.com/api/v1/mods/111/files/222/download"},
+                                 {"role": "extra", "url": "https://www.curseforge.com/api/v1/mods/333/files/444/download"},
+                                 {"role": "required", "url": "https://cdn.modrinth.com/data/AbC123/versions/v/c.jar"}]})
+    pr = pin_roles(pb, "", man_, {"mr_id": lambda s: {"corelib": "AbC123"}.get(s)})
+    expect(pr == {"curse.maven:somelib-111": "required", "curse.maven:extra-333": "extra",
+                  "maven.modrinth:devmod": "build-only", "maven.modrinth:corelib": "required"}
+           and set(pin_roles(pb, "", "", {"mr_id": lambda s: None}).values()) == {"required"}
+           and set(pin_roles(pb, "", "{not json", {"mr_id": lambda s: None}).values()) == {"required"},
+           f"pin_roles: the manifest's roles (a Modrinth slug through its id), an unnamed compileOnly/runtimeOnly one "
+           f"build-only; no manifest or an unreadable one: every pin required: {pr}")
     # a dependency a version dropped (weekly round 2026-10-21: never re-checked): its base pin, offered as an unticked
     # restore row once a build for that version exists; none for a version that excludes nothing (a single-version fork)
     blk_ = f"{BEGIN}\nexclude.maven.modrinth\\:devmod=no 1.21.4 build (extra)\nexclude.com.example\\:lib=x\n{END}\n"

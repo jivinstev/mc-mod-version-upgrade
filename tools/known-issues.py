@@ -810,10 +810,15 @@ def dep_key(r):
     return f"{r['mc']} {r['ga']} {r['to']}"
 
 
+DEV_ROLES = ("extra", "build-only")     # tools/layer-deps.py's roles of a dependency players never get from the fork
+
+
 def dep_lines(repo, du, carried):
     """The plan's "Dependency updates" lines of one fork: a box per pinned dependency with a newer compatible build,
     ticked by default unless it has a reason to look first (then unticked, the reason shown); a carried tick wins; a
-    lookup that failed listed as "could not check"."""
+    lookup that failed listed as "could not check". Production (role "required", no role known, every restore) comes
+    first; Dev-only (role "extra" / "build-only": players never get it from the fork) and the "could not check" list
+    sit in collapsed <details> blocks -- the same boxes, which read-plan reads wherever they are."""
     ok = lambda r: all(SAFE_COORD.match(str(r.get(k) or "")) for k in ("mc", "ga", "from", "to"))
     rows = [r for r in du.get("rows", []) if ok(r)]
     un = list(du.get("unchecked", [])) + [{"mc": r.get("mc"), "ga": r.get("ga"), "coord": r.get("from"),
@@ -823,21 +828,33 @@ def dep_lines(repo, du, carried):
     if not rows and not un:
         return [f"Every pinned CurseForge/Modrinth dependency is on its newest compatible build ({du.get('checked', 0)} "
                 "checked)." if du.get("checked") else "No CurseForge/Modrinth dependency pinned."]
+
+    def box(r):
+        on = carried.get(dep_key(r), r["default"])
+        names = f" ({esc(r.get('from_name'))} -> {esc(r.get('to_name'))}, {esc(r.get('channel') or '?')})"
+        return (f"- [{'x' if on else ' '}] " + ("**restore** " if r.get("restore") else "")
+                + f"`{r['ga']}` at {r['mc']}: `{r['from']}` -> `{r['to']}`{names}"
+                + ("" if r["default"] else f" -- not ticked by default: {esc(r['why'])}")
+                + f" <!-- dep:{repo}:{r['id']} {'default' if r['default'] else 'candidate'} -->")
+    dev = [r for r in rows if r.get("role") in DEV_ROLES and not r.get("restore")]
+    prod = [r for r in rows if r not in dev]
     out = []
     if rows:
         out += ["Ticked, the round bumps it once at its setup (`tools/layer-deps.py resolve --bump`, in that version's "
                 "checkout); unticked, the pin stays. Nothing else moves a pinned dependency.", ""]
-    for r in rows:
-        on = carried.get(dep_key(r), r["default"])
-        names = f" ({esc(r.get('from_name'))} -> {esc(r.get('to_name'))}, {esc(r.get('channel') or '?')})"
-        out.append(f"- [{'x' if on else ' '}] " + ("**restore** " if r.get("restore") else "")
-                   + f"`{r['ga']}` at {r['mc']}: `{r['from']}` -> `{r['to']}`{names}"
-                   + ("" if r["default"] else f" -- not ticked by default: {esc(r['why'])}")
-                   + f" <!-- dep:{repo}:{r['id']} {'default' if r['default'] else 'candidate'} -->")
+    if prod:
+        out += ["**Production (players install these)**:", ""] + [box(r) for r in prod]
+    if dev:
+        ticked = sum(1 for r in dev if carried.get(dep_key(r), r["default"]))
+        out += ([""] if prod else []) + [
+            "<details><summary>" + f"{len(dev)} dev-only dependency bump{'' if len(dev) == 1 else 's'} ({ticked} ticked): "
+            "not shipped to players</summary>", ""] + [box(r) for r in dev] + ["", "</details>"]
     if un:
-        out += ["", "Could not check (the round leaves these pins as they are):", ""]
+        out += ["", f"<details><summary>Could not check {len(un)} pin{'' if len(un) == 1 else 's'} (the round leaves "
+                f"{'it' if len(un) == 1 else 'these'} as {'it is' if len(un) == 1 else 'they are'})</summary>", ""]
         out += [f"- {code(u['ga'])} at {esc(u['mc'])}" + (f" (`{u['coord']}`)" if SAFE_COORD.match(str(u.get("coord") or "")) else "")
                 + f": {esc(u['why'])}" for u in un]
+        out += ["", "</details>"]
     return out
 
 
@@ -3101,6 +3118,40 @@ def plan_check(expect, cli):
                and [x["id"] for x in fr4.get("dep_bumps", [])] == ["D1"]
                and shlex.split(fr4["dep_bumps"][0]["command"])[-1] == "maven.modrinth:viewer=maven.modrinth:viewer:a2",
                f"registry text escaped, an unsafe coordinate never a bump, the command quoted: {b4} {fr4}")
+        # production / dev-only: a required bump and every restore under Production, an extra or unnamed compileOnly /
+        # runtimeOnly one (build-only) in a collapsed Dev-only block, the could-not-check list collapsed; the boxes and
+        # their default ticks as before, and a box ticked inside <details> read back by read-plan
+        seg = json.loads(json.dumps(inp2))
+        r0 = du_lib["rows"]
+        seg["forks"][0]["dep_updates"]["rows"] = [
+            dict(r0[0], role="required"), dict(r0[1], role="extra"),
+            dict(r0[0], id="D3", ga="maven.modrinth:devmod", **{"from": "maven.modrinth:devmod:a1"}, to="maven.modrinth:devmod:a2",
+                 role="build-only"),
+            dict(r0[1], id="D4", ga="curse.maven:gone-444", **{"from": "curse.maven:gone-444:1"}, to="curse.maven:gone-444:2",
+                 restore=True, role="extra", from_name="dropped")]
+        b5 = render_plan(seg)["body"]
+        sec = b5[b5.index("### Dependency updates"):]
+        sec = sec[:sec.index("\n### ", 5)]
+        prod_, rest_ = sec.split("<details><summary>2 dev-only dependency bumps (1 ticked): not shipped to players</summary>")
+        dev_, un_ = rest_.split("</details>", 1)
+        expect("**Production (players install these)**:" in prod_ and "<!-- dep:o/lib:D1 default -->" in prod_
+               and "**restore** `curse.maven:gone-444`" in prod_ and "<!-- dep:o/lib:D4 candidate -->" in prod_
+               and "- [ ] `curse.maven:extra-333`" in dev_ and "- [x] `maven.modrinth:devmod`" in dev_
+               and "dep:o/lib:D1 " not in dev_ and "D4" not in dev_
+               and "<details><summary>Could not check 1 pin (the round leaves it as it is)</summary>" in un_
+               and "`maven.modrinth:down` at 1.21.5" in un_ and un_.rstrip().endswith("</details>"),
+               f"render-plan: Production first (required, restore), Dev-only and could-not-check collapsed: {sec}")
+        fr5 = read_plan({"number": 10, "body": b5}, [], lambda u: True, "t")["forks"][0]
+        b6 = b5.replace("- [ ] `curse.maven:extra-333`", "- [x] `curse.maven:extra-333`")
+        fr6 = read_plan({"number": 11, "body": b6}, [], lambda u: True, "t")["forks"][0]
+        expect(sorted(x["id"] for x in fr5.get("dep_bumps", [])) == ["D1", "D3"]
+               and sorted(x["id"] for x in fr6.get("dep_bumps", [])) == ["D1", "D2", "D3"]
+               and fr6["dep_ticks"]["1.21.4 curse.maven:extra-333 curse.maven:extra-333:9"] is True,
+               f"read-plan: the default ticks unchanged, and a dev-only box ticked inside <details> read back: "
+               f"{fr5.get('dep_bumps')} {fr6.get('dep_bumps')}")
+        expect("dev-only dependency bump" not in b2
+               and "**Production (players install these)**:" in b2,
+               "rows with no role (an older plan input) are all Production, as fail-closed")
         expect("dep_bumps" not in json.loads(json.dumps(read_plan({"number": 7, "body": b}, [], lambda u: True, "t")))["forks"][0],
                "a plan without the dependency section reads back as before")
         fx2 = dict(fx, issue={"number": 7, "body": "no plan here"})
