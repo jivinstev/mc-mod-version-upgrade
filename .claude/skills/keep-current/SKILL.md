@@ -771,7 +771,12 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      TEST-ITEMS.md), instead of a review table in the PR body; a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
      "Done" item 4 lists, plus the behaviour-inventory account (item 7) -- then the fixer fixes the `not-ok` rows and
      **one re-check of the changed rows only** follows (the rows `check-done` reports stale since the review). That is
-     the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5).
+     the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5). One
+     exception, so the owner is not asked to triage the round's own mistake: when every S1/S2 the re-check finds is in a
+     line one of this round's fix commits wrote (the re-checker names that commit on a `regression: <ID> <commit>`
+     line), it goes back to the fixer once and is re-checked once more -- `round.py` does this by itself
+     (`OWN_REGRESSION_PASSES`), and a round run without it (a single-version fork) does the same by hand; what that
+     re-check still finds, and any S1/S2 the fix did not cause, blocks as below.
      **The round must run where it can start subagents** -- one fresh reviewer per version, never the fixer reviewing
      its own work; a scheduled task's cloud session can. If this session cannot start one, stop at the review step for
      that version: comment on the plan issue (@owner) that the version is gated and waits for its review, go on only with

@@ -132,6 +132,10 @@ STATE_DEFAULT = "round/STATE.json"
 CONFIG = ".github/weekly-plan.json"
 LOCK_ENV = "MMVU_FULL_GATE_LOCK"
 MAX_FIX = 2
+# a re-check's S1/S2 that this round's own fix commits caused goes back to the fixer this many times before the owner is
+# asked (weekly round 2026-11-18: a re-check S2 in the lines the round's own fix wrote was handed to the owner); the
+# stopping rule still holds for everything else
+OWN_REGRESSION_PASSES = 1
 SUMMARY_LINES = 40
 TERMINAL = ("ok", "skipped", "blocked")
 PHASE = {"authors": "upstream", "upstream": "upstream", "mergeup": "upstream", "resync": "upstream", "decisions": "upstream", "backlog": "backlog",
@@ -1707,6 +1711,10 @@ def job_task(st, it):
                 "at S3/S4 that the plan left unticked does not block and is not this round's to fix: leave it, name its "
                 "ID in the summary. A row the ledger does not have yet is a new finding: fix it when the fix is small "
                 "and local (its `finding:` line with \"fixed\"), else leave it -- the re-checker grades and ledgers what is left.",
+                *([f"The re-check found this round's own fix commits caused: {'; '.join(it['regressions'])}. Fix "
+                   "each first, narrowly (the smallest change that keeps what the fix was for), a commit each with its "
+                   "`fixed:` line; a second re-check follows, and anything it still finds goes to the owner."]
+                  if it.get("regressions") else []),
                 f"Acceptance: each blocking row fixed and committed on {br} (the rest named), or RESULT: blocked with why."]
     if s == "recheck":
         return [f"You are a FRESH RE-CHECKER of {it['fork']} {v} (neither the reviewer nor the fixer): re-check only the "
@@ -1727,7 +1735,10 @@ def job_task(st, it):
                 "comparison you can run here: run it and file what it shows. A row whose regressing line you can name "
                 "is confirmed. The driver adds each "
                 "one to the ledger and commits it. An S1 or S2 at this version blocks its merge: write its `blocking:` "
-                "line and RESULT: blocked. S3/S4 are ledgered and do not block.",
+                "line and RESULT: blocked. S3/S4 are ledgered and do not block. When the line that causes a blocking "
+                "finding was written by one of this round's fix commits at this version (not by the port or the authors "
+                "before it), also write `regression: <ID> <that commit>`: the driver then sends it back to the fixer "
+                "once (OWN_REGRESSION_PASSES) instead of to the owner.",
                 f"Acceptance: the changed rows have verdicts (committed on {br}); `not_ok: <n>` in the summary."]
     if s == "decisions":
         x = it["extra"]
@@ -4147,7 +4158,7 @@ def parse_summary(text):
     res = {"status": m.group(1).lower() if m else None, "blocking": [], "fixed": [], "commits": [], "lowest": []}
     for ln in lines[1:]:
         ln = ln.strip()
-        if (ln and not (ln == SUMMARY_END and mod("fb").reuse_on()) and not res.get("why") and not re.match(r"^(not_ok|fixed|commit|lowest|finding|disproved|regrade):", ln)
+        if (ln and not (ln == SUMMARY_END and mod("fb").reuse_on()) and not res.get("why") and not re.match(r"^(not_ok|fixed|commit|lowest|finding|disproved|regrade|regression):", ln)
                 and not re.match(r"^blocking:\s*\S+\s+S[12]\b", ln)):
             # the first line that says why (a `blocking:` line not in the <ID> <S1|S2> form included): the note of a
             # blocked or failed job, so its BLOCKED line says what (measured, weekly round 2026-10-30: a re-pin job
@@ -4157,6 +4168,8 @@ def parse_summary(text):
             res["not_ok"] = int(k.group(1))
         elif (k := re.match(r"^blocking:\s*(\S+)\s+(S[12])\b\s*(.*)", ln)):
             res["blocking"].append(f"{k.group(1)} {k.group(2)} {k.group(3)}".strip())
+        elif (k := re.match(r"^regression:\s*(\S+)\s+([0-9a-f]{7,40})\b", ln)):
+            res.setdefault("regression", []).append([k.group(1), k.group(2)])
         elif (k := re.match(r"^fixed:\s*(\S+)\s+([0-9a-f]{7,40})\b", ln)):
             res["fixed"].append([k.group(1), k.group(2)])
         elif (k := re.match(r"^commit:\s*([0-9a-f]{7,40})\b", ln)):
@@ -4359,6 +4372,17 @@ def cmd_record(a, out=print):
                     res["not_disproved"] = why_not
             if status == "ok" and parsed["blocking"]:
                 status = "blocked"
+            fx = seg_item(st, it, "fix") if it["step"] == "recheck" else None
+            if status == "blocked" and fx and own_regressions(fx, parsed) and it.get("own_passes", 0) < OWN_REGRESSION_PASSES:
+                it["own_passes"] = it.get("own_passes", 0) + 1
+                fx.update(status="pending", regressions=parsed["blocking"],
+                          note=f"runs again: the re-check found {len(parsed['blocking'])} regression(s) of this fix")
+                fx.pop("result", None)
+                it.update(status="pending", result=res,
+                          note=f"runs again after the fixer's regression pass {it['own_passes']}/{OWN_REGRESSION_PASSES}")
+                out(f"round: {it['id']}: the re-check's blocking finding(s) were caused by this round's fix: back to "
+                    f"the fixer once ({'; '.join(parsed['blocking'])})")
+                return 0
             finish(st, it, status, f"{status}" + (f"; blocking: {'; '.join(parsed['blocking'])}" if parsed["blocking"]
                                                   else f": {parsed['why']}" if status != "ok" and parsed.get("why") else ""))
             it["result"] = res
@@ -4377,6 +4401,18 @@ def cmd_record(a, out=print):
                                               f"{SUMMARY_LINES})" if long_ else ""))
     out(summary_line(a.state))
     return 0
+
+
+def own_regressions(fx, parsed):
+    """True when every blocking finding of a re-check names, on a `regression:` line, a commit of the fix job it
+    re-checks (the fix job's `fixed:`/`commit:` lines; a fix job that named none is taken at the re-checker's word)."""
+    reg = {i: c for i, c in parsed.get("regression", [])}
+    ids = [b.split()[0] for b in parsed["blocking"]]
+    if not ids or any(i not in reg for i in ids):
+        return False
+    r = fx.get("result") or {}
+    mine = [c for _, c in r.get("fixed", [])] + list(r.get("commits", []))
+    return not mine or all(any(m.startswith(reg[i]) or reg[i].startswith(m) for m in mine) for i in ids)
 
 
 def summary_line(state):
@@ -6514,6 +6550,41 @@ def self_check():
             r_ = st.item("examplemod@1.21.4:review")["result"]
             expect(r_.get("blocking") == [] and r_.get("fixed") == [] and r_.get("not_ok") == 0,
                    f"a record replaces the last outcome wholesale: {r_}")
+        # a re-check S1/S2 that this round's own fix commit caused goes back to the fixer once, then to the owner
+        # (weekly round 2026-11-18); one the fix did not cause blocks at once, as the stopping rule says
+        with State.tx(state) as st:
+            fx_, rc_ = st.item("examplemod@1.21.4:fix"), st.item("examplemod@1.21.4:recheck")
+            saved_fr = json.loads(json.dumps([fx_, rc_]))
+            fx_.update(status="ok", kind="agent", result={"fixed": [["MOD-3", "abc1234"]], "commits": []})
+            claim(st, rc_)
+        rec("examplemod@1.21.4_recheck", "RESULT: blocked\nnot_ok: 1\nblocking: MOD-9 S2 crash in the fixed draw\n"
+            "regression: MOD-9 abc1234\n")
+        with State.tx(state) as st:
+            fx_, rc_ = st.item("examplemod@1.21.4:fix"), st.item("examplemod@1.21.4:recheck")
+            expect(fx_["status"] == "pending" and rc_["status"] == "pending" and rc_.get("own_passes") == 1
+                   and "MOD-9" in " ".join(fx_.get("regressions", [])), f"an own regression goes back to the fixer: {fx_} {rc_}")
+            expect("own fix commits caused: MOD-9" in job_text(st, fx_), "the fixer's job names the regression")
+            fx_["status"] = "ok"
+            claim(st, rc_)
+        rec("examplemod@1.21.4_recheck", "RESULT: blocked\nnot_ok: 1\nblocking: MOD-9 S2 still crashes\n"
+            "regression: MOD-9 abc1234\n")
+        with State.tx(state) as st:
+            rc_ = st.item("examplemod@1.21.4:recheck")
+            expect(rc_["status"] == "blocked", f"the second time it goes to the owner: {rc_['status']}")
+        for body, why in (("blocking: MOD-9 S2 crash\n", "no regression line"),
+                          ("blocking: MOD-9 S2 crash\nregression: MOD-9 fedcba9\n", "a commit the fix did not make"),
+                          ("blocking: MOD-9 S2 crash\nblocking: MOD-8 S1 old crash\nregression: MOD-9 abc1234\n",
+                           "one finding the fix did not cause")):
+            with State.tx(state) as st:
+                st.item("examplemod@1.21.4:recheck").update(status="running", own_passes=0)
+                st.item("examplemod@1.21.4:fix").update(status="ok", result={"fixed": [["MOD-3", "abc1234"]]})
+            rec("examplemod@1.21.4_recheck", "RESULT: blocked\nnot_ok: 1\n" + body)
+            with State.tx(state, write=False) as st:
+                expect(st.item("examplemod@1.21.4:recheck")["status"] == "blocked",
+                       f"blocks at once with {why}")
+        with State.tx(state) as st:
+            for x_ in saved_fr:
+                st.items[[i_["id"] for i_ in st.items].index(x_["id"])] = x_
         TOOL_IMPL.update(saved)
         # S3-4: the ledger takes only an ID the job was given, at a commit on the merged branch
         # ---- the real steps on the fixture clones, against a stand-in GitHub
