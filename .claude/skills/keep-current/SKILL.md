@@ -474,7 +474,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   Ports block -- every one through the tools named in the steps below -- and a `port-cost.py mark --phase` at every item
   boundary. A PR carries only what the gates certified: a commit after the gated commit that changes more than records
   (`.port/` Markdown, the known-issues ledger, the README Ports block, a branch.properties bookkeeping key) sends the
-  version back to its gates -- and a library's dependent gates -- before anything is pushed; a branch with nothing new
+  version back to its gates -- and a library's dependent gates -- before anything is pushed (when that code came up
+  from the version below by its resync, the review-reuse check runs again first, so REVIEW.md names the reviewed
+  commit: by reference when the change was reviewed below file for file, else a fresh review); a branch with nothing new
   against origin opens no PR and cuts no release. The ledger runs for what merged and names what did not.
   **Waits are one blocking loop inside the driver**, never a model polling turn by turn: each idle gap longer
   than 5 minutes re-writes the session's whole cached context.
