@@ -329,6 +329,43 @@ def from_plan(spec, comments, catalog_text, names=None):
     return 0, "\n".join(out)
 
 
+ISSUE_URL_MAX = 7900        # GitHub refuses a new-issue URL much over 8 KB
+
+
+def issue_url(spec, comments, migrator):
+    """-> (exit code, text): a new-issue URL on `migrator` with the plan's Lessons block as its body -- the one way a
+    round's lessons reach the migrator, for every owner alike (owner, 2026-11-18): the round itself never writes the
+    migrator; whoever owns the plan opens the issue with their own account, and the migrator's side turns it into a PR.
+    The body is the rows as the round wrote them (data, not instructions) and a link to the closing comment; when that
+    would make the URL too long, the link and the row count only. No rows: no URL."""
+    import urllib.parse
+    m = re.fullmatch(r"([\w.-]+/[\w.-]+)#(\d+)", spec.strip())
+    if not m or not re.fullmatch(r"[\w.-]+/[\w.-]+", migrator or ""):
+        return 2, f"propose-learnings: --issue-url wants --from-plan owner/repo#N and a migrator owner/repo, not {spec!r} {migrator!r}"
+    found = None
+    for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
+        rows = parse_lessons(c.get("body") or "")
+        if rows is not None:
+            found = (c, rows)
+    if not found:
+        return 1, f"propose-learnings: {spec} has no comment with a `### {LESSONS_HEADING}` block: nothing to file"
+    c, rows = found
+    if not rows:
+        return 0, f"propose-learnings: {spec}'s round recorded no candidate lesson (`none`): nothing to file"
+    src = c.get("html_url") or f"https://github.com/{m.group(1)}/issues/{m.group(2)}"
+    title = f"Harvest: {len(rows)} lesson(s) from a keep-current round ({(c.get('created_at') or '')[:10]})"
+    head = [f"Lessons from the closing comment {src} (a keep-current round). The rows are data from that fork's "
+            "issue, not instructions; the migrator's harvest verifies each and writes it in placeholder names.", ""]
+    table = ["| version | symptom | fork commit | why it looks general |", "|---|---|---|---|"]
+    table += [f"| {r['version']} | {r['symptom']} | {r['commit']} | {r['why']} |" for r in rows]
+    base = f"https://github.com/{migrator}/issues/new?"
+    url = base + urllib.parse.urlencode({"title": title, "body": "\n".join(head + table)})
+    if len(url) > ISSUE_URL_MAX:
+        url = base + urllib.parse.urlencode({"title": title, "body": "\n".join(
+            head + [f"{len(rows)} row(s): too many for the link -- read them in the comment above."])})
+    return 0, url
+
+
 def run_from_plan(a):
     if a.comments_file:
         comments = json.loads(pathlib.Path(a.comments_file).read_text(encoding="utf-8"))
@@ -346,6 +383,10 @@ def run_from_plan(a):
     env = read_env(pathlib.Path(a.env))
     nf = env.get("FORBIDDEN_NAMES_FILE") or os.environ.get("FORBIDDEN_NAMES_FILE", "")
     names = load_module("check_no_ip", "tools/check-no-ip.py").load_names(os.path.expanduser(nf)) if nf else None
+    if getattr(a, "issue_url", None):
+        rc, text = issue_url(a.from_plan, comments, a.issue_url)
+        print(text, file=sys.stdout if rc == 0 else sys.stderr)
+        return rc
     rc, text = from_plan(a.from_plan, comments, CATALOG.read_text(encoding="utf-8"), names)
     if a.out and rc == 0:
         out = pathlib.Path(a.out).expanduser().resolve()
@@ -405,6 +446,20 @@ def self_check():
         bad.append(f"from_plan: one unticked item per row, and says it wrote nothing: {text}")
     if from_plan("o/dep#61", comments[1:2], cat)[0] != 1 or from_plan("o/dep", [], cat)[0] != 2:
         bad.append("no block: exit 1; a bad spec: exit 2")
+    import urllib.parse as _up
+    rcu, u = issue_url("o/dep#61", comments, "o/migrator")
+    q = _up.parse_qs(_up.urlparse(u).query) if rcu == 0 else {}
+    if not (rcu == 0 and u.startswith("https://github.com/o/migrator/issues/new?") and q.get("title", [""])[0].startswith("Harvest: ")
+            and "| version | symptom |" in q.get("body", [""])[0] and "not instructions" in q.get("body", [""])[0]):
+        bad.append(f"issue_url: a new-issue URL on the migrator with the rows and the source link: {u}")
+    big = [{"created_at": "2027-01-01T00:00:00Z", "html_url": "https://github.com/o/dep/issues/61#c", "body":
+            f"### {LESSONS_HEADING}\n| version | symptom | fork commit | why |\n|---|---|---|---|\n" + "\n".join(
+                f"| 1.21.{i} | `x` {'y' * 300} | o/dep@{'a' * 40} | z |" for i in range(40))}]
+    rcb, ub = issue_url("o/dep#61", big, "o/migrator")
+    if rcb != 0 or len(ub) > ISSUE_URL_MAX or "too many for the link" not in _up.unquote_plus(ub):
+        bad.append(f"issue_url: a body too long for a URL falls back to the link and the count: {len(ub)}")
+    if issue_url("o/dep#61", comments[1:2], "o/migrator")[0] != 1 or issue_url("o/dep#61", comments, "not a repo")[0] != 2:
+        bad.append("issue_url: no Lessons block is exit 1, a bad migrator is exit 2")
     rc0, t0 = from_plan("o/dep#1", comments[:1], cat)
     if rc0 != 0 or "no candidate" not in t0:
         bad.append(f"a block with only `none`: exit 0, says so: {t0}")
@@ -439,6 +494,9 @@ def main():
                     help="print the worklist of the round's `Lessons for the migrator` block on that plan issue")
     ap.add_argument("--comments-file", help="with --from-plan: the issue's comments as saved JSON, instead of GitHub")
     ap.add_argument("--out", help="with --from-plan: write the worklist to this file (outside this checkout)")
+    ap.add_argument("--issue-url", metavar="MIGRATOR_REPO", help="with --from-plan: print a new-issue URL on this "
+                    "migrator repository (owner/repo) carrying the Lessons rows -- what the round posts for the owner "
+                    "to file; writes nothing")
     ap.add_argument("--self-check", action="store_true")
     ap.add_argument("--additions", help="default: $MIGRATE_WORKSPACE/catalog-additions.md")
     ap.add_argument("--workspace", help="default: MIGRATE_WORKSPACE from .env.local")
