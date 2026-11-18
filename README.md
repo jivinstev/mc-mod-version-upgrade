@@ -343,7 +343,8 @@ survives a restart (`round.py resume`). Two read-only tools look at the driver f
 `port-ci.py check` on origin's head (a stale workflow is regenerated on the work branch, never a stop), the authors'
 merge (`port-sync.py --port keep-current/DATE --base HEAD_BRANCH --commit SHA`; a conflict is a fixer's job), the
 reconcile and port (an agent), the review (`.port/<mc>/REVIEW.md`, written by `fork-branches.py check-done --base`),
-its fixes and re-check, the done list's records (TEST-ITEMS.md, INVENTORY-CHECK.json, a library pre-release mark in
+its fixes and re-check (an S1/S2 the re-check finds in a line this round's own fix wrote goes back to the
+fixer once, then to the owner), the done list's records (TEST-ITEMS.md, INVENTORY-CHECK.json, a library pre-release mark in
 DEPS.md) committed, ONE `ci-gates.py` full and minimal pass on the reviewed tree (committed as `.port/<mc>/GATES.md`;
 before it, each sibling release jar the head's Port CI workflow installs with a `--dep-jar` step, if any, goes into
 `~/.m2` at the step's coordinate, sha256-checked as the step checks it; a different jar there is replaced and said),
