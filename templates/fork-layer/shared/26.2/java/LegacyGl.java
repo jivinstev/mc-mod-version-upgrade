@@ -208,6 +208,15 @@ public final class LegacyGl {
         draw(mesh, shader, current(), target != null ? target : Minecraft.getInstance().gameRenderer.mainRenderTarget());
     }
 
+    /** 26.2: a vanilla type's immediate draw of {@code mesh} (closed here) through its prepared state -- RenderType.prepare(),
+     *  or a copy of it with another pipeline -- uploaded as {@link #draw} uploads it (26.2 has no RenderType.draw). */
+    public static void drawPrepared(PreparedRenderType prepared, MeshData mesh) {
+        try (MeshData m = mesh) {
+            Uploaded up = Uploaded.of(m);
+            prepared.drawFromBuffer(up.vertices(), up.indices(), up.indexType(), 0, 0, up.indexCount());
+        }
+    }
+
     // ---- state as a value -------------------------------------------------------------------------------------
     /** One draw's fixed-function state: what a pipeline bakes in. Part of the pipeline cache key. {@code depth} null is
      *  1.21.11's NO_DEPTH_TEST (the depth test disabled). */

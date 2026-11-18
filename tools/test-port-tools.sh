@@ -1971,6 +1971,15 @@ need(core and re.search(r"else if \(replacedDefaults\) \{\s*RenderSystem\.bindDe
 need(re.search(r"public static GpuTextureView\[\] setOutput\(GpuTextureView colour, GpuTextureView depth\)", gl)
      and re.search(r"if \(outputColor != null && target == Minecraft\.getInstance\(\)\.gameRenderer\.mainRenderTarget\(\)\) \{\s*draw\(mesh, shaderObj, key, outputColor, outputDepth, null,", gl),
      "LegacyGl has no output override (setOutput) or a draw into the main target ignores it")
+# a vanilla type drawn through its prepared state (26.2 has no RenderType.draw; 26.3 draws into a pass it opens on the
+# main target's views or the output override's): harvested from a fork's copy, weekly round 2026-11-18
+dp = re.search(r"public static void drawPrepared\(PreparedRenderType prepared, MeshData mesh\) \{(.*?)\n    \}", gl, re.S)
+need(dp and "mainColorView()" in dp.group(1) and "mainDepthView()" in dp.group(1) and "createRenderPass(" in dp.group(1)
+     and "prepared.drawFromBuffer(info, pass)" in dp.group(1),
+     "26.3 LegacyGl has no drawPrepared, or it does not open its pass on the main target's (or the override's) views")
+g62 = strip((d.parent.parent / "26.2" / "java" / "LegacyGl.java").read_text(encoding="utf-8"))
+need(re.search(r"public static void drawPrepared\(PreparedRenderType prepared, MeshData mesh\) \{\s*try \(MeshData m = mesh\) \{\s*Uploaded up = Uploaded\.of\(m\);\s*prepared\.drawFromBuffer\(up\.vertices\(\), up\.indices\(\), up\.indexType\(\), 0, 0, up\.indexCount\(\)\);", g62),
+     "26.2 LegacyGl has no drawPrepared through the prepared state's drawFromBuffer")
 print(*bad, sep="\n")
 sys.exit(1 if bad else 0)
 PY

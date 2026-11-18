@@ -321,6 +321,28 @@ public final class LegacyGl {
         return main == null ? GpuFormat.RGBA8_UNORM : main.getFormat();
     }
 
+    /** 26.2: a vanilla type's immediate draw of {@code mesh} (closed here) through its prepared state -- RenderType.prepare(),
+     *  or a copy of it with another pipeline -- uploaded as {@link #draw} uploads it (26.2 has no RenderType.draw).
+     *  26.3 (CATALOG §V101): {@code drawFromBuffer(info, pass)} draws into a pass, so this opens one, as
+     *  {@code MultiBufferSource}'s vanilla path does, on the main target's views or the output override's (no depth view
+     *  when it has none). No pass may be open. */
+    public static void drawPrepared(PreparedRenderType prepared, MeshData mesh) {
+        try (MeshData m = mesh) {
+            GpuTextureView colorView = mainColorView();
+            if (colorView == null) {
+                return;
+            }
+            GpuTextureView depthView = mainDepthView();   // null: the target has no depth
+            Uploaded up = Uploaded.of(m);
+            net.minecraft.client.renderer.StagedVertexBuffer.ExecuteInfo info = new net.minecraft.client.renderer.StagedVertexBuffer.ExecuteInfo(
+                    up.vertices().buffer(), up.indices(), up.indexType(), 0, 0, up.indexCount(), m.drawState().primitiveTopology());
+            try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder().createRenderPass(
+                    () -> "mv prepared draw", colorView, Optional.empty(), depthView, OptionalDouble.empty())) {
+                prepared.drawFromBuffer(info, pass);
+            }
+        }
+    }
+
     // ---- state as a value -------------------------------------------------------------------------------------
     /** One draw's fixed-function state: what a pipeline bakes in. Part of the pipeline cache key. {@code depth} null is
      *  1.21.11's NO_DEPTH_TEST (the depth test disabled). */
