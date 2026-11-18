@@ -135,9 +135,26 @@ ALLOW = {
 # allowed whatever `allow` says: how the round reports (round-task's prompt carries these verbatim)
 ALWAYS = ("Always allowed, whatever the list says, because they are how the round reports: comments on the plan issue "
           "(and closing it at the close), and edits to the ledger issues listed above.")
-MIGRATOR_RULE = "Nothing on the migrator repository, apart from reading it (the clone in step 1), is ever allowed."
+MIGRATOR_RULE = ("On the migrator repository the round reads (the clone in step 1) and, by step 10 only, pushes its own "
+                 "branch `claude/harvest-<round date>` and opens one pull request from it into main; it never merges, "
+                 "approves or enables auto-merge there, and pushes no other branch.")
 # the closing comment carries the round's candidate lessons for the migrator, which the round itself never writes
-LESSONS_RULE = ("Before closing, the closing comment carries a `### Lessons for the migrator` table (every fork kind, single-version included; text only): | version | symptom | fork commit | why it looks general |, one row per candidate lesson whose cause looks like the version, NeoForge, a library or a shared helper rather than the mod -- the error text or behaviour, the fix as owner/repo@<sha> -- or one `| none | | | |` row. Nothing is written to the migrator repository: a later session harvests it with tools/propose-learnings.py --from-plan.")
+LESSONS_RULE = ("Before closing, the closing comment carries a `### Lessons for the migrator` table (every fork kind, single-version included; text only): | version | symptom | fork commit | why it looks general |, one row per candidate lesson whose cause looks like the version, NeoForge, a library or a shared helper rather than the mod -- the error text or behaviour, the fix as owner/repo@<sha> -- or one `| none | | | |` row. Step 10 harvests it into the migrator (tools/propose-learnings.py --from-plan).")
+# what the round learned goes back to the migrator as a pull request by default, every round (owner, 2026-11-18: "We can
+# always reject a PR"): the lessons table alone reached the migrator only when somebody remembered to harvest it
+HARVEST_RULE = ("After the closing comment, harvest into the migrator, by default every round: ONE pull request. In a "
+                "checkout of the migrator with write access (not step 1's depth-1 clone), cut `claude/harvest-<round date>` "
+                "from origin/main. (a) For each fork, python3 tools/fork-branches.py sync-shared --repo <its clone> --check: "
+                "bring each MV-AHEAD-OF-TEMPLATE copy that still differs from the library into "
+                "templates/fork-layer/shared/<v>/ (the package as @MVPKG@, marker lines dropped) and pin it in the test that "
+                "covers that helper. (b) python3 tools/propose-learnings.py --from-plan <the plan issue>: write each general "
+                "row as a CATALOG.md entry or AUGMENT (placeholder names only; read the entries it matches first), then "
+                "python3 tools/check-catalog-fidelity.py --update. Run python3 tools/guard-names.py check with every fork, "
+                "tools/check-no-ip.py --strict --names $FORBIDDEN_NAMES_FILE, tools/check-readme.py and the tests you "
+                "touched; push the branch, open the PR (what each change is, with its evidence link), subscribe to it and "
+                "drive its CI to green; never merge it. Post one comment on the plan issue linking it. Nothing that "
+                "differs or is general: no PR, and that comment says so. No write access to the migrator here: the comment "
+                "says the harvest is due by hand and names the command.")
 # every fork set runs on the driver (#161 U4): a prompt rule did not keep the orchestrator small -- the 2026-10-19 round
 # (one session, ~$105: ~48% cache reads of a ~565k-token context, ~39% cache writes) and the 2026-10-21 round (~$215,
 # ~549k tokens despite a rule to hand off at ~200k, cache writes ~51%: idle gaps and three container restarts re-wrote
@@ -567,8 +584,8 @@ def round_task(cfg, mrepo, existing=()):
     lines += [fork_line(f) for f in forks]
     lines += ["", *allow_lines(allow)]
     lines += ["", "Steps:",
-              f"1. git clone --depth 1 https://github.com/{mrepo} mmvu (public, read only; never ask for it to be "
-              "attached) and read mmvu/.claude/skills/keep-current/SKILL.md, section \"The weekly round\". Follow it "
+              f"1. git clone --depth 1 https://github.com/{mrepo} mmvu (public, read only, for the round's tools; step 10's "
+              "harvest uses the attached checkout) and read mmvu/.claude/skills/keep-current/SKILL.md, section \"The weekly round\". Follow it "
               "exactly, in order. This is the migrator's current main, on purpose: the round runs the newest tools and "
               f"skill, fixes included. Tuesday's plan workflow ran the tools pinned at `migrator_sha` in {CONFIG}, so "
               "that a plan is reproducible from its commit; the two meet only at the plan issue, which step 3 reads. If "
@@ -597,7 +614,8 @@ def round_task(cfg, mrepo, existing=()):
               "forward); only the closing comment of a round that ran its steps closes it.",
               "7. " + DRIVER_RULE,
               "8. " + DRIVER_PHASE_RULE,
-              "9. " + LESSONS_RULE]
+              "9. " + LESSONS_RULE,
+              "10. " + HARVEST_RULE]
     name = cfg["round"]["name"]
     return {"name": name, "cron_expression": cfg["round"]["cron"], "create_new_session_on_fire": True,
             "notifications": {"push": True, "email": True}, "initiation": "human_request", "prompt": "\n".join(lines),
@@ -605,7 +623,7 @@ def round_task(cfg, mrepo, existing=()):
             "replaces_rule": f"delete only a task whose name is exactly one of `replaces`; pass every name list_triggers "
                              f"returns with --existing so the ones that start with {REPLACE_PREFIX!r} and name a fork of "
                              "this set are listed",
-            "allow": allow, "repositories": [f["repo"] for f in forks],
+            "allow": allow, "repositories": [f["repo"] for f in forks] + [mrepo],
             "model": recommended_model(),
             "model_rule": "set it on the task right after create_trigger (update_trigger model): a task without one runs on "
                           "the account's default model; this is the most capable model priced in tools/model-prices.tsv "
@@ -1171,13 +1189,16 @@ def self_check():
            and task["prompt"].index(ALWAYS) < task["prompt"].index("Any other action is a stop")
            and "keep-current/<date>` work branches" in ALLOW["merge-fork-prs"] and "open PRs" in ALLOW["merge-fork-prs"]
            and "known-issues ledger and README Ports block" in ALLOW["push-version-branches"],
-           f"plan-issue comments and ledger-issue edits always allowed, the migrator never written, work branches "
+           f"plan-issue comments and ledger-issue edits always allowed, the migrator written only by the harvest PR, work branches "
            f"under merge-fork-prs, ledger and Ports block under push-version-branches: {task['prompt']}")
     # the closing comment's lessons block (2026-10-19 round: its lessons reached the migrator only by hand): asked for in
     # the prompt, after the close rule, while the migrator stays read-only
     expect(LESSONS_RULE in task["prompt"] and task["prompt"].index(LESSONS_RULE) > task["prompt"].index("only the closing "
            "comment") and "### Lessons for the migrator" in LESSONS_RULE and "propose-learnings.py --from-plan" in LESSONS_RULE
-           and "Nothing is written to the migrator" in LESSONS_RULE and MIGRATOR_RULE in task["prompt"]
+           and "Step 10 harvests it" in LESSONS_RULE and MIGRATOR_RULE in task["prompt"]
+           and "\n10. " + HARVEST_RULE in task["prompt"] and "never merge it" in HARVEST_RULE
+           and "never merges" in MIGRATOR_RULE and "claude/harvest-<round date>" in MIGRATOR_RULE
+           and task["repositories"][-1] == "owner/migrator"
            and "single-version included" in LESSONS_RULE,
            f"the round prompt asks for the Lessons for the migrator block and keeps the migrator read-only: {task['prompt']}")
     # the round's cost (2026-10-19: ~87% cache reads and writes of the orchestrator's ~565k-token context; 2026-10-21:
