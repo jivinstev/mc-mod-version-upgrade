@@ -721,7 +721,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      is then a full Port CI run (2026-10-19 round: nine, 8-14 minutes each, on a head still on a kit-v23 workflow --
      re-pins keep a workflow's kit, and nothing regenerated the head). Regenerate it first, before the round's first
      ledger commit: `fork-branches.py ci --repo DIR --head --run` (the head's own pins, variants and gates read
-     back, only the kit moved to the newest), pushed under `push-version-branches`; else ask;
+     back, only the kit moved to the newest), pushed under `push-version-branches`; else ask. `round.py`'s `ci-check`
+     item does this itself when the head has no PR this round and only its kit is behind (a fixer job cannot: jobs
+     never push, and the check reads the head branch, not the work branch);
    - (a single-version fork, once per round, before its first commit) `python3 tools/port-ci.py check --repo DIR`: the
      same check of the port branch's workflow (an older kit -- new gates reach a fork only from the first kit that ships
      them -- or no records ignore), a WARNING that never blocks, with the command that regenerates it at the newest kit

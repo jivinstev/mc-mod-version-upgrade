@@ -2021,6 +2021,16 @@ def t_ci_check(st, it, log):
     # single-version fork (a fixer's commit on the local head branch never reaches that PR -- measured, trial round
     # 2026-10-29: the head stayed stale through both fixer jobs)
     head_pr = any(x["fork"] == it["fork"] and x["version"] == F["base"] and x["step"] == "pr" for x in st.items)
+    if (not head_pr and "push-version-branches" in st.data["allow"]
+            and any("(the head branch)" in ln and "Port CI kit" in ln for ln in warn)):
+        # a head with no PR this round and only its kit behind: the driver regenerates it on the local head itself
+        # (fork-branches.py ci --head --run moves only the kit) and push_ci_regen pushes it below. A fixer job cannot:
+        # jobs never push, and the check reads the head branch, not the work branch the fixer committed on (measured,
+        # weekly round 2026-11-18: two fixers regenerated it on keep-current/<date> and the warning never cleared)
+        sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", F["dir"], "--head", "--run"], log)
+        at = log_size(log)
+        sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci-check", "--repo", F["dir"]], log)
+        warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
     stale_head = [ln for ln in warn if "(the head branch)" in ln] if head_pr else []
     warn = [ln for ln in warn if ln not in stale_head]
     if warn:
@@ -6966,6 +6976,21 @@ def self_check():
                 expect(False, "a stale head with no PR this round passed the check (nothing would regenerate it)")
             except StepError:
                 pass
+            # with push-version-branches allowed, the driver regenerates the stale head itself and checks again
+            st_push = _St2()
+            st_push.data = {"plan": {"issue": 9}, "allow": ["push-version-branches"]}
+            outs_ = [hw, "", "fork-branches: ci-check: workflows current\n"]
+            def seq_(st_, it_, cmd, log, **k_):
+                seen_cmds.append([str(c) for c in cmd])
+                with open(log, "a", encoding="utf-8") as fh:
+                    fh.write(outs_.pop(0))
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            seen_cmds.clear()
+            sh = seq_
+            note, r_ = t_ci_check(st_push, {"fork": "o/x"}, log_)
+            expect(note == "workflows current" and any(c[-4:] == ["--repo", str(gd), "--head", "--run"] and "ci" in c
+                                                       for c in seen_cmds) and seen_cmds[-1][2] == "ci-check",
+                   f"a stale head with no PR: the driver regenerates it (ci --head --run) and checks again: {note} {seen_cmds}")
             st_pr = _St2()
             st_pr.items = [{"fork": "o/x", "version": "9.9", "step": "pr"}]
             sh = rec_out(hw)
