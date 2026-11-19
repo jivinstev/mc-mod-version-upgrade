@@ -1,4 +1,4 @@
-# Port CI: proves this unofficial port builds, loads and runs, and publishes the JAR on a version tag.
+# Port CI: proves this {{KIND_NOUN}} builds, loads and runs, and publishes the JAR on a version tag.
 #
 # Installed by tools/port-ci.py into a fork's port branch, as a commit of its own so it can be dropped if
 # the port is ever offered upstream. It runs the author's own build, then the same gates the port was held
@@ -288,9 +288,7 @@ jobs:
             exit 1
           fi
           {
-            echo "**Unofficial port** of {{UPSTREAM}} to {{TARGET}}."
-            echo "Same licence and credits as the original; not an official release by the author."
-            echo
+{{NOTES_INTRO}}            echo
             for e in full minimal; do
               cat "logs/gate-logs-$e/gates.md" 2>/dev/null || echo "(gate summary for the $e environment missing)"
               echo
@@ -305,7 +303,7 @@ jobs:
             n=$(basename "$d"); cp "${d}gates.md" "gate-assets/gates-${n#gate-logs-}.md"; gates+=("gate-assets/gates-${n#gate-logs-}.md")
           done
           gh release create "$TAG" jars/*.jar ${gates[@]+"${gates[@]}"} --repo "${{ github.repository }}" --prerelease \
-            --title "$TAG (unofficial {{TARGET}} port)" --notes-file notes.md --target "${{ github.sha }}"
+            --title "$TAG ({{TITLE_KIND}})" --notes-file notes.md --target "${{ github.sha }}"
 
   promote:
     # A person played this pre-release: make it a full Release. Inputs reach the script only through env, never

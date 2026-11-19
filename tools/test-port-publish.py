@@ -326,6 +326,27 @@ def owned_repo():
                        f"owned setup: own_mod true, no permission, no derivative-work disclosure: {cfg}")
 
 
+def templated_toml():
+    """A mods.toml the build fills in from gradle.properties (processResources `expand`): setup reads the values, and a
+    ${key} no property names (a build-only block) is left out, not a TOML error."""
+    toml = ('modLoader="javafml"\nloaderVersion="${loader_version_range}"\nlicense="${mod_license}"\n[[mods]]\n'
+            'modId="${mod_id}"\nversion="${mod_version}"\ndisplayName="${mod_name}"\nauthors="${mod_authors}"\n'
+            "description='''\n${mod_description}\n'''\n[[dependencies.${mod_id}]]\nmodId=\"neoforge\"\ntype=\"required\"\n"
+            '[[mixins]]\nconfig="${mod_id}.mixins.json"\n${build_only_block}\n')
+    props = ("# a comment=ignored\nloader_version_range=[1,)\nmod_license=MPL-2.0\nmod_id=examplemod\nmod_version=1.0.0\n"
+             "mod_name=Example Mod\nmod_authors=Example Co\nmod_description=Adds a few example blocks.\n"
+             "minecraft_version=1.21.8\n")
+    pp = load("pptemplated")
+    with tempfile.TemporaryDirectory() as t:
+        d = pathlib.Path(t)
+        git_repo(d, {"src/main/resources/META-INF/neoforge.mods.toml": toml, "gradle.properties": props}, False)
+        got = pp.mods_toml(d)
+        mod = got["mods"][0]
+        expect(mod["modId"] == "examplemod" and mod["displayName"] == "Example Mod" and got["license"] == "MPL-2.0"
+               and mod["description"].strip() == "Adds a few example blocks." and "examplemod" in got["dependencies"],
+               f"a templated mods.toml is read with gradle.properties' values: {got}")
+
+
 def main():
     global ok
     if "--regen" in sys.argv:
@@ -338,6 +359,7 @@ def main():
     expect(got == want, "single-version publish output/API calls differ from tools/golden/port-publish-single-version.txt")
     per_platform()
     owned_repo()
+    templated_toml()
     print("test-port-publish:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
