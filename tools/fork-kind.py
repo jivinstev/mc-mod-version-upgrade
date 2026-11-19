@@ -13,7 +13,14 @@ A fork is one of two kinds:
 
 `detect` prints `kind=single-version` or `kind=version-branches versions=<v>,<v>,...`, with `legacy_layer=<branch>,...`
 added when branches still carry the removed `.multiversion/` layer (a `.multiversion/targets/<t>/target.properties`):
-they are history, and ignored. Exit 0.
+they are history, and ignored; and `owned=yes` added for an OWNED repository. Exit 0.
+
+OWNED, on either kind: a repository whose maintainer is the mod's own author -- not a port of somebody else's mod --
+commits `.port/OWNED` (a line saying whose mod it is) on its port branch. is_owned() reads it from git at HEAD (an
+untracked file never counts), and the version branches carry it up with every cascade. An owned repository is built,
+gated, released and published exactly like a fork, except: publish-port needs no authors' permission link and puts no
+"unofficial community port" wording on its page or notes (port-publish.py), and keep-current takes the repository's
+own default branch as its upstream when none is named (weekly-plan.py): there are no outside authors to sync from.
 
 THE LAYER IS REMOVED. The `.multiversion/` overlay route (one layer branch building every version) was removed; the
 last commit of this repository that supports it is LAST_LAYER_COMMIT. A checkout with the layer at HEAD
@@ -70,6 +77,15 @@ def stray_files(repo):
 
 LEGACY_CHECKOUT = ("{tool}: {repo} is a version-branch fork checked out on a legacy layer branch ({branch}); check out "
                    "its head branch ({head})")
+
+
+OWNED_FILE = ".port/OWNED"
+
+
+def is_owned(repo, ref="HEAD"):
+    """Is this repository the mod author's own (OWNED_FILE committed at ref), rather than a port of somebody else's mod?
+    Read from git, never the working tree: an untracked or ignored file says nothing."""
+    return git(repo, "cat-file", "-e", f"{ref}:{OWNED_FILE}").returncode == 0
 
 
 def head_of(repo, vb):
@@ -145,7 +161,7 @@ def cmd_detect(a):
         print(why); return 2
     kind, versions, legacy = detect(repo)
     print(f"kind={kind}" + (f" versions={','.join(versions)}" if versions else "")
-          + (f" legacy_layer={','.join(legacy)}" if legacy else ""))
+          + (f" legacy_layer={','.join(legacy)}" if legacy else "") + (" owned=yes" if is_owned(repo) else ""))
     if legacy:
         print(f"fork-kind: {', '.join(legacy)} still carr{'ies' if len(legacy) == 1 else 'y'} the removed .multiversion/ "
               "layer: history, ignored" + ("" if versions else
@@ -168,6 +184,21 @@ def self_check():
         g("init", "-q", "-b", "neoforge-1.21.1"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
         w("gradle.properties", "minecraft_version=1.21.1\n"); g("add", "-A"); g("commit", "-qm", "port")
         expect(detect(r) == ("single-version", [], []), f"one port branch: single-version: {detect(r)}")
+        expect(not is_owned(r), "a fork with no .port/OWNED is not owned")
+        w(".port/OWNED", "the maintainer's own mod\n")
+        expect(not is_owned(r), "an untracked .port/OWNED does not make it owned")
+        g("add", ".port/OWNED"); g("commit", "-qm", "owned")
+        buf = __import__("io").StringIO()
+        with __import__("contextlib").redirect_stdout(buf):
+            rc = cmd_detect(argparse.Namespace(repo=str(r)))
+        expect(is_owned(r) and rc == 0 and buf.getvalue() == "kind=single-version owned=yes\n"
+               and detect(r) == ("single-version", [], []),
+               f"a committed .port/OWNED: owned, on the same single-version route: {rc} {buf.getvalue()!r}")
+        g("rm", "-q", ".port/OWNED"); g("commit", "-qm", "a fork again")
+        buf = __import__("io").StringIO()
+        with __import__("contextlib").redirect_stdout(buf):
+            cmd_detect(argparse.Namespace(repo=str(r)))
+        expect(not is_owned(r) and buf.getvalue() == "kind=single-version\n", f"no marker: the output is as before: {buf.getvalue()!r}")
         expect(refuse_layer(r, "x") is None, "a single-version fork is not refused")
         # a .multiversion/ with only a single-version fork's shipped-jar files is no layer, and nothing reads it any
         # more: refused, told to move them to .port/<mc>/ (#161 U1); read from HEAD, so untracked leftovers do not count

@@ -42,6 +42,10 @@ A fork is single-version (one `neoforge-<mc>` branch) unless the maintainer opts
   tool that takes a fork checkout (`tools/fork-kind.py` `refuse_layer`, exit 2), naming `LAST_LAYER_COMMIT`, the last
   commit that supports it, where its migration runs. No new layer fork.
 - P7. Docs say which route: what the code does on each (the rule above).
+- Owned repositories: `.port/OWNED` committed on the port branch marks the mod author's own mod (not a port), on either
+  kind (`tools/fork-kind.py` `is_owned`; `detect` adds `owned=yes`). It changes only who is credited and synced from:
+  publish-port needs no permission and writes no "unofficial" wording, keep-current's upstream is the repository's
+  own default branch. Everything else -- branches, gates, CI, releases, ledgers -- is a fork's, unchanged.
 
 ## Merging
 

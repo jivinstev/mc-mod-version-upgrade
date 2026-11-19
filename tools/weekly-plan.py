@@ -22,8 +22,10 @@ Wednesday. Both are made only by the keep-current skill's setup, which runs `ins
 SPEC is `owner/repo@HEAD_BRANCH[=UPSTREAM_URL#UPSTREAM_BRANCH]`, one per fork of the set, the LIBRARY FIRST: the plan
 issue opens on the first fork's repository, with a section per fork (the others are public and read without a token).
 Without `=UPSTREAM_URL#UPSTREAM_BRANCH` the authors' upstream is the GitHub fork parent and its default branch (read from
-the GitHub API; refused for a repository that is not a fork). Only the first fork's repository gets the workflow and the
-config; the dependents get nothing.
+the GitHub API; refused for a repository that is not a fork) -- unless the first fork is OWNED (tools/fork-kind.py
+is_owned: `.port/OWNED` committed on its head, the author's own mod): there are no outside authors, so its upstream is
+its own repository at its default branch (its development line flows into the head; a head that IS the default branch
+simply has nothing new). Only the first fork's repository gets the workflow and the config; the dependents get nothing.
 
 `.github/weekly-plan.json` on the first fork's head branch is the fork set's ONLY source for the round: per fork its
 head, role (library / dependent), the authors' upstream URL and branch, `depends_on` (a dependent: the library unless
@@ -262,10 +264,24 @@ def parse_fork(spec):
     return {"repo": m.group(1), "head": m.group(2), "upstream": m.group(3), "upstream_branch": m.group(4)}
 
 
-def resolve_upstreams(forks, repo_info):
-    """A fork named without its authors' upstream: the GitHub fork parent, at the parent's default branch."""
+def resolve_upstreams(forks, repo_info, owned=()):
+    """A fork named without its authors' upstream: the GitHub fork parent, at the parent's default branch. An OWNED
+    repository (in `owned`) has no outside authors: its upstream is itself, at its own default branch."""
     for f in forks:
         if f["upstream"]:
+            continue
+        if f["repo"] in owned:
+            try:
+                me = repo_info(f["repo"]) or {}
+            except Exception as e:
+                raise Fail(f"--fork {f['repo']}: cannot read its default branch ({e}): name it "
+                           "(owner/repo@HEAD=UPSTREAM_URL#UPSTREAM_BRANCH)")
+            if not me.get("default_branch"):
+                raise Fail(f"--fork {f['repo']}: GitHub names no default branch: name its upstream "
+                           "(owner/repo@HEAD=UPSTREAM_URL#UPSTREAM_BRANCH)")
+            f["upstream"] = me.get("clone_url") or f"https://github.com/{f['repo']}.git"
+            f["upstream_branch"] = me["default_branch"]
+            f["upstream_source"] = "own repository (owned)"
             continue
         try:
             parent = (repo_info(f["repo"]) or {}).get("parent")
@@ -419,7 +435,7 @@ def install(a, say=print, repo_info=None):
         raise Fail(f"{repo} is on {cur!r}, not the head branch {head}: check it out first")
     k = ki()
     info = repo_info or (lambda s: k.gh_api(f"/repos/{s}"))
-    resolve_upstreams(forks, info)
+    resolve_upstreams(forks, info, {forks[0]["repo"]} if _is_owned(repo) else set())
     owner_login = forks[0]["repo"].split("/")[0]
     otype = a.owner_type
     old, warns = None, []
@@ -508,7 +524,10 @@ def install(a, say=print, repo_info=None):
     say(f"weekly-plan: plan issues go to {k.mention(k.resolve_owner(plan_owner, owner_login, otype or ''))} on "
         f"{forks[0]['repo']}; the round: {cfg['round']['cron']}. Push: git push origin {head}" + (f" {also}" if also else ""))
     for f in forks:
-        if f.get("upstream_source"):
+        if f.get("upstream_source") == "own repository (owned)":
+            say(f"weekly-plan: {f['repo']}: owned (the author's own mod): its upstream is its own default branch "
+                f"{f['upstream_branch']}")
+        elif f.get("upstream_source"):
             say(f"weekly-plan: {f['repo']}: the authors' upstream is its GitHub fork parent: {f['upstream']} "
                 f"{f['upstream_branch']}")
     say("weekly-plan: allow: " + (", ".join(cfg["allow"]) if cfg["allow"] else
@@ -1263,6 +1282,20 @@ def self_check():
         bad.append("a repository that is not a fork, named without its upstream, is refused")
     except Fail:
         pass
+    # an OWNED repository (the author's own mod, no GitHub fork parent): its upstream is its own default branch; a named
+    # upstream still wins, and a repository not in the owned set is refused as before
+    own = resolve_upstreams([parse_fork("o/mod@neoforge-1.21.8"), parse_fork("o/dep@neoforge-1.21.8=https://x/a.git#dev")],
+                            lambda s: {"fork": False, "default_branch": "main", "clone_url": f"https://github.com/{s}.git"},
+                            owned={"o/mod", "o/dep"})
+    expect(own[0]["upstream"] == "https://github.com/o/mod.git" and own[0]["upstream_branch"] == "main"
+           and own[0]["upstream_source"] == "own repository (owned)" and own[1]["upstream"] == "https://x/a.git"
+           and own[1]["upstream_branch"] == "dev" and "upstream_source" not in own[1],
+           f"owned: its own default branch is its upstream; a named upstream wins: {own}")
+    try:
+        resolve_upstreams([parse_fork("o/mod@neoforge-1.21.8")], lambda s: {"fork": False}, owned={"o/other"})
+        bad.append("owned names another repository: this non-fork named without its upstream is still refused")
+    except Fail:
+        pass
     try:
         per_fork(["x/y=1"], forks, "--ledger-issues"); bad.append("a per-fork flag naming a repository outside the set")
     except Fail:
@@ -1357,6 +1390,18 @@ def self_check():
                f"{parsed!r}")
         rc, o = inst("--plan-owner", "someone", "--trailer", "not a trailer")
         expect(rc == 2 and "--trailer" in o, f"a malformed --trailer is refused: {o}")
+        # an OWNED head (.port/OWNED committed): no fork parent needed, its own default branch is its upstream
+        (fork / ".port").mkdir(exist_ok=True)
+        (fork / ".port/OWNED").write_text("the maintainer's own mod\n", encoding="utf-8")
+        gq(fork, "add", ".port/OWNED"); gq(fork, "commit", "-qm", "owned")
+        rc, o = inst("--plan-owner", "someone", argv=argv2,
+                     info=lambda s: {"fork": False, "default_branch": "main", "clone_url": f"https://github.com/{s}.git"})
+        c4 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
+        expect(rc == 0 and c4["forks"][0]["upstream"] == "https://github.com/o/lib.git"
+               and c4["forks"][0]["upstream_branch"] == "main" and c4["forks"][0]["upstream_source"] == "own repository (owned)"
+               and "owned (the author's own mod): its upstream is its own default branch main" in o,
+               f"install on an owned head: its own default branch is its upstream, no fork parent asked: {rc} {o}")
+        gq(fork, "rm", "-q", ".port/OWNED"); gq(fork, "commit", "-qm", "a fork again")
         expect(c3["migrator_sha"] == "a" * 40, f"install records the pinned migrator_sha in the config: {c3}")
         # a re-run drops what it is not given (the default, unchanged) but warns for each; --keep-existing keeps it.
         # A three-fork set: a dependent with non-default depends_on and ledger issues
@@ -1816,6 +1861,14 @@ def build_parser():
     for n in ("cascade", "select", "deps", "previous", "open"):
         sub.add_parser(n).add_argument("--work", required=True)
     return ap
+
+
+def _is_owned(repo):
+    """tools/fork-kind.py is_owned: `.port/OWNED` committed at HEAD (the author's own mod, not a port)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.is_owned(repo)
 
 
 def _refuse_layer(repo, tool):

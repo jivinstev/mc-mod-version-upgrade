@@ -19,9 +19,18 @@ the platforms players install from. Tool: `tools/port-publish.py`. The upload it
 GitHub Actions (the `publish` job `tools/port-ci.py` generates): the platform tokens are repository secrets, never
 seen by a chat session, and CurseForge's upload host is not reachable from a cloud session anyway.
 
+**An owned repository** (`.port/OWNED` committed on the port branch: the maintainer is the mod's own author, not a
+porter of somebody else's mod; `tools/fork-kind.py detect` prints `owned=yes`) is published the same way, with three
+things left out: there is no authors' permission to ask for (Stop 1 does not apply; `setup` takes no `--permission` and
+refuses one), no original to credit or link, and no "unofficial community port" wording -- the page and the notes name
+the mod, its version and its issue tracker, the Modrinth slug and CurseForge name are the mod's own (no `-neoforge`, no
+"Community Port"), and the only disclosure setup writes is AI-generated text (ask about the others, AI-generated code
+included). The public-text check, the fix and known-issues ledgers, "a full Release built by this repository's CI",
+dependencies published first and the per-platform holds all apply unchanged.
+
 ## Stops -- ask the user
 
-1. **Permission.** A permissive licence makes redistribution legal; the platforms and courtesy still want the
+1. **Permission** (not for an owned repository). A permissive licence makes redistribution legal; the platforms and courtesy still want the
    authors' agreement. Ask for the link where they gave it (an issue comment, a message). No link, no project and
    no upload -- `port-publish.py` refuses, whatever the licence says. Read the link yourself: it must name the
    mods being published and the platforms, or come close enough that you can quote it.

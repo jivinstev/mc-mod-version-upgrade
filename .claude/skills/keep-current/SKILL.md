@@ -57,7 +57,9 @@ round's table).
 fleet file (`tools/port-fleet.py`'s, outside this repository) is only an input to the first setup that moves its
 values into flags; after that it is not read. Order is **dependencies first** (the `forks` list: the library first).
 Per fork: `repo`, `head`, `role` (`library` / `dependent`; empty for a fork alone), `upstream` and `upstream_branch`
-(the authors' repository and branch), `depends_on` (a dependent's dependencies in the set), `ledger_issues` (the fork
+(the authors' repository and branch; for an OWNED first fork -- `.port/OWNED` committed on its head, the author's own
+mod -- named without one, its own repository at its default branch: there are no outside authors, so its development
+line flows into the head, and a head that is the default branch has nothing new), `depends_on` (a dependent's dependencies in the set), `ledger_issues` (the fork
 issues that carry fix ledgers), `automerge` (merge its keep-current PR once CI is green: true exactly when `allow` has
 `merge-fork-prs`). For the set: `allow`, `budget`, `plan_owner`, `round` (its name,
 time and cron). A dependent's CI pins its dependency by exact release asset (`--dep-jar`, written into the dependent's

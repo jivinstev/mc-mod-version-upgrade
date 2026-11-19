@@ -2,6 +2,7 @@
 """Publish a fork port's PROMOTED release as an unofficial community version on Modrinth and CurseForge.
 
     port-publish.py setup   --repo <fork clone> --permission <url> [--branch neoforge-1.21.1]
+    port-publish.py setup   --repo <owned clone> [--branch neoforge-<mc>]    # an OWNED repository: no --permission
     port-publish.py modrinth-create --repo .           # CI: create the Modrinth draft project (MODRINTH_TOKEN)
     port-publish.py publish --repo . --tag <tag> [--dry-run] [--manual] [--platform mr|cf|both]   # CI: one release
     port-publish.py --self-check
@@ -52,6 +53,12 @@ so a re-run after a partial failure only does what is missing. After uploading i
 release notes. Tokens come from the environment (MODRINTH_TOKEN, CURSEFORGE_TOKEN, GITHUB_TOKEN) -- never
 arguments, never printed. A platform with no project yet (CurseForge before the person has created it) is
 skipped with a notice, not failed. Standard library only.
+
+AN OWNED REPOSITORY (tools/fork-kind.py is_owned: `.port/OWNED` committed on its port branch) is the mod author's own
+mod, not a port of somebody else's: `setup` takes no --permission and writes a page and config with no "unofficial
+community port" wording, no original to credit and no derivative-work disclosure; `publish` needs no permission link
+and its notes say what the release is, not whose it is. Every other gate, the per-platform ledger checks, the jars and
+the uploads are the same as a fork's.
 """
 import argparse, datetime, importlib.util, json, os, pathlib, re, subprocess, sys, urllib.error
 import urllib.parse, urllib.request, uuid
@@ -65,6 +72,13 @@ GITHUB = "https://api.github.com"
 UA = "mc-mod-version-upgrade port-publish (community port publisher)"
 MARK = "<!-- port-publish:{platform}:{ref} -->"
 MARK_RE = re.compile(r"<!-- port-publish:(modrinth|curseforge):([^ ]+) -->")
+
+
+def owned(repo, ref="HEAD"):
+    """Is `repo` an owned repository (the mod author's own, tools/fork-kind.py is_owned), not a port of someone else's?"""
+    spec = importlib.util.spec_from_file_location("fork_kind_owned", ROOT / "fork-kind.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m.is_owned(pathlib.Path(repo), ref)
 
 
 def _ledger_mod():
@@ -342,7 +356,7 @@ def published(body):
 def gate(repo, cfg, tag, release, manual=False):
     """Every reason not to publish this release; empty means go."""
     why = []
-    if not cfg.get("permission", "").startswith("https://"):
+    if not cfg.get("permission", "").startswith("https://") and not owned(repo):
         why.append("no permission link in the config -- publishing needs the authors' agreement on record")
     if not manual and not cfg.get("auto", False):
         why.append("auto is off in the config -- publish with the manual dispatch (publish = <tag>) instead")
@@ -386,12 +400,20 @@ def platforms(cfg):
 
 # ---------------------------------------------------------------- release notes
 
-def notes(cfg, tag, release, repo_slug):
+def notes(cfg, tag, release, repo_slug, is_owned=False):
     """The changelog players see. Deliberately says nothing about defects in the original: bugs are tracked in the
     fork's GitHub issues, and a public page listing the original's bugs reads as disparaging the authors whose
-    work this is. Only differences a player would notice ("differences" in the config) are stated, neutrally."""
+    work this is. Only differences a player would notice ("differences" in the config) are stated, neutrally.
+    An owned repository's notes name the mod and its version, with no original, permission or "unofficial"."""
     body = release.get("body") or ""
     played = re.search(r"Played by @[^\n]*", body)
+    if is_owned:
+        return "\n".join([
+            f"{cfg.get('original_name') or cfg.get('modid') or 'This mod'} "
+            f"{version_of(tag, cfg.get('modid', '')).split('+')[0]} for NeoForge {minecraft_of(tag)}.", "",
+            f"Every build passes this mod's checks (it builds, loads on a server and in a real client) and is played by "
+            f"a person before release. {played.group(0) if played else ''}".strip(), "",
+            f"Report problems at https://github.com/{repo_slug}/issues."])
     out = [f"**Unofficial community port** of {cfg.get('original_name', 'the original mod')} to NeoForge "
            f"{minecraft_of(tag)}, based on the original's version {version_of(tag, cfg.get('modid', '')).split('+')[0]}.", ""]
     diffs = cfg.get("differences", [])
@@ -570,7 +592,7 @@ def publish(repo, tag, dry=False, manual=False, platform=None):
             print(f"::error::will not publish {tag}: {w}")
         return 1
     done = published(release.get("body"))
-    text, links, missing = notes(cfg, tag, release, repo_slug), [], []
+    text, links, missing = notes(cfg, tag, release, repo_slug, owned(repo)), [], []
     bad = public_text_problems(text, cfg.get("permission", ""))
     if bad:
         for b in bad:
@@ -641,10 +663,10 @@ def modrinth_create(repo):
     cfg = load_config(repo)
     if not cfg or not cfg.get("modrinth", {}).get("slug"):
         sys.exit(f"no modrinth slug in {CONFIG}")
-    if not cfg.get("permission", "").startswith("https://"):
+    if not cfg.get("permission", "").startswith("https://") and not owned(repo):
         sys.exit("no permission link in the config -- will not create a project")
     body_md = (pathlib.Path(repo) / cfg.get("body_file", BODY)).read_text(encoding="utf-8")
-    bad = public_text_problems(body_md, cfg["permission"]) + public_text_problems(cfg.get("summary", ""))
+    bad = public_text_problems(body_md, cfg.get("permission", "")) + public_text_problems(cfg.get("summary", ""))
     if bad:
         sys.exit("will not put this page up: " + "; ".join(bad) + " -- public text describes differences, not the "
                  "original's defects")
@@ -741,11 +763,106 @@ def known_issues_section(repo, fork, api=None):
     return ki.page(ki.read_ledger(led), fork, url).splitlines() + [""]
 
 
+def dependencies_of(toml, modid, install):
+    """The config's "dependencies": each required/optional mod the mods.toml names (not minecraft or neoforge) -- a
+    fork port (`port`, from the install manifest), else the Modrinth project of that name."""
+    deps = []
+    by_modid = {f.get("modid"): f for f in install.get("files", [])}
+    for d in toml.get("dependencies", {}).get(modid, []):
+        dep, kind = d["modId"], d.get("type", "required")
+        if dep in ("minecraft", "neoforge") or kind not in ("required", "optional"):
+            continue
+        if (by_modid.get(dep) or {}).get("port"):
+            deps.append({"port": by_modid[dep]["port"], "type": kind}); continue
+        try:
+            http("GET", f"{MODRINTH}/project/{dep}")
+            deps.append({"modrinth": dep, "curseforge": dep, "type": kind})
+        except SystemExit:
+            print(f"WARNING: dependency {dep} has no Modrinth project of that name -- set its slugs by hand")
+            deps.append({"modrinth": None, "curseforge": None, "type": kind, "modid": dep})
+    return deps
+
+
+def setup_ref(repo, branch):
+    ref = f"origin/{branch}"
+    return "HEAD" if git(repo, "rev-parse", "--verify", ref).returncode else ref
+
+
+def release_variant(fork):
+    """sfx -> sfx when the fork's newest release has a jar ending in it (a build that makes one jar per platform), else
+    "" (its only jar)."""
+    try:
+        rels = http("GET", f"{GITHUB}/repos/{fork}/releases?per_page=1")
+        names = [a["name"] for a in rels[0]["assets"]] if rels else []
+    except SystemExit:
+        names = []
+    return lambda sfx: sfx if any(n.endswith(sfx) for n in names) else ""
+
+
+def setup_owned(repo, branch, out=None, ledgers=(), differences=()):
+    """setup for an OWNED repository: the author's own mod. The same config and files as a fork's, with no permission,
+    no original to look up or credit, no "unofficial" or "community port" wording and no derivative-work disclosure."""
+    repo = pathlib.Path(repo).expanduser()
+    ref = setup_ref(repo, branch)
+    toml = mods_toml(repo, ref)
+    mod = toml["mods"][0]
+    modid, name = mod["modId"], mod.get("displayName", mod["modId"])
+    install = json.loads(git(repo, "show", f"{ref}:.github/port-install.json").stdout or "{}")
+    gp = git(repo, "show", f"{ref}:gradle.properties").stdout
+    m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp)
+    mc = install.get("minecraft") or (m.group(1) if m else "1.21.1")
+    authors = mod.get("authors", "its authors")
+    fork = slug_of(repo)
+    deps = dependencies_of(toml, modid, install)
+    variant = release_variant(fork)
+    desc = " ".join(str(mod.get("description", "")).split())
+    summary = (desc if desc and len(desc) <= 250 else f"{name} for NeoForge {mc}.")
+    slug = modid.replace("_", "-")
+    cfg = {"schema": 1, "auto": True, "modid": modid, "title": name[:64], "summary": summary,
+           "body_file": BODY, "icon": f"src/main/resources/{mod['logoFile']}" if mod.get("logoFile") else None,
+           "license": toml.get("license", "MIT"), "categories": [], "additional_categories": [],
+           "ledger_issues": list(ledgers), "differences": list(differences), "original_name": name,
+           "environment": "client_and_server",
+           "disclosures": [{"type": "ai_content", "uses": ["text"],
+                            "note": "This page's text was drafted with an AI assistant and checked by a person."}],
+           "dependencies": deps,
+           "modrinth": {"slug": slug, "asset": variant("_mr.jar")},
+           "curseforge": {"project_id": None, "slug": slug, "asset": variant("_cf.jar")}}
+    lines = [f"# {name}", "", *([desc, ""] if desc else []),
+             f"By **{authors}**. Report problems [on its issue tracker](https://github.com/{fork}/issues).", "",
+             f"**Scope:** NeoForge, Minecraft {mc}. Builds are published for Minecraft {mc}.", "",
+             *(["## Changes in this build", "", *[f"- {d}" for d in differences], ""] if differences else []),
+             "## Requirements", ""]
+    for d in deps:
+        what = (f"https://github.com/{d['port']} (published alongside this one)" if d.get("port") else
+                f"[{d['modrinth']}](https://modrinth.com/mod/{d['modrinth']})" if d.get("modrinth") else d.get("modid"))
+        lines.append(f"- {'Required' if d['type'] == 'required' else 'Optional'}: {what}")
+    if not deps:
+        lines.append(f"- Nothing beyond NeoForge {mc}.")
+    lines += [""] + known_issues_section(repo, fork)
+    lines += ["## How releases are made", "",
+              f"Every release is built from https://github.com/{fork} by its own build, passes automated checks (it "
+              "builds, loads on a dedicated server, runs in a real client), and is played by a person before it is "
+              "published here.", "",
+              "## Licence", "", f"{cfg['license']}, copyright {authors}. See the licence file in the source."]
+    target = pathlib.Path(out) if out else repo
+    (target / BODY).parent.mkdir(parents=True, exist_ok=True)
+    (target / BODY).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (target / CONFIG).write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {target / CONFIG} and {target / BODY} for an OWNED repository (no permission, no original credited) -- "
+          "review both, set categories, and ask whether any other Modrinth disclosure applies (AI-generated code, "
+          "telemetry, system interactions, paid features, advertising, photosensitivity); curseforge.project_id is set "
+          "after the project is created on the website")
+    print("\nCurseForge create-project form (https://authors.curseforge.com, Create Project, Minecraft, Mods):")
+    print(f"  Name:        {name}   (no version numbers: CurseForge refuses them in a name)\n  Summary:     {summary}\n"
+          f"  Description: paste {BODY}\n  License:     {cfg['license']}\n  Source URL:  https://github.com/{fork}\n"
+          f"  Issues URL:  https://github.com/{fork}/issues\n  Logo:        {cfg['icon']}")
+    return 0
+
+
 def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
     repo = pathlib.Path(repo).expanduser()
-    ref = f"origin/{branch}"
-    if git(repo, "rev-parse", "--verify", ref).returncode:
-        ref = "HEAD"
+    ref = setup_ref(repo, branch)
     toml = mods_toml(repo, ref)
     mod = toml["mods"][0]
     modid, name = mod["modId"], mod.get("displayName", mod["modId"])
@@ -764,32 +881,13 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
         pass
     authors = mod.get("authors", "the original authors")
     up = (orig or {}).get("source_url") or (disp if "github.com" in disp else None)
-    deps = []
-    by_modid = {f.get("modid"): f for f in install.get("files", [])}
-    for d in toml.get("dependencies", {}).get(modid, []):
-        dep, kind = d["modId"], d.get("type", "required")
-        if dep in ("minecraft", "neoforge") or kind not in ("required", "optional"):
-            continue
-        if (by_modid.get(dep) or {}).get("port"):
-            deps.append({"port": by_modid[dep]["port"], "type": kind}); continue
-        try:
-            http("GET", f"{MODRINTH}/project/{dep}")
-            deps.append({"modrinth": dep, "curseforge": dep, "type": kind})
-        except SystemExit:
-            print(f"WARNING: dependency {dep} has no Modrinth project of that name -- set its slugs by hand")
-            deps.append({"modrinth": None, "curseforge": None, "type": kind, "modid": dep})
+    deps = dependencies_of(toml, modid, install)
     fork = slug_of(repo)
     title = page_title(name, mc)
     orig_cf = original_curseforge(name)
     credits_src = original_credits_file(up)
     oslug = (orig or {}).get("slug") or modid.replace("_", "-")
-    fork_slug = slug_of(repo)
-    try:
-        rels = http("GET", f"{GITHUB}/repos/{fork_slug}/releases?per_page=1")
-        names = [a["name"] for a in rels[0]["assets"]] if rels else []
-    except SystemExit:
-        names = []
-    variant = lambda sfx: sfx if any(n.endswith(sfx) for n in names) else ""
+    variant = release_variant(slug_of(repo))
     cfg = {"schema": 1, "permission": permission, "auto": True, "modid": modid, "title": title,
            "summary": f"Unofficial NeoForge port of {name} by {authors} to newer Minecraft, maintained by the community "
                       "with the author's permission.",
@@ -1126,7 +1224,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--self-check", action="store_true")
     sub = ap.add_subparsers(dest="cmd")
-    s = sub.add_parser("setup"); s.add_argument("--repo", required=True); s.add_argument("--permission", required=True)
+    s = sub.add_parser("setup"); s.add_argument("--repo", required=True)
+    s.add_argument("--permission", help="the https link where the authors agreed (not for an owned repository)")
     s.add_argument("--branch", default="neoforge-1.21.1")
     s.add_argument("--ledger-issue", action="append", default=[], help="owner/repo#n carrying a fix ledger; repeat "
                    "(gates publishing; never shown to players)")
@@ -1150,7 +1249,12 @@ def main():
         if why:
             print(f"::error::{why}"); return 2
     if a.cmd == "setup":
-        if not a.permission.startswith("https://"):
+        repo_ = pathlib.Path(a.repo).expanduser()
+        if owned(repo_, setup_ref(repo_, a.branch)):
+            if a.permission:
+                sys.exit("--permission: this is an owned repository (.port/OWNED), the author's own mod -- it needs none")
+            return setup_owned(a.repo, a.branch, a.out, a.ledger_issue, a.difference)
+        if not (a.permission or "").startswith("https://"):
             sys.exit("--permission must be the https link where the authors agreed")
         return setup(a.repo, a.permission, a.branch, a.out, a.ledger_issue, a.difference)
     if a.cmd == "modrinth-create":
