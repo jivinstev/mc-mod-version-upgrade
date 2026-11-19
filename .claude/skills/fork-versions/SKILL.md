@@ -13,6 +13,11 @@ description: Make a fork port build for more Minecraft versions as stacked versi
   **version branches** (below), never a layer.
 - **Version branches** (the default for a multi-version fork): the port branch plus one branch per further version,
   `neoforge-<version>`, each carrying `.port/<version>/branch.properties`. Everything below is for these.
+- **Owned** (either kind; `detect` adds `owned=yes`): `"own_mod": true` in the port branch's `.github/port-publish.json`
+  marks the author's own mod (written by `port-publish.py setup` when GitHub says the repository is not a fork; version
+  branches inherit it by merge -- nothing to set per version).
+  Its version branches are made, ported, gated, cascaded and released exactly like a fork's; only publish-port (no
+  permission, no "unofficial" wording) and keep-current (its own default branch as upstream) treat it differently.
 - **A layer fork** (`.multiversion/base.properties` or `.multiversion/targets/` at HEAD): the overlay route was removed.
   Every tool that takes a fork checkout refuses it (exit 2), naming the last migrator commit that supports it -- see
   "A fork still on the layer" at the end. A version-branch fork whose old layer branch still exists is fine: `detect`

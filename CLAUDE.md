@@ -42,6 +42,14 @@ A fork is single-version (one `neoforge-<mc>` branch) unless the maintainer opts
   tool that takes a fork checkout (`tools/fork-kind.py` `refuse_layer`, exit 2), naming `LAST_LAYER_COMMIT`, the last
   commit that supports it, where its migration runs. No new layer fork.
 - P7. Docs say which route: what the code does on each (the rule above).
+- Owned repositories: the mod author's own mod (not a port), on either kind, says so where a fork keeps its authors'
+  permission: `"own_mod": true` in place of `"permission"` in the committed `.github/port-publish.json`
+  (`tools/fork-kind.py` `is_owned`; `detect` adds `owned=yes`). Nobody sets it by hand: `port-publish.py setup` writes
+  it when GitHub says the repository is not a fork (`--own-mod` when GitHub cannot say; a GitHub fork is always a port
+  and needs `--permission`), keep-current treats a non-fork as its own upstream before the record exists, and the
+  version branches inherit the config by merge. It changes only who is credited and synced from:
+  publish-port needs no permission and writes no "unofficial" wording, keep-current's upstream is the repository's
+  own default branch. Everything else -- branches, gates, CI, releases, ledgers -- is a fork's, unchanged.
 
 ## Merging
 

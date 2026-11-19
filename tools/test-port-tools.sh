@@ -1460,7 +1460,7 @@ out="$(python3 tools/fork-port.py --repo "$LK" --target 1.21.4 --gates none 2>&1
   && ok "a dead holder's lock is stale: taken over, and released when the run ends" || bad "stale lock exit $code: $out"
 
 out="$(python3 tools/test-port-publish.py 2>&1)"
-grep -q 'test-port-publish: OK' <<<"$out" && ok "publish-port: single-version output and API calls byte-identical to the recorded golden; --platform mr|cf, and a cf-only S1 in the ledger publishes to Modrinth and holds CurseForge back by name (a version branch reads the head branch's ledger; an unreadable ledger holds both)" || bad "test-port-publish: $out"
+grep -q 'test-port-publish: OK' <<<"$out" && ok "publish-port: single-version output and API calls byte-identical to the recorded golden; --platform mr|cf, and a cf-only S1 in the ledger publishes to Modrinth and holds CurseForge back by name (a version branch reads the head branch's ledger; an unreadable ledger holds both); an owned repository (own_mod in its publishing config, recorded by setup from GitHub's fork flag) publishes and sets up with no permission and no unofficial wording; own_mod on a GitHub fork, or with a permission link, is refused" || bad "test-port-publish: $out"
 out="$(python3 tools/fix-ledger.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fix-ledger: a ledger renders and validates; a legacy layer section is kept in the JSON and not rendered" || bad "fix-ledger self-check: $out"
 out="$(python3 tools/port-ci.py --self-check 2>&1)"
