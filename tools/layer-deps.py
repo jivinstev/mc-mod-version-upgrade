@@ -93,6 +93,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools/mod-registry"))
 sys.path.insert(0, str(ROOT / "tools"))
 from gitbash import BASH   # noqa: E402  (Git Bash on Windows, where plain "bash" is WSL's launcher)
+from neoversion import neo_line, newest_stable   # noqa: E402  (in the CI kit; fork-branches.py is not)
 BEGIN, END = "# BEGIN layer-deps (tools/layer-deps.py)", "# END layer-deps"
 MODRINTH = "https://api.modrinth.com/v2"
 CURSEMAVEN = "https://cursemaven.com/curse/maven"
@@ -1049,7 +1050,7 @@ def set_neoforge(repo, target, to, say=print):
     """Move the version's NeoForge to `to` (a build of the same Minecraft line): gradle.properties' neo_version and, on
     a version branch, .port/<target>/branch.properties' prop.neo_version, every other byte kept. -> 0, or 2 refused."""
     repo = pathlib.Path(repo)
-    nl = _fb().neo_line(to) if SAFE_COORD.match(to or "") else None
+    nl = neo_line(to) if SAFE_COORD.match(to or "") else None
     if not nl or nl[0] != target:
         say(f"layer-deps: --neoforge {to}: not a NeoForge build for Minecraft {target}"); return 2
     done = []
@@ -1457,10 +1458,10 @@ _NEO_NEWEST = {}
 
 
 def neo_newest(mc):
-    """The newest stable NeoForge build for Minecraft `mc` on the NeoForge maven (fork-branches.py newest_stable), or None."""
+    """The newest stable NeoForge build for Minecraft `mc` on the NeoForge maven (tools/neoversion.py newest_stable), or None."""
     if "all" not in _NEO_NEWEST:
         xml = _get("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml").decode("utf-8")
-        _NEO_NEWEST["all"] = _fb().newest_stable(xml)
+        _NEO_NEWEST["all"] = newest_stable(xml)
     return _NEO_NEWEST["all"].get(mc)
 
 
@@ -1484,7 +1485,7 @@ def bump_requirements(row, neo_now, lk=None):
         # 2026-11-18: the newest 26.3 build, .113, also refuses a wildcard Entity access transformer that .101 starts)
         newest = (lk.get("neo_newest") or neo_newest)(row["mc"])
         ok = bool(newest) and SAFE_COORD.match(newest) and _vkey(newest) >= _vkey(floor)
-        to = floor if ok and (_fb().neo_line(floor) or [None])[0] == row["mc"] else newest
+        to = floor if ok and (neo_line(floor) or [None])[0] == row["mc"] else newest
         row["neo"] = {"from": neo_now, "needs": floor, "to": to if ok else None}
         if not ok:
             row["default"] = False
