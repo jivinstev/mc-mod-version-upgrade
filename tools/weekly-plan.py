@@ -22,9 +22,9 @@ Wednesday. Both are made only by the keep-current skill's setup, which runs `ins
 SPEC is `owner/repo@HEAD_BRANCH[=UPSTREAM_URL#UPSTREAM_BRANCH]`, one per fork of the set, the LIBRARY FIRST: the plan
 issue opens on the first fork's repository, with a section per fork (the others are public and read without a token).
 Without `=UPSTREAM_URL#UPSTREAM_BRANCH` the authors' upstream is the GitHub fork parent and its default branch (read from
-the GitHub API; refused for a repository that is not a fork) -- unless the first fork is OWNED (tools/fork-kind.py
-is_owned: `.port/OWNED` committed on its head, the author's own mod): there are no outside authors, so its upstream is
-its own repository at its default branch (its development line flows into the head; a head that IS the default branch
+the GitHub API) -- unless the first fork is OWNED, the author's own mod: its publishing config says `"own_mod": true`
+(tools/fork-kind.py is_owned), or, with no such record yet, GitHub says the repository is not a fork. There are no
+outside authors, so its upstream is its own repository at its default branch (its development line flows into the head; a head that IS the default branch
 simply has nothing new). Only the first fork's repository gets the workflow and the config; the dependents get nothing.
 
 `.github/weekly-plan.json` on the first fork's head branch is the fork set's ONLY source for the round: per fork its
@@ -435,7 +435,7 @@ def install(a, say=print, repo_info=None):
         raise Fail(f"{repo} is on {cur!r}, not the head branch {head}: check it out first")
     k = ki()
     info = repo_info or (lambda s: k.gh_api(f"/repos/{s}"))
-    resolve_upstreams(forks, info, {forks[0]["repo"]} if _is_owned(repo) else set())
+    resolve_upstreams(forks, info, {forks[0]["repo"]} if _first_is_own(repo, forks[0]["repo"], info) else set())
     owner_login = forks[0]["repo"].split("/")[0]
     otype = a.owner_type
     old, warns = None, []
@@ -1296,6 +1296,17 @@ def self_check():
         bad.append("owned names another repository: this non-fork named without its upstream is still refused")
     except Fail:
         pass
+    # no setting by hand: with no own_mod record yet, GitHub's own answer decides (not a fork: own; a fork or no answer: a port)
+    with tempfile.TemporaryDirectory() as td:
+        subprocess.run(["git", "init", "-q", td], check=True)
+
+        def boom(s):
+            raise RuntimeError("offline")
+        if not (_first_is_own(pathlib.Path(td), "o/mod", lambda s: {"fork": False}) is True
+                and _first_is_own(pathlib.Path(td), "o/mod", lambda s: {"fork": True, "parent": {}}) is False
+                and _first_is_own(pathlib.Path(td), "o/mod", boom) is False
+                and _first_is_own(pathlib.Path(td), "o/mod", lambda s: {}) is False):
+            bad.append("own mod from GitHub's fork flag: not a fork is own; a fork, an empty answer or an error stays a port")
     try:
         per_fork(["x/y=1"], forks, "--ledger-issues"); bad.append("a per-fork flag naming a repository outside the set")
     except Fail:
@@ -1390,18 +1401,19 @@ def self_check():
                f"{parsed!r}")
         rc, o = inst("--plan-owner", "someone", "--trailer", "not a trailer")
         expect(rc == 2 and "--trailer" in o, f"a malformed --trailer is refused: {o}")
-        # an OWNED head (.port/OWNED committed): no fork parent needed, its own default branch is its upstream
-        (fork / ".port").mkdir(exist_ok=True)
-        (fork / ".port/OWNED").write_text("the maintainer's own mod\n", encoding="utf-8")
-        gq(fork, "add", ".port/OWNED"); gq(fork, "commit", "-qm", "owned")
+        # an OWNED head (own_mod in its committed publishing config): no fork parent needed, its own default branch is
+        # its upstream. GitHub's answer here names no fork flag, so the record alone decides
+        (fork / ".github").mkdir(exist_ok=True)
+        (fork / ".github/port-publish.json").write_text('{"schema": 1, "own_mod": true}\n', encoding="utf-8")
+        gq(fork, "add", ".github/port-publish.json"); gq(fork, "commit", "-qm", "owned")
         rc, o = inst("--plan-owner", "someone", argv=argv2,
-                     info=lambda s: {"fork": False, "default_branch": "main", "clone_url": f"https://github.com/{s}.git"})
+                     info=lambda s: {"default_branch": "main", "clone_url": f"https://github.com/{s}.git"})
         c4 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
         expect(rc == 0 and c4["forks"][0]["upstream"] == "https://github.com/o/lib.git"
                and c4["forks"][0]["upstream_branch"] == "main" and c4["forks"][0]["upstream_source"] == "own repository (owned)"
                and "owned (the author's own mod): its upstream is its own default branch main" in o,
                f"install on an owned head: its own default branch is its upstream, no fork parent asked: {rc} {o}")
-        gq(fork, "rm", "-q", ".port/OWNED"); gq(fork, "commit", "-qm", "a fork again")
+        gq(fork, "rm", "-q", ".github/port-publish.json"); gq(fork, "commit", "-qm", "a fork again")
         expect(c3["migrator_sha"] == "a" * 40, f"install records the pinned migrator_sha in the config: {c3}")
         # a re-run drops what it is not given (the default, unchanged) but warns for each; --keep-existing keeps it.
         # A three-fork set: a dependent with non-default depends_on and ledger issues
@@ -1863,8 +1875,20 @@ def build_parser():
     return ap
 
 
+def _first_is_own(repo, slug, info):
+    """Is the first fork the author's own mod? Its committed publishing config says own_mod (_is_owned); or, before any
+    publishing config records it, GitHub says the repository is not a fork. Nothing to set by hand: a GitHub fork, or a
+    repository GitHub cannot answer for, is a port as before."""
+    if _is_owned(repo):
+        return True
+    try:
+        return (info(slug) or {}).get("fork") is False
+    except Exception:
+        return False
+
+
 def _is_owned(repo):
-    """tools/fork-kind.py is_owned: `.port/OWNED` committed at HEAD (the author's own mod, not a port)."""
+    """tools/fork-kind.py is_owned: the publishing config committed at HEAD says own_mod (the author's own mod)."""
     import importlib.util as _ilu
     s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
     m = _ilu.module_from_spec(s); s.loader.exec_module(m)

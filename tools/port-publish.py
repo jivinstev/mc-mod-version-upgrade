@@ -2,7 +2,7 @@
 """Publish a fork port's PROMOTED release as an unofficial community version on Modrinth and CurseForge.
 
     port-publish.py setup   --repo <fork clone> --permission <url> [--branch neoforge-1.21.1]
-    port-publish.py setup   --repo <owned clone> [--branch neoforge-<mc>]    # an OWNED repository: no --permission
+    port-publish.py setup   --repo <own repository> [--branch neoforge-<mc>]  # the author's own mod: no --permission
     port-publish.py modrinth-create --repo .           # CI: create the Modrinth draft project (MODRINTH_TOKEN)
     port-publish.py publish --repo . --tag <tag> [--dry-run] [--manual] [--platform mr|cf|both]   # CI: one release
     port-publish.py --self-check
@@ -54,8 +54,11 @@ release notes. Tokens come from the environment (MODRINTH_TOKEN, CURSEFORGE_TOKE
 arguments, never printed. A platform with no project yet (CurseForge before the person has created it) is
 skipped with a notice, not failed. Standard library only.
 
-AN OWNED REPOSITORY (tools/fork-kind.py is_owned: `.port/OWNED` committed on its port branch) is the mod author's own
-mod, not a port of somebody else's: `setup` takes no --permission and writes a page and config with no "unofficial
+AN OWNED REPOSITORY is the mod author's own mod, not a port of somebody else's. It says so in this same config, in
+place of the authors' permission link: `"own_mod": true` (tools/fork-kind.py is_owned reads it, committed). `setup`
+writes it by itself when GitHub says the repository is not a fork of another repository and no --permission is given
+(--own-mod says it explicitly; it is refused for a GitHub fork, and so is a committed own_mod on one when publishing).
+A GitHub fork always needs --permission. An owned repository's `setup` and writes a page and config with no "unofficial
 community port" wording, no original to credit and no derivative-work disclosure; `publish` needs no permission link
 and its notes say what the release is, not whose it is. Every other gate, the per-platform ledger checks, the jars and
 the uploads are the same as a fork's.
@@ -358,6 +361,11 @@ def gate(repo, cfg, tag, release, manual=False):
     why = []
     if not cfg.get("permission", "").startswith("https://") and not owned(repo):
         why.append("no permission link in the config -- publishing needs the authors' agreement on record")
+    if cfg.get("own_mod") is True and cfg.get("permission"):
+        why.append("the config says both own_mod and a permission link -- an own mod needs none: keep one")
+    if owned(repo) and github_fork_parent(repo):
+        why.append("the config says own_mod, but GitHub says this repository is a fork of another -- a port needs the "
+                   "authors' permission link")
     if not manual and not cfg.get("auto", False):
         why.append("auto is off in the config -- publish with the manual dispatch (publish = <tag>) instead")
     if release.get("draft"):
@@ -783,6 +791,21 @@ def dependencies_of(toml, modid, install):
     return deps
 
 
+def github_fork_parent(repo):
+    """owner/name of the repository this GitHub repository was forked from, "" when it is not a fork, or None when
+    GitHub cannot say (no origin, offline, refused): an unknown answer never makes a repository owned."""
+    slug = slug_of(repo)
+    if not slug:
+        return None
+    try:
+        info = gh("GET", f"/repos/{slug}")
+    except SystemExit:
+        return None
+    if not isinstance(info, dict) or "fork" not in info:
+        return None
+    return (info.get("parent") or {}).get("full_name", "?") if info["fork"] else ""
+
+
 def setup_ref(repo, branch):
     ref = f"origin/{branch}"
     return "HEAD" if git(repo, "rev-parse", "--verify", ref).returncode else ref
@@ -818,7 +841,7 @@ def setup_owned(repo, branch, out=None, ledgers=(), differences=()):
     desc = " ".join(str(mod.get("description", "")).split())
     summary = (desc if desc and len(desc) <= 250 else f"{name} for NeoForge {mc}.")
     slug = modid.replace("_", "-")
-    cfg = {"schema": 1, "auto": True, "modid": modid, "title": name[:64], "summary": summary,
+    cfg = {"schema": 1, "own_mod": True, "auto": True, "modid": modid, "title": name[:64], "summary": summary,
            "body_file": BODY, "icon": f"src/main/resources/{mod['logoFile']}" if mod.get("logoFile") else None,
            "license": toml.get("license", "MIT"), "categories": [], "additional_categories": [],
            "ledger_issues": list(ledgers), "differences": list(differences), "original_name": name,
@@ -1225,7 +1248,9 @@ def main():
     ap.add_argument("--self-check", action="store_true")
     sub = ap.add_subparsers(dest="cmd")
     s = sub.add_parser("setup"); s.add_argument("--repo", required=True)
-    s.add_argument("--permission", help="the https link where the authors agreed (not for an owned repository)")
+    s.add_argument("--permission", help="the https link where the authors agreed (a fork of somebody else's mod)")
+    s.add_argument("--own-mod", action="store_true", help="this is the author's own mod, not a port: no permission "
+                   "needed (the default when GitHub says the repository is not a fork and no --permission is given)")
     s.add_argument("--branch", default="neoforge-1.21.1")
     s.add_argument("--ledger-issue", action="append", default=[], help="owner/repo#n carrying a fix ledger; repeat "
                    "(gates publishing; never shown to players)")
@@ -1250,11 +1275,22 @@ def main():
             print(f"::error::{why}"); return 2
     if a.cmd == "setup":
         repo_ = pathlib.Path(a.repo).expanduser()
-        if owned(repo_, setup_ref(repo_, a.branch)):
-            if a.permission:
-                sys.exit("--permission: this is an owned repository (.port/OWNED), the author's own mod -- it needs none")
-            return setup_owned(a.repo, a.branch, a.out, a.ledger_issue, a.difference)
-        if not (a.permission or "").startswith("https://"):
+        if a.own_mod and a.permission:
+            sys.exit("--own-mod and --permission: choose one (your own mod needs no permission; a port needs the link)")
+        if not a.permission:
+            parent = github_fork_parent(repo_)
+            if parent:
+                sys.exit(f"this repository is a GitHub fork of {parent}: a port of somebody else's mod needs --permission, "
+                         "the https link where the authors agreed")
+            if parent == "":
+                print("setup: GitHub says this repository is not a fork: setting it up as the author's own mod "
+                      "(own_mod: true, no permission needed)")
+                return setup_owned(a.repo, a.branch, a.out, a.ledger_issue, a.difference)
+            if a.own_mod:
+                return setup_owned(a.repo, a.branch, a.out, a.ledger_issue, a.difference)
+            sys.exit("--permission must be the https link where the authors agreed (GitHub could not say whether this "
+                     "repository is a fork; for the author's own mod, pass --own-mod)")
+        if not a.permission.startswith("https://"):
             sys.exit("--permission must be the https link where the authors agreed")
         return setup(a.repo, a.permission, a.branch, a.out, a.ledger_issue, a.difference)
     if a.cmd == "modrinth-create":

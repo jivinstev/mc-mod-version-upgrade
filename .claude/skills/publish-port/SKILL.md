@@ -19,10 +19,13 @@ the platforms players install from. Tool: `tools/port-publish.py`. The upload it
 GitHub Actions (the `publish` job `tools/port-ci.py` generates): the platform tokens are repository secrets, never
 seen by a chat session, and CurseForge's upload host is not reachable from a cloud session anyway.
 
-**An owned repository** (`.port/OWNED` committed on the port branch: the maintainer is the mod's own author, not a
-porter of somebody else's mod; `tools/fork-kind.py detect` prints `owned=yes`) is published the same way, with three
-things left out: there is no authors' permission to ask for (Stop 1 does not apply; `setup` takes no `--permission` and
-refuses one), no original to credit or link, and no "unofficial community port" wording -- the page and the notes name
+**An owned repository** (the maintainer is the mod's own author, not a porter of somebody else's mod) records that in
+the same config a fork records its permission in: `"own_mod": true` in place of `"permission"` in
+`.github/port-publish.json` (`tools/fork-kind.py detect` prints `owned=yes`). Nobody sets it by hand: `setup` with no
+`--permission` asks GitHub, and a repository that is not a fork is set up as the author's own (`--own-mod` says so when
+GitHub cannot answer). A GitHub fork is always a port: `setup` asks it for `--permission`, refuses `--own-mod`, and
+`publish` refuses a committed `own_mod` on one, as it does a config naming both. It is published the same way, with
+three things left out: there is no authors' permission to ask for (Stop 1 does not apply), no original to credit or link, and no "unofficial community port" wording -- the page and the notes name
 the mod, its version and its issue tracker, the Modrinth slug and CurseForge name are the mod's own (no `-neoforge`, no
 "Community Port"), and the only disclosure setup writes is AI-generated text (ask about the others, AI-generated code
 included). The public-text check, the fix and known-issues ledgers, "a full Release built by this repository's CI",

@@ -5,7 +5,7 @@
   1. SINGLE-VERSION: a single-version publish (dry and real) prints exactly the bytes, and makes exactly the API calls,
      recorded in tools/golden/port-publish-single-version.txt: the guarantee that a fork publishes as it always did.
   2. PER PLATFORM: --platform and the known-issues ledger's blocks-publish, a version branch's ledger read from its head.
-  3. OWNED: a repository with `.port/OWNED` committed (the author's own mod) publishes with no permission link and no
+  3. OWNED: a repository whose publishing config says `"own_mod": true` (the author's own mod) publishes with no permission link and no
      "unofficial" wording, and `setup` writes its page without either; without the marker nothing changes.
 
     python3 tools/test-port-publish.py            # exit 0 = all pass
@@ -222,15 +222,18 @@ def git_repo(d, files, owned_marker):
     for path, text in files.items():
         f = d / path; f.parent.mkdir(parents=True, exist_ok=True); f.write_text(text, encoding="utf-8")
     if owned_marker:
-        (d / ".port").mkdir(exist_ok=True)
-        (d / ".port/OWNED").write_text("the maintainer's own mod\n", encoding="utf-8")
+        cfg_path = d / ".github/port-publish.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {"schema": 1}
+        cfg["own_mod"] = True
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
     g("add", "-A"); g("commit", "-qm", "x")
 
 
 def owned_repo():
     """An owned repository: publish needs no permission link and its notes carry no "unofficial" or permission line;
     setup takes no --permission and writes no community-port wording; the same repository without the marker refuses."""
-    def run(marker, permission):
+    def run(marker, permission, github=None):
         pp = load("ppowned")
         with tempfile.TemporaryDirectory() as t:
             d = pathlib.Path(t)
@@ -244,6 +247,9 @@ def owned_repo():
             rel = release(["m-2.jar"])
             pp_git = lambda repo, *a: R(0, "neoforge-1.21.8\n") if a[:2] == ("rev-parse", "--abbrev-ref") else R(0)
             calls, up = fakes(pp, rel, pp_git, mc_ids={"1.21.8": 14})
+            if github is not None:
+                inner = pp.gh
+                pp.gh = lambda method, path, *a, **k: github if path == "/repos/o/m" else inner(method, path, *a, **k)
             cfg_ = json.loads((d / ".github/port-publish.json").read_text(encoding="utf-8"))
             cfg_["modrinth"]["asset"] = cfg_["curseforge"]["asset"] = ""
             (d / ".github/port-publish.json").write_text(json.dumps(cfg_), encoding="utf-8")
@@ -259,55 +265,65 @@ def owned_repo():
            f"owned, no permission link: published to both, notes with no unofficial/permission wording: rc={rc} {texts} {out}")
     rc, out, up = run(False, None)
     expect(rc == 1 and up == [] and "no permission link in the config" in out,
-           f"the same repository without .port/OWNED and with no permission link: refused as before: rc={rc} {out}")
+           f"the same repository without own_mod and with no permission link: refused as before: rc={rc} {out}")
     rc, out, up = run(False, "https://example.invalid/agreed")
     texts = [u[1]["fields"]["data" if u[0] == "modrinth" else "metadata"]["changelog"] for u in up]
     expect(rc == 0 and texts and all("**Unofficial community port**" in x and "https://example.invalid/agreed" in x for x in texts),
            f"a fork with its permission link: the community-port notes, unchanged: rc={rc} {texts}")
+    rc, out, up = run(True, "https://example.invalid/agreed")
+    expect(rc == 1 and up == [] and "both own_mod and a permission link" in out,
+           f"own_mod and a permission link together: refused, nothing uploaded: rc={rc} {out}")
+    rc, out, up = run(True, None, github={"fork": True, "parent": {"full_name": "authors/mod"}})
+    expect(rc == 1 and up == [] and "GitHub says this repository is a fork" in out,
+           f"own_mod on a GitHub fork: refused, nothing uploaded: rc={rc} {out}")
 
-    # setup: an owned repository takes no --permission and writes no community-port wording
+    # setup: GitHub's own answer decides, with no manual flag -- not a fork: the author's own mod (own_mod: true, no
+    # permission, no community-port wording); a fork: --permission required; unknown: --own-mod or --permission
     toml = (
         'modLoader="javafml"\nloaderVersion="[4,)"\nlicense="MPL-2.0"\n[[mods]]\nmodId="examplemod"\n'
         'displayName="Example Mod"\nauthors="Example Co"\ndescription="Adds a few example blocks."\n'
         '[[dependencies.examplemod]]\nmodId="neoforge"\ntype="required"\n')
-    for marker in (True, False):
+    for github, argv, want_rc, want_owned in (
+            ({"fork": False}, [], 0, True),                                        # automatic: not a fork
+            ({"fork": False}, ["--own-mod"], 0, True),                             # explicit, same result
+            ({"fork": False}, ["--own-mod", "--permission", "https://example.invalid/agreed"], 1, False),
+            ({"fork": True, "parent": {"full_name": "authors/mod"}}, [], 1, False),          # a fork: needs permission
+            ({"fork": True, "parent": {"full_name": "authors/mod"}}, ["--own-mod"], 1, False),  # never own on a fork
+            (None, [], 1, False),                                                  # GitHub cannot say: refused
+            (None, ["--own-mod"], 0, True)):                                       # ... unless said explicitly
         pp = load("ppownsetup")
         with tempfile.TemporaryDirectory() as t:
             d = pathlib.Path(t)
             git_repo(d, {"src/main/resources/META-INF/neoforge.mods.toml": toml, "gradle.properties": "minecraft_version=1.21.8\n"},
-                     marker)
-            def http(method, url, *a, **k):
+                     False)
+            os.environ["GITHUB_REPOSITORY"] = "example/mod"
+            def http(method, url, *a, _g=github, **k):
+                if url.endswith("/repos/example/mod") and _g is not None:
+                    return _g
                 raise SystemExit(f"{method} {url} -> HTTP 404: offline in the test")
             pp.http = http
-            for argv, want_rc in (((["--permission", "https://example.invalid/agreed"], 1), ([], 0)) if marker else ()):
-                sys.argv = ["port-publish.py", "setup", "--repo", str(d), "--branch", "neoforge-1.21.8", *argv]
-                buf = io.StringIO()
-                try:
-                    with contextlib.redirect_stdout(buf):
-                        rc = pp.main()
-                except SystemExit as e:
-                    rc = 1 if e.code else 0
-                expect(rc == want_rc, f"owned setup {argv}: exit {rc}, want {want_rc}: {buf.getvalue()}")
-            if marker:
+            sys.argv = ["port-publish.py", "setup", "--repo", str(d), "--branch", "neoforge-1.21.8", *argv]
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    rc = pp.main()
+            except SystemExit as e:
+                rc = 1 if e.code else 0
+            expect(rc == want_rc, f"setup {github} {argv}: exit {rc}, want {want_rc}: {buf.getvalue()}")
+            made = d / ".github/port-publish.json"
+            expect(made.exists() == want_owned, f"setup {github} {argv}: config written={made.exists()}, want {want_owned}")
+            if want_owned:
                 body = (d / ".github/port-publish/description.md").read_text(encoding="utf-8")
-                cfg = json.loads((d / ".github/port-publish.json").read_text(encoding="utf-8"))
+                cfg = json.loads(made.read_text(encoding="utf-8"))
                 expect(body.startswith("# Example Mod\n") and "Adds a few example blocks." in body
                        and not any(w in body for w in ("nofficial", "Community Port", "permission", "original"))
                        and "Minecraft 1.21.8" in body and pp.public_text_problems(body) == [],
                        f"owned setup: the page names the mod, with no community-port wording: {body}")
-                expect("permission" not in cfg and cfg["title"] == "Example Mod" and cfg["modrinth"]["slug"] == "examplemod"
-                       and cfg["license"] == "MPL-2.0" and [x["type"] for x in cfg["disclosures"]] == ["ai_content"]
+                expect(cfg.get("own_mod") is True and "permission" not in cfg and cfg["title"] == "Example Mod"
+                       and cfg["modrinth"]["slug"] == "examplemod" and cfg["license"] == "MPL-2.0"
+                       and [x["type"] for x in cfg["disclosures"]] == ["ai_content"]
                        and cfg["summary"] == "Adds a few example blocks.",
-                       f"owned setup: no permission, no -neoforge slug, no derivative-work disclosure: {cfg}")
-            else:
-                sys.argv = ["port-publish.py", "setup", "--repo", str(d), "--branch", "neoforge-1.21.8"]
-                try:
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        pp.main()
-                    expect(False, "a fork's setup with no --permission exits")
-                except SystemExit as e:
-                    expect("--permission must be" in str(e.code) and not (d / ".github/port-publish.json").exists(),
-                           f"setup without .port/OWNED still needs the authors' permission link: {e.code}")
+                       f"owned setup: own_mod true, no permission, no derivative-work disclosure: {cfg}")
 
 
 def main():

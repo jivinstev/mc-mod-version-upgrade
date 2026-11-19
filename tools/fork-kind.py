@@ -16,8 +16,10 @@ added when branches still carry the removed `.multiversion/` layer (a `.multiver
 they are history, and ignored; and `owned=yes` added for an OWNED repository. Exit 0.
 
 OWNED, on either kind: a repository whose maintainer is the mod's own author -- not a port of somebody else's mod --
-commits `.port/OWNED` (a line saying whose mod it is) on its port branch. is_owned() reads it from git at HEAD (an
-untracked file never counts), and the version branches carry it up with every cascade. An owned repository is built,
+says so in the same record a fork keeps its authors' permission in, its publishing config `.github/port-publish.json`:
+`"own_mod": true` in place of the `"permission"` link (`port-publish.py setup --own-mod` writes it). is_owned() reads
+the config from git at the ref (an uncommitted edit never counts), and the version branches carry it up with every
+cascade. An owned repository is built,
 gated, released and published exactly like a fork, except: publish-port needs no authors' permission link and puts no
 "unofficial community port" wording on its page or notes (port-publish.py), and keep-current takes the repository's
 own default branch as its upstream when none is named (weekly-plan.py): there are no outside authors to sync from.
@@ -32,7 +34,7 @@ files (shipped-jar.txt, shipped-expect*.txt, which the layer era kept there) com
 kind of fork -- so a gate would otherwise run without them, silently. A migrated fork (version branches exist) checked out on its legacy layer branch is refused too, exit 2, but told to check
 out its head branch instead (LEGACY_CHECKOUT): it needs no migration. Standard library only.
 """
-import argparse, pathlib, re, subprocess, sys, tempfile
+import argparse, json, pathlib, re, subprocess, sys, tempfile
 
 LAST_LAYER_COMMIT = "baa092b62eae1832d354065edadf9e289bf95ca4"
 LAYER_REMOVED = (
@@ -79,13 +81,21 @@ LEGACY_CHECKOUT = ("{tool}: {repo} is a version-branch fork checked out on a leg
                    "its head branch ({head})")
 
 
-OWNED_FILE = ".port/OWNED"
+PUBLISH_CONFIG = ".github/port-publish.json"
 
 
 def is_owned(repo, ref="HEAD"):
-    """Is this repository the mod author's own (OWNED_FILE committed at ref), rather than a port of somebody else's mod?
-    Read from git, never the working tree: an untracked or ignored file says nothing."""
-    return git(repo, "cat-file", "-e", f"{ref}:{OWNED_FILE}").returncode == 0
+    """Is this repository the mod author's own -- its publishing config (PUBLISH_CONFIG) committed at ref says
+    `"own_mod": true` -- rather than a port of somebody else's mod? Read from git, never the working tree: an
+    uncommitted edit says nothing. No config, an unreadable one, or anything but the JSON value true: not owned."""
+    r = git(repo, "show", f"{ref}:{PUBLISH_CONFIG}")
+    if r.returncode != 0:
+        return False
+    try:
+        cfg = json.loads(r.stdout)
+    except ValueError:
+        return False
+    return isinstance(cfg, dict) and cfg.get("own_mod") is True
 
 
 def head_of(repo, vb):
@@ -184,17 +194,23 @@ def self_check():
         g("init", "-q", "-b", "neoforge-1.21.1"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
         w("gradle.properties", "minecraft_version=1.21.1\n"); g("add", "-A"); g("commit", "-qm", "port")
         expect(detect(r) == ("single-version", [], []), f"one port branch: single-version: {detect(r)}")
-        expect(not is_owned(r), "a fork with no .port/OWNED is not owned")
-        w(".port/OWNED", "the maintainer's own mod\n")
-        expect(not is_owned(r), "an untracked .port/OWNED does not make it owned")
-        g("add", ".port/OWNED"); g("commit", "-qm", "owned")
+        expect(not is_owned(r), "a fork with no publishing config is not owned")
+        w(".github/port-publish.json", '{"schema": 1, "permission": "https://example.invalid/agreed"}\n')
+        g("add", ".github/port-publish.json"); g("commit", "-qm", "a fork's config")
+        expect(not is_owned(r), "a config with the authors' permission link is a fork, not owned")
+        w(".github/port-publish.json", '{"schema": 1, "own_mod": "yes"}\n')
+        g("add", ".github/port-publish.json"); g("commit", "-qm", "not the JSON value true")
+        expect(not is_owned(r), "own_mod must be the JSON value true, not a string")
+        w(".github/port-publish.json", '{"schema": 1, "own_mod": true}\n')
+        expect(not is_owned(r), "an uncommitted own_mod does not make it owned")
+        g("add", ".github/port-publish.json"); g("commit", "-qm", "owned")
         buf = __import__("io").StringIO()
         with __import__("contextlib").redirect_stdout(buf):
             rc = cmd_detect(argparse.Namespace(repo=str(r)))
         expect(is_owned(r) and rc == 0 and buf.getvalue() == "kind=single-version owned=yes\n"
                and detect(r) == ("single-version", [], []),
-               f"a committed .port/OWNED: owned, on the same single-version route: {rc} {buf.getvalue()!r}")
-        g("rm", "-q", ".port/OWNED"); g("commit", "-qm", "a fork again")
+               f"a committed own_mod: owned, on the same single-version route: {rc} {buf.getvalue()!r}")
+        g("rm", "-q", ".github/port-publish.json"); g("commit", "-qm", "a fork again")
         buf = __import__("io").StringIO()
         with __import__("contextlib").redirect_stdout(buf):
             cmd_detect(argparse.Namespace(repo=str(r)))
