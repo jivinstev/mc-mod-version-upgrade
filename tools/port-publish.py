@@ -157,8 +157,25 @@ def slug_of(repo):
     return os.environ.get("GITHUB_REPOSITORY") or (m.group(1) if m else None)
 
 
+def expand_properties(text, props):
+    """A mods.toml the build fills in (Gradle's processResources `expand`, as the MDK's own template does): each
+    ${key} from gradle.properties, and a key it does not name as nothing -- a build-only value (an optional block a
+    build property adds) is never in the metadata a page is made from."""
+    return re.sub(r"\$\{([A-Za-z0-9_.]+)\}", lambda m: props.get(m.group(1), ""), text)
+
+
+def gradle_props(repo, ref="HEAD"):
+    out = {}
+    for line in git(repo, "show", f"{ref}:gradle.properties").stdout.splitlines():
+        k, sep, v = line.partition("=")
+        if sep and not k.lstrip().startswith(("#", "!")):
+            out[k.strip()] = v.strip()
+    return out
+
+
 def mods_toml(repo, ref="HEAD"):
-    for p in ("src/main/resources/META-INF/neoforge.mods.toml", "src/main/resources/META-INF/mods.toml"):
+    for p in ("src/main/resources/META-INF/neoforge.mods.toml", "src/main/resources/META-INF/mods.toml",
+              "src/main/templates/META-INF/neoforge.mods.toml", "src/main/templates/META-INF/mods.toml"):
         r = git(repo, "show", f"{ref}:{p}")
         if r.returncode == 0:
             try:
@@ -166,7 +183,10 @@ def mods_toml(repo, ref="HEAD"):
             except ImportError:                 # Python < 3.11 (setup runs on the user's machine; CI never reads TOML)
                 sys.path.insert(0, str(ROOT))
                 import minitoml as tomllib
-            return tomllib.loads(r.stdout)
+            text = r.stdout
+            if "${" in text:
+                text = expand_properties(text, gradle_props(repo, ref))
+            return tomllib.loads(text)
     raise SystemExit("no neoforge.mods.toml in the port branch")
 
 

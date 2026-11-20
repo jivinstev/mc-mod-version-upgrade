@@ -413,6 +413,20 @@ def dep_jar_variants(variants, dep_specs, sha_of=None):
 VERSION_RECORDS_IGNORE = (".port/*.md", ".port/*/*.md")
 
 
+def kind_values(values, owned=False):
+    """The words that differ between a port and an OWNED repository (the mod author's own mod: `"own_mod": true` in
+    .github/port-publish.json, fork-kind.py is_owned). A port's are unchanged byte for byte; an owned repository's
+    pre-release says what it is, with no "unofficial port", no original and no author to disclaim."""
+    t = values["TARGET"]
+    if owned:
+        intro = (f'            echo "**{values["MODID"]}** for {t}, built by this repository\'s own CI."\n'
+                 '            echo "Same licence and credits as the source in this repository."\n')
+        return dict(values, KIND_NOUN="mod", NOTES_INTRO=intro, TITLE_KIND=t)
+    intro = (f'            echo "**Unofficial port** of {values["UPSTREAM"]} to {t}."\n'
+             '            echo "Same licence and credits as the original; not an official release by the author."\n')
+    return dict(values, KIND_NOUN="unofficial port", NOTES_INTRO=intro, TITLE_KIND=f"unofficial {t} port")
+
+
 def records_values(values, version_branch=False):
     """RECORDS_IGNORE: the extra paths-ignore entries of a version branch's push trigger (VERSION_RECORDS_IGNORE);
     empty, so nothing moves, on a single-version fork's port branch."""
@@ -788,7 +802,7 @@ GOLDEN_CASES = (("single-nodeps", False), ("single-deps", True))
 FIX_DEP = "o/lib@lib-1.0-mc1.21.1/lib-1.0_mr.jar=com.example.lib:lib:1.0"
 
 
-def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False):
+def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False, owned=False):
     """The workflow for fixed, invented values (no network: every sha256 is fake). The two option-free cases are
     recorded in tools/golden/port-ci-<case>.yml, captured from port-ci.py BEFORE --variant-jar/--dep-jar-variant
     existed: an option a fork does not use must not change one byte of its workflow."""
@@ -800,7 +814,7 @@ def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False):
               "KIT_SHA256": "b" * 64, "GATEC": "launch,spawn", "TAG_SUFFIX": "", "PRE_BUILD": pre,
               "UPSTREAM": "https://github.com/a/examplemod"}
     values = variant_values(values, list(variant_jars), list(dep_variants), [FIX_DEP] if deps else [], sha)
-    values = records_values(values, version_branch)
+    values = records_values(kind_values(values, owned), version_branch)
     return render(TEMPLATE.read_text(encoding="utf-8"), values)
 
 
@@ -1092,12 +1106,22 @@ def variant_check():
     sfx = render(TEMPLATE.read_text(encoding="utf-8"), variant_values(dict(
         {k: "x" for k in re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", TEMPLATE.read_text(encoding="utf-8"))},
         MC="1.21.1", TAG_SUFFIX="-release", MODID="m", GATEC="launch", KIT_VERSION="3", KIT_SHA256="d" * 64,
-        UPSTREAM="the original", PRE_BUILD="", BRANCH="neoforge-1.21.1")))
+        UPSTREAM="the original", PRE_BUILD="", BRANCH="neoforge-1.21.1", KIND_NOUN="unofficial port",
+        TITLE_KIND="unofficial x port", NOTES_INTRO='            echo "**Unofficial port** of the original to x."\n')))
     ok &= recover_args(sfx) == ["--modid", "m", "--gatec", "launch", "--tag-suffix=-release", "--kit-version", "3", "--kit-sha", "d" * 64]
     try:
         recover_args("name: something else\n"); ok = False
     except SystemExit:
         pass
+    # an OWNED repository (own_mod): the same workflow with the port's words left out -- no "unofficial", no original
+    own, port = fixture(False, owned=True), fixture(False)
+    ok &= "nofficial" not in own and "the original" not in own and "**examplemod** for NeoForge" in own
+    ok &= "Pre-release until played by a person." in own          # promote still finds its mark
+    ok &= [l for l in own.splitlines() if "nofficial" not in l and "original" not in l and "examplemod** for" not in l
+           and "own CI" not in l and "credits as the source" not in l and "--title" not in l and "proves this mod" not in l] == \
+          [l for l in port.splitlines() if "nofficial" not in l and "original" not in l and "--title" not in l]
+    ok &= recover_args(own) == ["--modid", "examplemod", "--gatec", "launch,spawn", "--kit-version", "7",
+                                "--kit-sha", "b" * 64]
     return ok and shipped_script_check() and manifest_script_check() and release_script_check()
 
 
@@ -1896,7 +1920,8 @@ def main():
               "BASE": base, "JAVA": java_version(repo, mc), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
               "GATEC": a.gatec, "TAG_SUFFIX": a.tag_suffix, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}
     values = variant_values(values, a.variant_jar, a.dep_jar_variant, a.dep_jar)
-    values = records_values(values, is_version_branch(repo, mc))
+    values = records_values(kind_values(values, _load_tool("fork_kind", "fork-kind.py").is_owned(repo)),
+                            is_version_branch(repo, mc))
     out = render(TEMPLATE.read_text(encoding="utf-8"), values)
     if a.print:
         print(out); return 0

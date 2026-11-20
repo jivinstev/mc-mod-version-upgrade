@@ -73,8 +73,12 @@ def undeclared_mixin_configs(repo):
     """Mixin configs no neoforge.mods.toml [[mixins]] entry names -- each one silently never loads."""
     import re as _re
     declared = set()
+    # a toml the build fills in from gradle.properties (processResources expand: config="${mod_id}.mixins.json")
+    gp = pathlib.Path(repo) / "gradle.properties"
+    props = dict(_re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(.*?)\s*$", gp.read_text(encoding="utf-8"))) if gp.is_file() else {}
     for t in pathlib.Path(repo).glob("src/*/resources/META-INF/neoforge.mods.toml"):
-        declared |= set(_re.findall(r'(?m)^\s*config\s*=\s*"([^"]+)"', t.read_text(encoding="utf-8")))
+        text = _re.sub(r"\$\{([\w.]+)\}", lambda m: props.get(m.group(1), m.group(0)), t.read_text(encoding="utf-8"))
+        declared |= set(_re.findall(r'(?m)^\s*config\s*=\s*"([^"]+)"', text))
     # a build may ship a variant jar whose MANIFEST names its own config (a dev build's extra mixins, measured):
     # `'MixinConfigs': 'a.json,b.json'` in build.gradle is a declaration too
     g = pathlib.Path(repo) / "build.gradle"
@@ -112,6 +116,13 @@ def self_check():
         (r / "src/main/resources/META-INF/neoforge.mods.toml").write_text('modId="foo"\n', encoding="utf-8")
         ok = undeclared_mixin_configs(r) == ["mixins.foo.json"]
         (r / "src/main/resources/META-INF/neoforge.mods.toml").write_text('[[mixins]]\nconfig = "mixins.foo.json"\n', encoding="utf-8")
+        ok &= undeclared_mixin_configs(r) == []
+        # the same declaration through the build's expand: config = "${mod_id}.mixins.json", mod_id in gradle.properties
+        (r / "src/main/resources/foo.mixins.json").write_text('{"package": "a.b", "mixins": ["Y"]}', encoding="utf-8")
+        (r / "src/main/resources/META-INF/neoforge.mods.toml").write_text(
+            '[[mixins]]\nconfig = "mixins.foo.json"\n[[mixins]]\nconfig = "${mod_id}.mixins.json"\n', encoding="utf-8")
+        ok &= undeclared_mixin_configs(r) == ["foo.mixins.json"]          # no mod_id property: not declared
+        (r / "gradle.properties").write_text("minecraft_version=26.2\nneo_version=26.2.0.75\nmod_id=foo\n", encoding="utf-8")
         ok &= undeclared_mixin_configs(r) == []
         (r / "src/main/resources/mixins.dev.json").write_text('{"package": "a.b", "mixins": ["D"]}', encoding="utf-8")
         ok &= undeclared_mixin_configs(r) == ["mixins.dev.json"]
