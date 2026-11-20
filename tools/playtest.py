@@ -4,6 +4,7 @@ Minecraft version, grade every step, and write a report with key frames (and, op
 
     python3 tools/playtest.py run SCRIPT.playtest [--plan PLAN] [--mc 1.21.1 ...] [--video] [--report DIR]
                                                   [--carrier-jar [MC=]JAR | --carrier-dir DIR] [--timeout 900]
+                                                  [--prop K=V ...]
     python3 tools/playtest.py lint SCRIPT.playtest [--jar JAR ...]   # syntax and directives; with --jar, every
                                                               # <ns>:<id> the script names must exist in the jars
     python3 tools/playtest.py inventory --jar JAR [--jar JAR ...] [--json]   # what the mod registers: entities,
@@ -23,7 +24,8 @@ Minecraft commands, one per line, plus @intent @step @assert @wait @aim @key @cl
 @continue-on-fail @end.
 Output per version: <report>/<mc>/ with stdout/stderr/latest.log, playtest-result.json and the frames; then
 <report>/report.md and report.html (frames embedded by relative path) for the run. Standard library only; macOS
-recordings use the system's `screencapture`.
+recordings are of the game window (tools/window-record.swift, compiled once with swiftc; works behind a locked
+screen), else the system's `screencapture`.
 """
 import argparse, datetime, html, importlib.util, json, os, pathlib, re, shutil, signal, subprocess, sys, time
 
@@ -187,19 +189,51 @@ def forbidden(parsed, ids):
 
 
 # ── one version ──────────────────────────────────────────────────────────────────────────────────────────────────
+WINDOW_RECORD_SRC = ROOT / "tools" / "window-record.swift"
+
+
+def window_recorder(plat):
+    """The game-window recorder (tools/window-record.swift, ScreenCaptureKit), compiled once with swiftc and cached
+    by the source's hash under ~/.mmvu/bin. None off macOS, without swiftc, or when it does not compile: the run then
+    falls back to `screencapture`. Why it comes first: `screencapture -v` records the DISPLAY, so a locked or asleep
+    screen records the lock screen (measured: an all-black file behind a locked Mac), while a one-window stream
+    gets the game's own pixels behind the lock as long as the display stays awake."""
+    if plat.os_name != "osx" or not WINDOW_RECORD_SRC.is_file() or not shutil.which("swiftc"):
+        return None
+    import hashlib
+    tag = hashlib.sha256(WINDOW_RECORD_SRC.read_bytes()).hexdigest()[:12]
+    exe = pathlib.Path(os.environ.get("MMVU_HOME", pathlib.Path.home() / ".mmvu")) / "bin" / f"window-record-{tag}"
+    if not exe.is_file():
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(["swiftc", "-O", "-swift-version", "5", "-o", str(exe), str(WINDOW_RECORD_SRC)],
+                           capture_output=True, text=True, encoding="utf-8")
+        if r.returncode != 0 or not exe.is_file():
+            print(f"--video: tools/window-record.swift did not compile, using screencapture: "
+                  f"{(r.stderr or '').strip().splitlines()[-1:] }", file=sys.stderr)
+            return None
+    return exe
+
+
+WINDOW_RC = {3: "the game's window never appeared", 4: "macOS refused the capture (Screen Recording permission)",
+             5: "no frame arrived (the display asleep?)"}
+
+
 class Recorder:
-    """The screen while the game runs, with the system's own tool (macOS `screencapture -v`, stopped with SIGINT so
-    the file is finalised). Anywhere else, or when macOS refuses (Screen Recording not granted), it says so and the
-    run goes on with the key frames alone."""
-    def __init__(self, path, plat):
-        self.path, self.proc, self.note = pathlib.Path(path), None, None
-        if plat.os_name != "osx" or not shutil.which("screencapture"):
-            self.note = "no recording: only macOS's screencapture is supported (key frames are still taken)"
+    """The game while it runs. First choice: the game WINDOW alone (window_recorder: works behind a locked screen,
+    and the recording holds nothing but the game). Fallback: the whole screen with macOS's `screencapture -v`. Both
+    are stopped with SIGINT so the file is finalised. Anywhere else, or when macOS refuses (Screen Recording not
+    granted), it says so and the run goes on with the key frames alone."""
+    def __init__(self, path, plat, wait=900, window=None):
+        self.path, self.proc, self.note, self.wait, self.window = pathlib.Path(path), None, None, wait, window
+        self.kind = "window" if window else "screen"
+        if not window and (plat.os_name != "osx" or not shutil.which("screencapture")):
+            self.note = "no recording: only macOS is supported (key frames are still taken)"
 
     def __enter__(self):
         if self.note is None:
-            self.proc = subprocess.Popen(["screencapture", "-v", "-C", str(self.path)],
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            argv = ([str(self.window), "--out", str(self.path), "--wait", str(int(self.wait))] if self.window
+                    else ["screencapture", "-v", "-C", str(self.path)])
+            self.proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         return self
 
     def __exit__(self, *exc):
@@ -213,7 +247,11 @@ class Recorder:
                 self.proc.kill()
         err = (self.proc.stderr.read() or b"").decode("utf-8", "replace") if self.proc.stderr else ""
         if not self.path.is_file() or self.path.stat().st_size == 0:
-            self.note = ("no recording: " + video_help(responsible_app()) + (f" ({err.strip()[:160]})" if err.strip() else ""))
+            why = WINDOW_RC.get(self.proc.returncode) if self.window else None
+            if why and self.proc.returncode != 4:
+                self.note = f"no recording: {why} ({err.strip()[-160:]})"
+            else:
+                self.note = ("no recording: " + video_help(responsible_app()) + (f" ({err.strip()[-160:]})" if err.strip() else ""))
         return False
 
 
@@ -236,9 +274,12 @@ def responsible_app():
     return app
 
 
-def recording_allowed(scratch):
-    """Can this process capture the screen? One silent still (screencapture -x): without the permission it fails at
-    once with "could not create image from display" -- the same refusal a recording gets, measured."""
+def recording_allowed(scratch, window=None):
+    """Can this process capture the screen? With the window recorder: its --list (exit 4 when refused). Otherwise one
+    silent still (screencapture -x): without the permission it fails at once with "could not create image from
+    display" -- the same refusal a recording gets, measured."""
+    if window:
+        return subprocess.run([str(window), "--list"], capture_output=True).returncode == 0
     shot = pathlib.Path(scratch) / ".playtest-preflight.png"
     r = subprocess.run(["screencapture", "-x", str(shot)], capture_output=True, text=True, encoding="utf-8")
     ok = r.returncode == 0 and shot.is_file() and shot.stat().st_size > 0
@@ -275,13 +316,19 @@ def run_version(R, plan, v, script, out, a, plat, log):
     props = {"smokeharness.boottest": "true", "smokeharness.testmode": "playtest",
              "smokeharness.playtest": str(pathlib.Path(script).resolve()), "smokeharness.playtest.out": str(frames),
              "smokeharness.namespaces": ",".join(v.get("modids_under_test") or [])}
+    for kv in getattr(a, "prop", None) or []:        # --prop K=V: the mod's own switches (its home folder, a flag)
+        k, _, val = kv.partition("=")
+        if k.startswith("smokeharness."):
+            res["detail"] = f"--prop {k}: the carrier's own properties are set by this tool"
+            return res
+        props[k] = val
     argv, missing = R.build_launch(mcdir, vid, inst, plat, java, props, a.xmx)
     if missing:
         res["detail"] = f"{len(missing)} missing file(s), e.g. {missing[0]} (real-install.py install)"
         return res
     done = lambda t: bool(VERDICT_LINE.search(t)) or bool(R.FATAL_LOG.search(t))
     log(f"Minecraft {v['mc']} [{vid}]: playtest {pathlib.Path(script).name} (timeout {a.timeout}s)", flush=True)
-    rec = Recorder(out / f"playtest-{v['mc']}.mov", plat) if a.video else None
+    rec = Recorder(out / f"playtest-{v['mc']}.mov", plat, wait=a.timeout, window=getattr(a, "window_rec", None)) if a.video else None
     if rec:
         with rec:
             text, err, crash, secs, rc = R.run_once(argv, inst, out, a.timeout, done, plat)
@@ -443,9 +490,10 @@ def cmd_run(a):
     pf, plan = load_plan(a)
     rep = pathlib.Path(a.report) if a.report else pf.parent / "playtests" / f"{script.stem}-{datetime.datetime.now():%Y%m%d-%H%M%S}"
     rep = rep.resolve()          # the game runs in the instance folder: a relative out dir would land there
+    a.window_rec = window_recorder(plat) if a.video else None
     if a.video and plat.os_name == "osx":
         rep.mkdir(parents=True, exist_ok=True)
-        if not recording_allowed(rep):
+        if not recording_allowed(rep, a.window_rec):
             print(video_help(responsible_app()), file=sys.stderr)
             a.video = False
     results = []
@@ -587,6 +635,8 @@ def main(argv=None):
     r.add_argument("--plan", help="real-install.py's plan.json (default: the only one under ~/.mmvu/real-install)")
     r.add_argument("--mc", action="append", help="only these Minecraft versions (repeat)")
     r.add_argument("--video", action="store_true", help="record the screen while each version runs (macOS)")
+    r.add_argument("--prop", action="append", metavar="K=V", help="an extra -D system property for the game (repeat), "
+                   "e.g. the mod's own home folder so a run never touches the player's")
     r.add_argument("--report", help="the report folder (default: next to the plan, under playtests/)")
     r.add_argument("--carrier-jar", action="append", metavar="[MC=]JAR", help="use this carrier jar (a CI build)")
     r.add_argument("--carrier-dir", help="a folder of gatec-carrier-<mc>.jar (e.g. a downloaded CI artifact)")

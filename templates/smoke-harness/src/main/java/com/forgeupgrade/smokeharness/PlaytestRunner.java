@@ -310,7 +310,13 @@ final class PlaytestRunner {
                     }
                 }
                 if (a.length == 2 && a[0].equals("button")) return new ClickOp(no, text, -1, unquote(a[1]));
-                throw new ScriptError(no, "@click slot <N> | @click button \"<text>\"");
+                if (a.length == 2 && a[0].equals("item")) return new ClickOp(no, text, -2, unquote(a[1]));
+                throw new ScriptError(no, "@click slot <N> | @click button \"<text>\" | @click item \"<name>\"");
+            }
+            case "@type": {
+                String t = unquote(arg.trim());
+                if (t.isEmpty()) throw new ScriptError(no, "@type \"<text>\"");
+                return new TypeOp(no, text, t);
             }
             case "@expect":
                 return ExpectOp.parse(no, text, arg);
@@ -324,7 +330,7 @@ final class PlaytestRunner {
                 return new GotoOp(no, text, m.group(1), m.group(2) == null ? "minecraft:overworld" : m.group(2));
             }
             default:
-                throw new ScriptError(no, "unknown directive " + dir + " (known: @intent @step @assert @wait @aim @key @click "
+                throw new ScriptError(no, "unknown directive " + dir + " (known: @intent @step @assert @wait @aim @key @click @type "
                     + "@expect @shot @goto @repeat @allow @world @continue-on-fail @end)");
         }
     }
@@ -655,6 +661,29 @@ final class PlaytestRunner {
         @Override Res start(PlaytestRunner r, Minecraft mc) throws Exception {
             Screen screen = mc.screen;
             if (screen == null) return fail("no screen is open");
+            if (slot == -2) {
+                // @click item "<name>": the open menu's slot whose item's name contains the text (the container's own
+                // slots first, the player's inventory after), so a page whose size moves its tiles needs no slot math.
+                var menu = mc.player.containerMenu;
+                int found = -1;
+                List<String> names = new ArrayList<>();
+                for (int i = 0; i < menu.slots.size(); i++) {
+                    var st = menu.slots.get(i).getItem();
+                    if (st.isEmpty()) continue;
+                    String nm = st.getHoverName().getString();
+                    if (names.size() < 60) names.add("\"" + nm + "\"");
+                    if (found < 0 && nm.toLowerCase(Locale.ROOT).contains(button.toLowerCase(Locale.ROOT))) found = i;
+                }
+                if (found < 0) return fail("no slot whose item name contains \"" + button + "\" in " + screen.getClass().getSimpleName() + " (items: " + names + ")");
+                Method m = R.method(mc.gameMode.getClass(), "handleInventoryMouseClick", 5);
+                if (m == null) m = R.method(mc.gameMode.getClass(), "handleContainerInput", 5);
+                if (m == null) return fail("no MultiPlayerGameMode slot-click method on this version");
+                Class<?> ct = m.getParameterTypes()[3];
+                Object pickup = ct.isEnum() ? enumValue(ct, "PICKUP") : null;
+                String nm = menu.slots.get(found).getItem().getHoverName().getString();
+                m.invoke(mc.gameMode, menu.containerId, found, 0, pickup, mc.player);
+                return pass("clicked slot " + found + " (\"" + nm + "\") of " + screen.getClass().getSimpleName());
+            }
             if (button == null) {
                 var menu = mc.player.containerMenu;
                 if (slot < 0 || slot >= menu.slots.size()) return fail("slot " + slot + " out of range: the open menu has " + menu.slots.size() + " slots");
@@ -679,6 +708,45 @@ final class PlaytestRunner {
             double x = hit.getX() + hit.getWidth() / 2.0, y = hit.getY() + hit.getHeight() / 2.0;
             String how = Input.clickScreen(screen, x, y);
             return pass("clicked \"" + hit.getMessage().getString() + "\" at " + (int) x + "," + (int) y + " (" + how + ")");
+        }
+
+        @Override Res tick(PlaytestRunner r, Minecraft mc) { return pass(""); }
+    }
+
+    /** @type "<text>": the open screen's text box gets the text, as if typed: the focused box, else the first one on
+     *  the screen (an EditBox or a MultiLineEditBox: any widget with getValue()/setValue(String)), which is then
+     *  focused. Its responders run as they do for typing. Reflection keeps it the same on every version. */
+    static final class TypeOp extends Op {
+        final String typed;
+        TypeOp(int no, String text, String typed) { super(no, text); this.typed = typed; }
+
+        static boolean isBox(Object o) {
+            return o instanceof AbstractWidget && R.method(o.getClass(), "setValue", 1) != null
+                && R.method(o.getClass(), "getValue", 0) != null;
+        }
+
+        @Override Res start(PlaytestRunner r, Minecraft mc) throws Exception {
+            Screen screen = mc.screen;
+            if (screen == null) return fail("no screen is open");
+            Object box = isBox(screen.getFocused()) ? screen.getFocused() : null;
+            List<String> seen = new ArrayList<>();
+            // a dialog puts its box inside a layout container: walk nested children (bounded) to find it
+            java.util.ArrayDeque<GuiEventListener> todo = new java.util.ArrayDeque<>(screen.children());
+            for (int guard = 0; box == null && !todo.isEmpty() && guard < 500; guard++) {
+                GuiEventListener l = todo.poll();
+                seen.add(l.getClass().getSimpleName());
+                if (isBox(l) && ((AbstractWidget) l).visible && ((AbstractWidget) l).active) box = l;
+                else if (l instanceof net.minecraft.client.gui.components.events.ContainerEventHandler c) todo.addAll(c.children());
+            }
+            if (box == null) return fail("no text box on " + screen.getClass().getSimpleName() + " (widgets: " + seen + ")");
+            if (screen.children().contains(box)) screen.setFocused((GuiEventListener) box);
+            else ((AbstractWidget) box).setFocused(true);
+            Method get = R.method(box.getClass(), "getValue", 0), set = R.method(box.getClass(), "setValue", 1);
+            String before = String.valueOf(get.invoke(box));
+            set.invoke(box, before + typed);
+            String after = String.valueOf(get.invoke(box));
+            if (!after.endsWith(typed)) return fail("typed into " + box.getClass().getSimpleName() + " but it holds \"" + after + "\" (a length limit?)");
+            return pass("typed \"" + typed + "\" into " + box.getClass().getSimpleName() + " on " + screen.getClass().getSimpleName());
         }
 
         @Override Res tick(PlaytestRunner r, Minecraft mc) { return pass(""); }

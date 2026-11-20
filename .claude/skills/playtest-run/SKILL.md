@@ -15,10 +15,12 @@ made (test-installs). It never touches the player's own mods folder or profiles,
   later; a CI-built carrier can be used before then with `--carrier-dir DIR` (a downloaded `gatec-carrier` artifact)
   or `--carrier-jar [MC=]JAR`. Either one replaces the carrier in the instance.
 - **The screen (macOS):** the game opens a real window.
-  - The user's session must be the one on the console, and the screen unlocked. The runner keeps the display awake,
-    but it cannot unlock it.
+  - The user's session must be the one on the console. A locked screen is fine for the window recording and the
+    key frames, as long as the display stays awake (the runner keeps it awake).
   - Ask the user before a run that needs them away from the machine.
-  - `--video` records with macOS's `screencapture`. macOS grants Screen Recording to the app the tool runs inside
+  - `--video` records the game window with `tools/window-record.swift` (ScreenCaptureKit, compiled once with
+    `swiftc`), which works behind a locked screen; without `swiftc` it falls back to `screencapture` (whole display,
+    so a locked screen records the lock). macOS grants Screen Recording to the app the tool runs inside
     (Terminal, iTerm, the Claude desktop app, an IDE), never to `python3`, and refuses a command run inside it
     silently: no prompt appears. The runner checks first with one silent still. If it is refused, the runner prints
     which app to allow and carries on with key frames only. Tell the user, in these words:

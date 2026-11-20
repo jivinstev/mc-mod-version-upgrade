@@ -228,10 +228,14 @@ There are four skills, each driving `tools/playtest.py`:
 - **playtest-debug** reads one failed run (`playtest.py explain`) against the script's intent and says whose failure
   it is: the script's, the carrier's or the mod's. It gives the fix or the finding.
 
-On macOS the game window needs the user's session on the console with the screen unlocked.
+On macOS the game window needs the user's session on the console. A locked screen is fine as long as the display stays
+awake (the runner keeps it awake); another user holding the console is not.
 
 **Recording video on macOS.** The key frames need no permission; the carrier takes them inside the game. A screen
-recording (`--video`) does. macOS grants Screen Recording to the **app** you run the tool from (Terminal, iTerm,
+recording (`--video`) does. It records the game **window** alone, with `tools/window-record.swift` (ScreenCaptureKit,
+compiled once with `swiftc` and cached under `~/.mmvu/bin`), so it works behind a locked screen and holds nothing but
+the game. Without `swiftc` it falls back to `screencapture -v`, which records the whole display (and so records the
+lock screen when the Mac is locked). macOS grants Screen Recording to the **app** you run the tool from (Terminal, iTerm,
 the Claude desktop app, your IDE), never to `python3`. A command run inside that app gets no prompt of its own: it is
 refused silently. Once per app:
 
