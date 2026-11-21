@@ -17,7 +17,7 @@ The grammar (one line at a time; blank lines and '# comments' are ignored):
                                    key by its name (key.keyboard.escape, key.mouse.left); default hold 2t
     @click slot <N> | @click button "<text>" | @click item "<name>"   (item: the open menu's slot whose item's name
                                    contains the text, case-insensitive: no slot numbers when a page's size moves its tiles)
-    @type "<text>"                 the open screen's text box (the focused one, else the first) gets the text
+    @type "<text>"                 the open screen's text box (the focused one, else the first) is set to the text
     @expect <kind> [<match>] [gone] [within <duration>]   kinds: sound subtitle chat title actionbar bossbar screen error;
                                    match = case-insensitive substring of the text or of a translation key, or /regex/
     @shot <name>                   a screenshot <out>/<NN>-<name>.png

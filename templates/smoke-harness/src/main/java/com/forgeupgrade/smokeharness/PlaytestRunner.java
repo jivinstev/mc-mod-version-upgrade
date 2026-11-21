@@ -718,7 +718,7 @@ final class PlaytestRunner {
         @Override Res tick(PlaytestRunner r, Minecraft mc) { return pass(""); }
     }
 
-    /** @type "<text>": the open screen's text box gets the text, as if typed: the focused box, else the first one on
+    /** @type "<text>": the open screen's text box is set to the text (what was there is replaced), as if typed: the focused box, else the first one on
      *  the screen (an EditBox or a MultiLineEditBox: any widget with getValue()/setValue(String)), which is then
      *  focused. Its responders run as they do for typing. Reflection keeps it the same on every version. */
     static final class TypeOp extends Op {
@@ -726,8 +726,10 @@ final class PlaytestRunner {
         TypeOp(int no, String text, String typed) { super(no, text); this.typed = typed; }
 
         static boolean isBox(Object o) {
-            return o instanceof AbstractWidget && R.method(o.getClass(), "setValue", 1) != null
-                && R.method(o.getClass(), "getValue", 0) != null;
+            if (!(o instanceof AbstractWidget)) return false;
+            // a text box's value is a String; a CycleButton also has getValue/setValue, of its option type
+            Method set = R.method(o.getClass(), "setValue", 1);
+            return set != null && set.getParameterTypes()[0] == String.class && R.method(o.getClass(), "getValue", 0) != null;
         }
 
         @Override Res start(PlaytestRunner r, Minecraft mc) throws Exception {
@@ -747,10 +749,11 @@ final class PlaytestRunner {
             if (screen.children().contains(box)) screen.setFocused((GuiEventListener) box);
             else ((AbstractWidget) box).setFocused(true);
             Method get = R.method(box.getClass(), "getValue", 0), set = R.method(box.getClass(), "setValue", 1);
-            String before = String.valueOf(get.invoke(box));
-            set.invoke(box, before + typed);
+            // the box ends up holding exactly the text, as select-all then typing would leave it: a box a mod pre-fills
+            // (an idea, a last search) must not turn "a hedgehog" into "<the idea>a hedgehog"
+            set.invoke(box, typed);
             String after = String.valueOf(get.invoke(box));
-            if (!after.endsWith(typed)) return fail("typed into " + box.getClass().getSimpleName() + " but it holds \"" + after + "\" (a length limit?)");
+            if (!after.equals(typed)) return fail("typed into " + box.getClass().getSimpleName() + " but it holds \"" + after + "\" (a length limit?)");
             return pass("typed \"" + typed + "\" into " + box.getClass().getSimpleName() + " on " + screen.getClass().getSimpleName());
         }
 
@@ -1083,6 +1086,13 @@ final class PlaytestRunner {
             for (Object a : tc.getArgs()) if (a instanceof Component ac) keys(ac, out, depth + 1);
         }
         for (Component s : c.getSiblings()) keys(s, out, depth + 1);
+    }
+
+    /** An exception for a report: a reflective call's own cause (not InvocationTargetException), with where it was thrown. */
+    static String why(Throwable t) {
+        while (t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null) t = t.getCause();
+        StackTraceElement[] st = t.getStackTrace();
+        return t + (st.length > 0 ? " at " + st[0] : "");
     }
 
     static String show(Component c) {
@@ -1650,13 +1660,13 @@ final class PlaytestRunner {
                 lineStartMs = worldMs();
                 say(TAG + ":   [" + current.no + "] " + current.text);
                 Res r;
-                try { r = current.start(this, mc); } catch (Throwable t) { r = fail("threw " + t); }
+                try { r = current.start(this, mc); } catch (Throwable t) { r = fail("threw " + why(t)); }
                 if (r == null) return;
                 if (!lineDone(mc, r)) return;
                 continue;
             }
             Res r;
-            try { r = current.tick(this, mc); } catch (Throwable t) { r = fail("threw " + t); }
+            try { r = current.tick(this, mc); } catch (Throwable t) { r = fail("threw " + why(t)); }
             if (r == null) return;
             if (!lineDone(mc, r)) return;
         }
