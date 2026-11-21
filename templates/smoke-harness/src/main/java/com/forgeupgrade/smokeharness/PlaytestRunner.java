@@ -698,10 +698,15 @@ final class PlaytestRunner {
             }
             List<String> seen = new ArrayList<>();
             AbstractWidget hit = null;
-            for (GuiEventListener l : screen.children()) {
+            // a dialog (1.21.6+ server dialogs, the wish screen) puts its buttons inside a layout container: walk
+            // nested children too (bounded), top-level first
+            java.util.ArrayDeque<GuiEventListener> todo = new java.util.ArrayDeque<>(screen.children());
+            for (int guard = 0; !todo.isEmpty() && guard < 500; guard++) {
+                GuiEventListener l = todo.poll();
+                if (l instanceof net.minecraft.client.gui.components.events.ContainerEventHandler c && !(l instanceof Screen)) todo.addAll(c.children());
                 if (!(l instanceof AbstractWidget w)) continue;
                 String msg = w.getMessage().getString();
-                seen.add("\"" + msg + "\"");
+                if (seen.size() < 60) seen.add("\"" + msg + "\"");
                 if (hit == null && w.visible && w.active && msg.toLowerCase(Locale.ROOT).contains(button.toLowerCase(Locale.ROOT))) hit = w;
             }
             if (hit == null) return fail("no active widget whose message contains \"" + button + "\" on " + screen.getClass().getSimpleName() + " (widgets: " + seen + ")");
