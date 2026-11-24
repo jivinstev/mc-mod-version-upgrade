@@ -1611,6 +1611,27 @@ pat, rep = row[3:].split("\t")
 f = lambda t: re.sub(pat, rep, t)
 sys.exit(0 if f("if (level.isClientSide) {") == "if (level.isClientSide()) {" and f("level.isClientSide()") == "level.isClientSide()" else 1)
 PY
+# 1.21.9 (CATALOG M89, V85): the chunk-cache sends are renamed, and minecraft:chain is iron_chain -- without clipping a longer name
+python3 - <<'PY' && ok "shared rows: getChunkSource().broadcast/broadcastAndSend become sendToTrackingPlayers(AndSelf); Blocks.CHAIN and \"minecraft:chain\" become iron_chain, CHAIN_COMMAND_BLOCK and chain_command_block untouched" || bad "a 1.21.9 broadcast or chain row is wrong"
+import importlib.util, sys
+s = importlib.util.spec_from_file_location("ps", "templates/fork-layer/tools/prepare-sources.py"); ps = importlib.util.module_from_spec(s); s.loader.exec_module(ps)
+rows = [r for r in ps.load_renames("templates/fork-layer/shared/1.21.10/renames.tsv") if "broadcast" in r[0] or "CHAIN" in r[0] or "chain" in r[0]]
+_tok, rx = ps.split_rules(rows)
+def f(t):
+    for c, rep, _ex in rx:
+        t = c.sub(rep, t)
+    return t
+cases = {"level.getChunkSource().broadcast(this, pkt);": "level.getChunkSource().sendToTrackingPlayers(this, pkt);",
+         "sl.getChunkSource().broadcastAndSend(player, pkt);": "sl.getChunkSource().sendToTrackingPlayersAndSelf(player, pkt);",
+         "tracked.broadcast(pkt);": "tracked.broadcast(pkt);",
+         "state.is(Blocks.CHAIN)": "state.is(Blocks.IRON_CHAIN)",
+         "Blocks.CHAIN_COMMAND_BLOCK": "Blocks.CHAIN_COMMAND_BLOCK",
+         'id.equals("minecraft:chain")': 'id.equals("minecraft:iron_chain")',
+         '"minecraft:chain_command_block"': '"minecraft:chain_command_block"'}
+bad = [(k, f(k)) for k, v in cases.items() if f(k) != v]
+print(*bad, sep="\n")
+sys.exit(1 if len(rx) != 4 or bad else 0)
+PY
 # a shared helper marked `// REQUIRES: <token>` is installed only in a fork whose build names the token (GeckoLib helpers)
 python3 - <<'PY' && ok "shared helpers: a REQUIRES-gated helper is skipped in a fork without the library, installed in one with it" || bad "a REQUIRES-gated shared helper reached a fork without its library (or missed one with it)"
 import importlib.util, pathlib, sys, tempfile

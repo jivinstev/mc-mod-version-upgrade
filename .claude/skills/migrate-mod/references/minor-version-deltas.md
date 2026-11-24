@@ -625,6 +625,27 @@ own shard must take tests outside its namespace off (read the per-test list, nev
 no 26.2 entry) the minor hops 1.21.6-1.21.8 carry roughly a dozen of the changes 26.2 then lists as "era jump" changes:
 the era jump is partly a reading of the four unreleased 1.21.x lines in between.
 
+L56. **1.21.9: a mock test player that skips the configuration phase logs in at (0,0,0) (CATALOG M106)** ·
+`PlayerList.placeNewPlayer` no longer positions a player with no saved data; the configuration task `PrepareSpawnTask` does,
+and a harness's mock connection never runs it. · **Fix:** the harness places the mock after login, inside the test's own
+bounds (or from the level's respawn data: `snapTo(adjustSpawnLocation(level, respawn.pos()).getBottomCenter(), yaw, 0)`).
+
+L57. **1.21.9: spawn chunks are gone (CATALOG M107)** · the `spawnChunkRadius` gamerule is removed and `setDefaultSpawnPos`
+moves no loading ticket. A test that places entities at the world spawn with nobody near flakes: the entities are removed
+as `UNLOADED_TO_CHUNK`. · **Fix:** place everything inside the test's own structure bounds; do not recreate spawn chunks.
+
+L58. **FML 10 (21.9+): no `--fml.mixinConfig` program argument (CATALOG M108)** · a dev-only (GameTest-only) mixin config
+passed that way is never loaded, its mixins never apply, and the tests that need them go green with no effect. ·
+**Fix:** a `[[mixins]]` entry in the dev runs' processed `neoforge.mods.toml`, blanked or refused in the shipped jar, and one
+check that a test-only mixin really applied.
+
+L59. **1.21.9: a data pack above format 81 states `min_format`/`max_format` as `[major, minor]` (CATALOG M109)** ·
+1.21.9 data packs are 88.0, 1.21.11 94.1; `supported_formats` is the old shape. · **Fix:** one pack-meta helper every writer
+uses, with the number read from the game or the build (CATALOG §W18).
+
+L60. **1.21.9: a new vanilla command, `fetchprofile` (CATALOG M110)** · it reaches Mojang's profile service. A mod's
+command-policy or allow-list table needs a row for it, decided on purpose rather than by the table's default.
+
 ### Runtime deltas (Gate B over a clean compile, 1.21.1 → 1.21.4)
 **Measured:** the first 1.21.4 Gate B run was **27 red** with main + test compiling clean on both targets.
 Every one was one of the six below. After them: `ci,default` 613 passed, batch composition identical to the
