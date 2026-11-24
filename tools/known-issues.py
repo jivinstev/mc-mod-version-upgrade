@@ -2734,7 +2734,9 @@ def suspected_selfcheck(expect, cli):
         src.write_text("class Tint {\n  int a;\n}\n", encoding="utf-8")
         pathlib.Path(d, "src/TintTest.java").write_text("class TintTest {}\n", encoding="utf-8")
         g("add", "-A"); g("commit", "-qm", "port")
-        real = g("rev-parse", "--short=10", "HEAD")
+        # the FULL sha: SHA_RE needs a digit AND a hex letter (a bare number is no sha), and a 10-character prefix is
+        # all digits about once in a hundred commits (CI met 7200814989); 40 such characters never happen
+        real = g("rev-parse", "HEAD")
         cli("add", "--repo", d, "--id", "KI-20", "--title", "a tint may be off", "--failure", "cosmetic", *base,
             "--lowest", "1.21.1", "--suspected", "--unverified", "not reproduced here", "--verify-by", "a client test")
         R = ("--repo", d)
