@@ -417,6 +417,39 @@ def generic(java_type):
     return "%s<%s>" % (base, ", ".join(generic(a) for a in args))
 
 
+def _generic_args(g):
+    """'Map<K, List<V>>' -> ('Map', ['K', 'List<V>']); a type with no arguments -> (g, None)."""
+    if not g.endswith(">") or "<" not in g:
+        return g, None
+    cut = g.index("<")
+    args, buf, d = [], "", 0
+    for ch in g[cut + 1:-1]:
+        if ch == "<":
+            d += 1
+        elif ch == ">":
+            d -= 1
+        if ch == "," and d == 0:
+            args.append(buf.strip())
+            buf = ""
+        else:
+            buf += ch
+    args.append(buf.strip())
+    return g[:cut], args
+
+
+def wild_matches(mine, vanilla):
+    """Is `mine` (a generic() string, where an unbounded `?` is an empty argument) `vanilla` with some of its type
+    arguments replaced by `?`? 'EntityLookup<>' matches 'EntityLookup<T>'; 'Map<String, >' matches 'Map<String, Foo>';
+    'List<Bar>' does not match 'List<Foo>'."""
+    mb, ma = _generic_args(mine)
+    vb, va = _generic_args(vanilla)
+    if mb != vb or (ma is None) != (va is None):
+        return False
+    if ma is None:
+        return True
+    return len(ma) == len(va) and all(m == "" or wild_matches(m, v) for m, v in zip(ma, va))
+
+
 def field_generics(src, name):
     """Every declaration of the FIELD `name` in vanilla -> list of GENERIC type strings."""
     out = []
@@ -1141,7 +1174,10 @@ def main():
                 # tick threw ClassCastException -- a SERVER crash for any world with a villager.
                 want_g = generic(args[0].rsplit(" ", 1)[0]) if args else generic(ret)
                 found_g = field_generics(src, field)
-                if found_g and want_g not in found_g:
+                # A GETTER may say `?` where vanilla names a type (often the owner's own type variable, which an
+                # accessor interface cannot name: LevelEntityGetterAdapter<T>'s EntityLookup<T>): nothing can be put
+                # in through an unbounded wildcard, so the Brain failure above cannot happen. A setter stays exact.
+                if found_g and want_g not in found_g and not (not args and any(wild_matches(want_g, g) for g in found_g)):
                     problems.append((rel, "@Accessor " + field + " (generics; binds, but is not the same type)",
                                      want_g, " | ".join(found_g)))
 
