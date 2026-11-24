@@ -2007,10 +2007,21 @@ class Run:
         fb = self.fb
         p = self.props()
         pv = self.parent_version() or p.get("base_minecraft_version", "1.21.1")
-        work, why = fb.stage_checkout(self.repo, pv)
+        # A version that stands on the port branch, where the port branch itself builds a later line than the base
+        # (an owned mod made at 1.21.8): the old side is the port branch at its own version -- there is no
+        # neoforge-<base> branch to stage, and the base's classes are not what this version moved from.
+        stage_branch = None
+        pb = p.get("port_branch")
+        if not self.parent_version() and pb and fb.resolve_branch(self.repo, pb):
+            pmc = fb.parse_props((fb.blob_at(self.repo, pb, "gradle.properties") or b"").decode("utf-8", "surrogateescape")
+                                 ).get("minecraft_version", "").strip()
+            if fb.version_line(pmc) and fb.mc_key(pv) < fb.mc_key(pmc) < fb.mc_key(self.t):
+                pv, stage_branch = pmc, pb
+        work, why = fb.stage_checkout(self.repo, pv, branch=stage_branch)
         if work is None:
-            return {"stop": f"cannot check out {fb.branch_name(pv)} to stage it: {why}", "code": 10,
-                    "choices": [f"stage it by hand: git worktree add <dir> {fb.branch_name(pv)} && ./gradlew createMinecraftArtifacts"]}
+            name = stage_branch or fb.branch_name(pv)
+            return {"stop": f"cannot check out {name} to stage it: {why}", "code": 10,
+                    "choices": [f"stage it by hand: git worktree add <dir> {name} && ./gradlew createMinecraftArtifacts"]}
         old = self.artifacts(work, pv)[0]
         if not old:
             self.sh([BASH, "gradlew", "createMinecraftArtifacts", "--console=plain", *gradle_args(self.env)],

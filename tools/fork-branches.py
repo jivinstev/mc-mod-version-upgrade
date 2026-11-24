@@ -2911,17 +2911,20 @@ def remake(work, t, say=print):
     return 0
 
 
-def stage_checkout(repo, t, say=print):
+def stage_checkout(repo, t, say=print, branch=None):
     """A clean tree of version t's branch to stage (createMinecraftArtifacts) and read, never committed to:
     worktree_for's checkout when it can make one; else -- the branch held by another worktree, a person's or this
     tool's own build/fork-branches/<t> of the main clone (weekly round 2026-10-19: fork-port.py's moves stage stopped on
     it) -- a DETACHED worktree at the branch's commit under build/fork-port/stage/<t>, which checks out no branch, so
     no worktree that holds one is touched (kept between runs, so its Gradle caches stay warm). -> (path, why not)."""
     repo = pathlib.Path(repo).resolve()
-    w, why = worktree_for(repo, t)
+    if branch:          # a named branch (the port branch, which is no neoforge-<t>): always a detached stage worktree
+        w, why = None, f"{branch} is the port branch"
+    else:
+        w, why = worktree_for(repo, t)
     if w is not None:
         return w, None
-    c = resolve_branch(repo, branch_name(t))
+    c = resolve_branch(repo, branch or branch_name(t))
     if not c:
         return None, why
     d = repo / "build" / "fork-port" / "stage" / t
@@ -2940,7 +2943,7 @@ def stage_checkout(repo, t, say=print):
         r = git(repo, "worktree", "add", "--detach", str(d), c)
         if r.returncode:
             return None, f"{why}; and cannot make a detached stage worktree: {r.stderr.strip()[-300:]}"
-    say(f"fork-branches: {branch_name(t)} is not checked out here ({why}); staging a detached worktree at its commit "
+    say(f"fork-branches: {branch or branch_name(t)} is not checked out here ({why}); staging a detached worktree at its commit "
         f"{c[:12]} instead: {d} (no branch checked out, nothing else touched)")
     return d, None
 
@@ -5835,6 +5838,15 @@ def _check_stage_checkout(expect):
         expect(w5 is not None and w5.resolve() == (r / "build" / "fork-branches" / "1.21.5").resolve() and "detached" not in said
                and git(w5, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "neoforge-1.21.5",
                f"an unheld branch: worktree_for's checkout, as before: {w5} {why}")
+        # a named branch (the port branch, which is no neoforge-<t>): always a detached stage worktree at its commit,
+        # under the version it is staged as, even where worktree_for could check out neoforge-<t>
+        pb = git(r, "rev-parse", "neoforge-1.21.5").stdout.strip()
+        (w6, why), said = _quiet(lambda: stage_checkout(r, "1.21.8", branch="neoforge-1.21.5"))
+        expect(w6 is not None and w6.name == "1.21.8" and git(w6, "rev-parse", "HEAD").stdout.strip() == pb
+               and git(w6, "symbolic-ref", "-q", "HEAD").returncode != 0 and "neoforge-1.21.5" in said,
+               f"a named branch is staged detached at its commit: {w6} {why} {said}")
+        (w7, why), _said = _quiet(lambda: stage_checkout(r, "1.21.8", branch="no-such-branch"))
+        expect(w7 is None and why, f"a named branch that does not resolve: none, with why: {why}")
 
 
 def _check_remake(expect):
