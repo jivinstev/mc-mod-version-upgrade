@@ -437,6 +437,10 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
             # ("Couldn't find matching GLX visual", CATALOG V103), so SDL creates the context through EGL on the same
             # X display instead (needs libegl1 + libegl-mesa0). GLFW (every earlier version) does not read it.
             env.setdefault("SDL_VIDEO_FORCE_EGL", "1")
+            # A headless box has no sound card: without OpenAL's null device the sound engine logs
+            # "Failed to open OpenAL device" with a stack trace, which the launch phase judges a crash
+            # (vanilla turns sound off and goes on). The null device starts the engine; playtests set the same.
+            env.setdefault("ALSOFT_DRIVERS", "null")
     import time
     oom0 = oom_snapshot()
     free0 = mem_available_mb() if sys.platform.startswith("linux") else None
