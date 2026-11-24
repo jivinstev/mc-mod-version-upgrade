@@ -548,7 +548,7 @@ on a fresh instance; an adapter that takes only static methods silently drops th
 is unchanged.
 
 L44. **1.21.5+: an exception in a test CRASHES the test server (CATALOG M94)** · 1.21.4's `GameTestInfo.fail(Throwable)` caught
-anything a test sequence threw; 1.21.8's `fail` takes only a `GameTestException`, so an NPE in a `runAfterDelay`/`succeedWhen`/
+anything a test sequence threw; 1.21.8 has only `fail(GameTestException)` and `fail(Component)`, so an NPE in a `runAfterDelay`/`succeedWhen`/
 `startSequence` step escapes the tick: "Exception in server tick loop", a crash report, and NO result line for any test.
 · **Fix:** a MixinExtras `@WrapMethod` on `GameTestInfo.tick(GameTestRunner)` that rethrows a `GameTestException` and turns
 anything else into `fail(new GameTestAssertException(Component, 0))`; the adapter does the same around the method itself.
@@ -570,9 +570,10 @@ emits the new spelling; a compiler/tool the mod shells out to corrects the old s
 target version); stored commands need a migration.
 
 L47. **NeoForge 21.8: `AnvilMenu.createResult` is `final` (CATALOG M97)** · a custom anvil menu overriding it no longer
-compiles ("overridden method is final"). · **Fix:** set the result from `AnvilUpdateEvent` (fired after vanilla's result on
-every change while the left slot holds something; `setOutput`, `setXpCost`, `setMaterialCost`), guarded on
-`player.containerMenu instanceof YourMenu`. `LivingShieldBlockEvent` is no longer cancellable on 21.8 either.
+compiles ("overridden method is final"). · **Fix:** override `protected void createResultInternal()`, which NeoForge's
+`AnvilMenu` patch adds for this (its final `createResult()` calls it, then fires the event; read from 21.8.57's patch). Or set
+the result from `AnvilUpdateEvent` (fired after vanilla's result on every change while the left slot holds something;
+`setOutput`, `setXpCost`, `setMaterialCost`), guarded on `player.containerMenu instanceof YourMenu`. `LivingShieldBlockEvent` is no longer cancellable on 21.8 either.
 
 L48. **1.21.6: the pause menu's server links are a DIALOG (CATALOG M98)** · `ServerLinksScreen` is gone; the pause menu's
 button opens a `ServerLinksDialogScreen` built from a `ServerLinksDialog`. A client test that opened the screen directly opens
