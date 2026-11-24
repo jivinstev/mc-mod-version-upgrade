@@ -477,7 +477,7 @@ def target_audit_rows(repo, bv, work, classpath=gradle_classpath):
         hits, skipped = [], []
         if roots and not jar:
             skipped.append("no Minecraft sources jar staged by the build (build/moddev/artifacts/*-sources.jar or "
-                           "build/neoForm/*/sources.jar)")
+                           "build/neoForm/*/sources.jar or build/neoForm/*/steps/transformSource/outputs.jar)")
         for root in roots if jar else []:
             name = root.relative_to(repo).as_posix()
             rc, out, why = run("audit-mixin-targets", "audit-mixin-targets.log" if len(roots) == 1 else

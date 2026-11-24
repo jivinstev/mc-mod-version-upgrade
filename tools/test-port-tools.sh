@@ -1570,6 +1570,18 @@ with tempfile.TemporaryDirectory() as d:
     ok &= same(m.find_sources_jar(d), old)
     (pathlib.Path(d) / "gradle.properties").write_text("neo_version=21.10.4\n", encoding="utf-8")   # a prefix is no match
     ok &= same(m.find_sources_jar(d), old)                                   # none matches: the newest, said on stderr
+# NeoGradle 7.x (a single-version fork's layout too): no sources.jar, the patched sources in steps/transformSource; the
+# dir named by the build's minecraft_version, never a stale one beside it (1.21.1 is no prefix match for 1.21.10)
+with tempfile.TemporaryDirectory() as d:
+    ng = {}
+    for mc, date in (("1.21.1", "20240808.144430"), ("1.21.10", "20251010.172816")):
+        s = pathlib.Path(d) / f"build/neoForm/neoFormJoined{mc}-{date}/steps/transformSource"; s.mkdir(parents=True)
+        ng[mc] = s / "outputs.jar"; ng[mc].write_bytes(b"x")
+    t = time.time(); os.utime(ng["1.21.10"], (t - 60, t - 60)); os.utime(ng["1.21.1"], (t, t))   # the stale one newer on disk
+    (pathlib.Path(d) / "gradle.properties").write_text("minecraft_version=1.21.10\nneo_version=21.10.64\n", encoding="utf-8")
+    ok &= same(m.find_sources_jar(d), ng["1.21.10"])
+    (pathlib.Path(d) / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.228\n", encoding="utf-8")
+    ok &= same(m.find_sources_jar(d), ng["1.21.1"])
 sys.exit(0 if ok else 1)
 PY
 # R25: a registration supplier names what it builds and every Block/Item Properties takes that name (prefix-only rows)
