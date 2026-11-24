@@ -35,7 +35,9 @@ INSTALL. Per version: the Minecraft files the Launcher never downloaded (version
 OS/arch, asset index and objects, from Mojang's manifests, sha1-checked), the Java runtime the version names (Mojang's
 runtime manifest) when absent, NeoForge with its own installer run headless by the Launcher's Java (the code path of
 tools/install-port.py; launcher_profiles.json is put back byte for byte afterwards, so the installer's "NeoForge"
-profile edit never reaches the player's own profiles), then the instance `<minecraft>/instances/<label>-<mc>/` (or
+profile edit never reaches the player's own profiles; on a machine where no Launcher ever ran -- a headless CI or
+agent container -- there is no launcher_profiles.json, so a minimal {"profiles":{},"settings":{},"version":3} is
+written first and said so: an existing file is never rewritten), then the instance `<minecraft>/instances/<label>-<mc>/` (or
 --instances-dir) with mods/ holding exactly that version's set (plus the Gate C carrier with --with-carrier), each jar
 sha-verified. The player's own mods folder and profiles are never touched. `--profiles` also adds one Launcher profile
 per version (gameDir = the instance) to launcher_profiles.json after a backup, and refuses while the Launcher runs (it
@@ -54,7 +56,11 @@ timeout and logs. A per-version, per-phase table is printed and report.json + re
 
 The Gate C carrier is MMVU's own release `gatec-carrier-v<N>` (assets gatec-carrier-<mc>.jar, SHA256SUMS,
 MANIFEST.txt): the newest one by default, `--carrier-release TAG` for one, `--carrier-dir DIR` for a folder of jars
-(a CI artifact; its SHA256SUMS is checked when present) or `--carrier-jar [MC=]JAR` for one jar. `--jar [MC=]JAR`
+(a CI artifact; its SHA256SUMS is checked when present) or `--carrier-jar [MC=]JAR` for one jar; with
+--with-carrier and none of those, the environment's CARRIER_DIR / CARRIER_JAR stand for them. Where api.github.com is
+refused, the release is read from github.com instead: the newest gatec-carrier-v<N> tag from `git ls-remote` (or
+--carrier-release), then https://github.com/<repo>/releases/download/<tag>/<asset>, the jar checked against SHA256SUMS;
+when that fails too, the plan stops with a message naming CARRIER_DIR / CARRIER_JAR. `--jar [MC=]JAR`
 adds a local jar under test and `--neoforge [MC=]VERSION` pins NeoForge (no --fork needed then). The Minecraft folder
 is --minecraft-dir, else MINECRAFT_DIR (environment or .env.local), else the platform's default. Standard library only.
 """
@@ -233,6 +239,15 @@ class Sources:
             if e.code == 404:
                 return None
             raise
+
+    def tags(self, repo):
+        """The repository's tag names from github.com's git refs (no api.github.com): `git ls-remote --tags`."""
+        r = subprocess.run(["git", "ls-remote", "--tags", "--refs", f"https://github.com/{repo}.git"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        if r.returncode:
+            raise OSError(f"git ls-remote exit {r.returncode}: {(r.stderr or '').strip()[-200:]}")
+        return [l.split("refs/tags/", 1)[1] for l in r.stdout.splitlines() if "refs/tags/" in l]
 
     def workflows(self, repo, branch):
         """The text of every workflow file on a branch."""
@@ -540,13 +555,16 @@ def carrier_for(mc, a, src):
                 "source": f"folder {d}"}, None
     repo = a.carrier_repo
     tag = a.carrier_release
+    try:
+        rels = src.releases(repo)
+    except (urllib.error.URLError, OSError, ValueError) as e:      # e.g. api.github.com refused (403) by a proxy
+        return carrier_from_download(mc, repo, tag, src, e)
     if not tag:
-        tags = [r["tag_name"] for r in src.releases(repo) if re.fullmatch(r"gatec-carrier-v\d+", r.get("tag_name", ""))
-                and not r.get("draft")]
+        tags = [r["tag_name"] for r in rels if CARRIER_TAG.fullmatch(r.get("tag_name", "")) and not r.get("draft")]
         if not tags:
             return None, f"{repo} has no gatec-carrier-v* release yet (pass --carrier-dir or --carrier-jar)"
         tag = max(tags, key=lambda t: int(t.rsplit("v", 1)[1]))
-    rel = next((r for r in src.releases(repo) if r.get("tag_name") == tag), None)
+    rel = next((r for r in rels if r.get("tag_name") == tag), None)
     if rel is None:
         return None, f"{repo} has no release {tag}"
     name = f"gatec-carrier-{mc}.jar"
@@ -557,6 +575,20 @@ def carrier_for(mc, a, src):
     want = parse_sums(src.get(base + "SHA256SUMS").decode("utf-8", "replace")).get(name)
     if not want:
         return None, f"{tag}'s SHA256SUMS does not list {name}"
+    note, why = carrier_manifest(src, base, tag, mc, name, want)
+    if why:
+        return None, why
+    return {"name": name, "url": base + name, "sha256": want, "size": asset.get("size", 0),
+            "source": f"{repo} release {tag}", "manifest": note}, None
+
+
+CARRIER_TAG = re.compile(r"gatec-carrier-v\d+")
+CARRIER_HELP = ("put the gatec-carrier-<mc>.jar files in a folder and set CARRIER_DIR=<folder> (or --carrier-dir), "
+                "or name one jar with CARRIER_JAR=[MC=]<jar> (or --carrier-jar)")
+
+
+def carrier_manifest(src, base, tag, mc, name, want):
+    """MANIFEST.txt's line for mc -> (note, why-refused). A missing MANIFEST.txt is no refusal."""
     note = ""
     try:
         for l in src.get(base + "MANIFEST.txt").decode("utf-8", "replace").splitlines():
@@ -564,11 +596,39 @@ def carrier_for(mc, a, src):
             if len(t) >= 4 and t[0] == "jar" and t[1] == mc:
                 note = f"built for NeoForge {t[2]}, Java {t[3]}"
                 if len(t) >= 6 and t[5] != want:
-                    return None, f"{tag}: MANIFEST.txt and SHA256SUMS disagree on {name}"
+                    return note, f"{tag}: MANIFEST.txt and SHA256SUMS disagree on {name}"
     except Exception:
         pass
-    return {"name": name, "url": base + name, "sha256": want, "size": asset.get("size", 0),
-            "source": f"{repo} release {tag}", "manifest": note}, None
+    return note, None
+
+
+def carrier_from_download(mc, repo, tag, src, api_error):
+    """The carrier without api.github.com: the newest gatec-carrier-vN tag from github.com's git refs (unless
+    --carrier-release names one), then the plain release download URLs on github.com, the jar checked against the
+    release's SHA256SUMS. When that fails too, say how to hand the carrier over (CARRIER_DIR / CARRIER_JAR)."""
+    name = f"gatec-carrier-{mc}.jar"
+    api = f"api.github.com could not be read ({type(api_error).__name__}: {api_error})"
+    try:
+        if not tag:
+            tags = [t for t in src.tags(repo) if CARRIER_TAG.fullmatch(t)]
+            if not tags:
+                return None, f"{api}, and github.com lists no gatec-carrier-v* tag for {repo}: {CARRIER_HELP}"
+            tag = max(tags, key=lambda t: int(t.rsplit("v", 1)[1]))
+        base = f"https://github.com/{repo}/releases/download/{tag}/"
+        want = parse_sums(src.get(base + "SHA256SUMS").decode("utf-8", "replace")).get(name)
+        if not want:
+            return None, f"{api}; {tag}'s SHA256SUMS (from github.com) does not list {name}: {CARRIER_HELP}"
+        data = src.get(base + name)
+    except (urllib.error.URLError, OSError, ValueError, subprocess.SubprocessError) as e:
+        return None, (f"{api}, and the release download from github.com failed too ({type(e).__name__}: {e}): "
+                      f"{CARRIER_HELP}")
+    if sha(data) != want:
+        return None, f"{tag}: {name} from github.com does not match its SHA256SUMS"
+    note, why = carrier_manifest(src, base, tag, mc, name, want)
+    if why:
+        return None, why
+    return {"name": name, "url": base + name, "sha256": want, "size": len(data),
+            "source": f"{repo} release {tag} (github.com download; api.github.com refused)", "manifest": note}, None
 
 
 def parse_sums(text):
@@ -938,6 +998,25 @@ def ensure_version_jar(mcdir, vid, mc, dry=False):
         shutil.copyfile(base, jar)
 
 
+MINIMAL_PROFILES = b'{"profiles":{},"settings":{},"version":3}\n'
+
+
+def ensure_launcher_profiles(mcdir):
+    """A headless machine (no Launcher ever run) has no launcher_profiles.json, and NeoForge's installer refuses
+    without one. Write the minimal file the installer needs -- only when there is none: an existing file is the
+    player's and is never rewritten. -> True when it was written."""
+    lp = pathlib.Path(mcdir) / "launcher_profiles.json"
+    if lp.exists():
+        return False
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(lp, "xb") as f:             # exclusive: never over a file that appeared meanwhile
+            f.write(MINIMAL_PROFILES)
+    except FileExistsError:
+        return False
+    return True
+
+
 def do_install(plan, a, src, plat, log=print):
     mcdir = pathlib.Path(plan["minecraft_dir"])
     problems, needs, left = [], {}, 0
@@ -997,6 +1076,8 @@ def do_install(plan, a, src, plat, log=print):
                 problems.append(f"{v['mc']}: --use-installed, but NeoForge {v['neoforge']} is not installed"); continue
             if a.dry_run:
                 log(f"  would install NeoForge {v['neoforge']} with its installer (headless)")
+                if not (mcdir / "launcher_profiles.json").is_file():
+                    log(f"  would write a minimal {mcdir / 'launcher_profiles.json'} (none there; the installer needs one)")
             else:
                 pid = launcher_running()
                 if pid:
@@ -1005,6 +1086,10 @@ def do_install(plan, a, src, plat, log=print):
                     continue
                 java = java_exe(mcdir, v["java_component"], plat)
                 lp = mcdir / "launcher_profiles.json"
+                made = ensure_launcher_profiles(mcdir)
+                if made:
+                    log(f"  wrote a minimal {lp}: there was none (no Minecraft Launcher has run here) and the NeoForge "
+                        "installer needs one")
                 keep = lp.read_bytes() if lp.is_file() else None
                 run = lambda argv, **kw: subprocess.run([str(java)] + list(argv[1:]), **kw)
                 try:
@@ -1367,7 +1452,16 @@ class FakeSources(Sources):
 
     def branches(self, repo): return self.b[repo]
     def default_branch(self, repo): return "main"
-    def releases(self, repo): return self.r.get(repo, [])
+    def releases(self, repo):
+        got = self.r.get(repo, [])
+        if isinstance(got, Exception):
+            raise got
+        return got
+    def tags(self, repo):
+        got = getattr(self, "t", {}).get(repo)
+        if got is None or isinstance(got, Exception):
+            raise got or OSError(f"no tags fixture for {repo}")
+        return got
     def file(self, repo, branch, path): return self.f.get((repo, branch, path))
     def workflows(self, repo, branch):
         t = self.f.get((repo, branch, ".github/workflows/port-ci.yml"))
@@ -1673,6 +1767,22 @@ def self_check():
             "no folder gradle.properties: that mod's newest release, noted")
         chk(lv("--fork", "o/levels:examplec", "--mc", "1.21.8")["skipped"][0]["why"].endswith("(nor a release for 1.21.8)"),
             "a mod with neither a branch nor a release for the version: skipped and said so")
+        # ── a headless machine: no launcher_profiles.json -> a minimal one; an existing file is never rewritten ──
+        hd = tmp / "headless"
+        logs = []
+        chk(not do_install(dict(p, minecraft_dir=str(hd)), args("install", "--dry-run", "--minecraft-dir", str(hd), "--work", str(tmp / "w")),
+                           src, osx, log=logs.append) and any("would write a minimal" in x for x in logs)
+            and not (hd / "launcher_profiles.json").exists(), "--dry-run: says it would write launcher_profiles.json, writes nothing")
+        chk(ensure_launcher_profiles(hd) and (hd / "launcher_profiles.json").read_bytes() == MINIMAL_PROFILES
+            and json.loads(MINIMAL_PROFILES) == {"profiles": {}, "settings": {}, "version": 3},
+            "no launcher_profiles.json: the minimal one is written")
+        players = b'{\r\n  "profiles" : {"p": {"name": "mine"}},\r\n  "settings": {"crashAssistance": true}, "version": 3}'
+        (hd / "launcher_profiles.json").write_bytes(players)
+        chk(not ensure_launcher_profiles(hd) and (hd / "launcher_profiles.json").read_bytes() == players,
+            "an existing launcher_profiles.json is left byte-for-byte as it was")
+        (hd / "launcher_profiles.json").write_bytes(b"")
+        chk(not ensure_launcher_profiles(hd) and (hd / "launcher_profiles.json").read_bytes() == b"",
+            "even an empty launcher_profiles.json is the player's: not rewritten")
 
         # ── profiles: refused while the Launcher runs; a backup; only our keys change ──
         lp = mcd / "launcher_profiles.json"
@@ -1730,6 +1840,46 @@ def self_check():
         chk(carrier_for("1.21.1", a, src)[0] is None, "MANIFEST.txt and SHA256SUMS disagreeing is refused")
         src.r[CARRIER_REPO] = []
         chk("no gatec-carrier-v* release" in carrier_for("1.21.1", a, src)[1], "no carrier release yet: said so")
+
+        # ── api.github.com refused: the github.com download URL; both refused: say CARRIER_DIR / CARRIER_JAR ──
+        urls[base + "MANIFEST.txt"] = f"jar 1.21.1 21.1.200 21 gatec-carrier-1.21.1.jar {sha(b'c1')} d1\n".encode("utf-8")
+        urls[base + "gatec-carrier-1.21.1.jar"] = b"c1"
+        src.r[CARRIER_REPO] = urllib.error.HTTPError("https://api.github.com/x", 403, "Forbidden", None, None)
+        src.t = {CARRIER_REPO: ["gatec-carrier-v2", "gatec-carrier-v3", "port-ci-kit-v9", "gatec-carrier-v10x"]}
+        c, why = carrier_for("1.21.1", a, src)
+        chk(c and c["url"] == base + "gatec-carrier-1.21.1.jar" and c["sha256"] == sha(b"c1") and c["size"] == 2
+            and "api.github.com refused" in c["source"] and "21.1.200" in c["manifest"],
+            f"api.github.com refused: the newest carrier tag from git refs, the github.com download URL ({why})")
+        src.t = {}
+        a2 = args("plan", "--mc", "1.21.1", "--carrier-release", "gatec-carrier-v3", "--label", "x", "--work", str(tmp))
+        chk((carrier_for("1.21.1", a2, src)[0] or {}).get("sha256") == sha(b"c1"),
+            "api.github.com refused, --carrier-release: no tag lookup, straight to the download URL")
+        urls[base + "gatec-carrier-1.21.1.jar"] = b"tampered"
+        chk("does not match its SHA256SUMS" in (carrier_for("1.21.1", a2, src)[1] or ""),
+            "a downloaded carrier that does not match SHA256SUMS is refused")
+        del urls[base + "SHA256SUMS"]
+        why = carrier_for("1.21.1", a2, src)[1] or ""
+        chk("api.github.com" in why and "github.com failed too" in why and "CARRIER_DIR" in why and "CARRIER_JAR" in why,
+            f"both refused: stop, naming CARRIER_DIR and CARRIER_JAR ({why})")
+        why = carrier_for("1.21.1", a, src)[1] or ""
+        chk("CARRIER_DIR" in why and "CARRIER_JAR" in why, f"no tags either: CARRIER_DIR / CARRIER_JAR named ({why})")
+        keep_env = {k: os.environ.pop(k, None) for k in ("CARRIER_DIR", "CARRIER_JAR")}
+        try:
+            os.environ["CARRIER_DIR"] = str(cd)
+            ae = args("plan", "--mc", "1.21.1", "--with-carrier", "--label", "x", "--work", str(tmp))
+            an = args("plan", "--mc", "1.21.1", "--label", "x", "--work", str(tmp))
+            chk(ae.carrier_dir == str(cd) and not an.with_carrier and not an.carrier_dir,
+                "CARRIER_DIR is the --with-carrier folder; without --with-carrier it adds nothing")
+            os.environ.pop("CARRIER_DIR"); os.environ["CARRIER_JAR"] = "1.21.1=" + str(tmp / "x.jar")
+            ae = args("plan", "--mc", "1.21.1", "--with-carrier", "--label", "x", "--work", str(tmp))
+            chk(ae.carrier_jar == ["1.21.1=" + str(tmp / "x.jar")] and carrier_for("1.21.1", ae, src)[0]["source"] == "local jar",
+                "CARRIER_JAR is the --with-carrier jar")
+        finally:
+            for k, val in keep_env.items():
+                os.environ.pop(k, None)
+                if val is not None:
+                    os.environ[k] = val
+        src.r[CARRIER_REPO] = []
 
         # ── the report ──
         rows = [row({"mc": "1.21.1", "neoforge": "21.1.9"}, "boot", "PASS", "ok", 30, tmp / "l"),
@@ -1802,6 +1952,9 @@ def default_minecraft_dir():
 def finish_args(a):
     if a.with_carrier is False and (a.carrier_dir or a.carrier_jar or a.carrier_release):
         a.with_carrier = True
+    elif a.with_carrier and not (a.carrier_dir or a.carrier_jar or a.carrier_release):
+        a.carrier_dir = os.environ.get("CARRIER_DIR") or None          # what a play script hands over
+        a.carrier_jar = [os.environ["CARRIER_JAR"]] if os.environ.get("CARRIER_JAR") and not a.carrier_dir else []
     if not a.label:
         last = fork_spec(a.fork[-1]) if a.fork else None
         a.label = (re.sub(r"[^a-z0-9]+", "", (last[2] or last[1].split("/")[-1]).lower()) if a.fork else
