@@ -1584,6 +1584,19 @@ with tempfile.TemporaryDirectory() as d:
     ok &= same(m.find_sources_jar(d), ng["1.21.1"])
 sys.exit(0 if ok else 1)
 PY
+# audit-mixin-targets wild_matches: a GETTER accessor may say `?` for a type vanilla names (an owner's type variable
+# the interface cannot name); a different named type, a wrong arity or another base stays a mismatch
+python3 - <<'PY' && ok "audit-mixin-targets: an unbounded ? in a getter accessor matches the field's argument; a different type does not" || bad "audit-mixin-targets wild_matches accepts a different generic or refuses a wildcard"
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("a", "tools/audit-mixin-targets.py"); m = importlib.util.module_from_spec(spec)
+sys.argv = ["x"]; spec.loader.exec_module(m)
+g = m.generic
+yes = [(g("EntityLookup<?>"), g("EntityLookup<T>")), (g("Map<String, ?>"), g("Map<String, Foo>")),
+       (g("Map<?, List<?>>"), g("Map<K, List<V>>")), (g("Foo"), g("Foo"))]
+no = [(g("List<Bar>"), g("List<Foo>")), (g("Map<?, Bar>"), g("Map<K, Foo>")), (g("List<?>"), g("Set<T>")),
+      (g("Map<?>"), g("Map<K, V>")), (g("List<?>"), g("List"))]
+sys.exit(0 if all(m.wild_matches(a, b) for a, b in yes) and not any(m.wild_matches(a, b) for a, b in no) else 1)
+PY
 # R25: a registration supplier names what it builds and every Block/Item Properties takes that name (prefix-only rows)
 python3 - <<'PY' && ok "shared rows: R25 registry ids -- suppliers enter their name, Item/Block Properties are stamped, a constructor reference becomes an entering supplier" || bad "the R25 RegIds rows rewrite the wrong shapes"
 import re, pathlib, sys
