@@ -8,7 +8,9 @@
 package com.example.examplemod.test;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -41,6 +43,16 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 public class BaselineGameTest {
     private static final String NS = "examplemod";
     private static final BlockPos AT = new BlockPos(4, 2, 4);
+    /**
+     * Entity types the mod deliberately replaces when they join a level (a stand-in that becomes another entity), so
+     * the level refusing a bare one is the mod working, with the fork's reason for each. Port CI's harness fills it
+     * from the fork's committed .port/<mc>/baseline-exempt.txt (tools/port_gates.py); empty in a mod's own copy. An
+     * exempt type must still construct: only the refusal is excused, and each one is printed, never silent.
+     */
+    private static final Map<String, String> REPLACED = new LinkedHashMap<>();
+    static {
+        /*BASELINE_EXEMPT*/
+    }
 
     /** Every entity type constructs, joins the level and survives 20 ticks of AI and physics. */
     @GameTest(template = "empty_test", timeoutTicks = 200)
@@ -56,7 +68,15 @@ public class BaselineGameTest {
                 if (e == null) { failed.add(BuiltInRegistries.ENTITY_TYPE.getKey(type) + ": create returned null"); continue; }
                 BlockPos p = helper.absolutePos(AT);
                 e.moveTo(p.getX() + 0.5, p.getY(), p.getZ() + 0.5, 0f, 0f);
-                if (!level.addFreshEntity(e)) failed.add(BuiltInRegistries.ENTITY_TYPE.getKey(type) + ": the level refused it");
+                String id = BuiltInRegistries.ENTITY_TYPE.getKey(type).toString();
+                boolean joined = level.addFreshEntity(e);
+                if (REPLACED.containsKey(id)) {
+                    System.out.println("EXAMPLEMOD_BASELINE: entity EXEMPT " + id + ": " + (joined
+                            ? "the level took it, so the exemption is unused" : "the level refused it, as the fork says")
+                            + " (" + REPLACED.get(id) + ")");
+                } else if (!joined) {
+                    failed.add(id + ": the level refused it");
+                }
             } catch (Throwable t) {
                 failed.add(BuiltInRegistries.ENTITY_TYPE.getKey(type) + ": " + t);
             }

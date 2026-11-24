@@ -509,6 +509,20 @@ def target_audit_rows(repo, bv, work, classpath=gradle_classpath):
     return rows
 
 
+def exempt_rows(rows, pu, repo, modid):
+    """Every exemption the fork's .port/<mc>/baseline-exempt.txt grants the baseline's every-entity test, with its
+    reason, as a report row: an excused refusal is in the summary, never only in a log. Nothing when there is none
+    (a bad file already failed Gate A, which builds the harness from it)."""
+    try:
+        ex = pu.baseline_exemptions(repo, modid)
+    except pu.Fail:
+        return
+    if ex:
+        f = pu.baseline_exempt_file(repo).relative_to(repo).as_posix()
+        rows.append(f"| Gate B -- baseline exemptions (`{f}`) | REPORT | " +
+                    "; ".join(f"{e}: {r}".replace("|", "/") for e, r in ex)[:600] + " |")
+
+
 def self_check():
     ok = green_detail("[x] All 4 required tests passed :)") == "4 required test(s) passed"
     ok &= green_detail("M_BOOT_TEST: spawned 40 creature type(s): [a]\nM_BOOT_TEST: PASS — ticked 200").startswith(
@@ -910,6 +924,7 @@ def main():
                 record("Data loads -- the server rejected none of the mod's data files", not bad,
                        f"{len(bad)} rejected, e.g. {bad[0]}" if bad else "no rejection logged")
         record(label, r.returncode == 0, detail)
+    exempt_rows(rows, pu, repo, a.modid)
 
     if a.shipped:
         if not ok:

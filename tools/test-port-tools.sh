@@ -653,6 +653,85 @@ PY
 out="$(python3 "$T/test-port-tools-heredoc-5.py" 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone" \
   || bad "port_gates check: $out"
+# The gate harness never collides with a mod's own GameTest resources, and the baseline's every-entity test honours the
+# fork's committed exemptions (.port/<mc>/baseline-exempt.txt), each with a reason that reaches the gate report.
+cat > "$T/test-port-tools-harness-exempt.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
+import importlib.util, os, pathlib, subprocess, sys, types
+T = pathlib.Path(sys.argv[1])  # a fresh directory for the fixture forks
+def load(n, f):
+    s = importlib.util.spec_from_file_location(n, f); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); return m
+pg = load("pg", "tools/port_gates.py")
+cg = load("cg", "tools/ci-gates.py")
+
+def fork(name, mc, neo, exempt=None, ship=None):
+    r = T / name; (r / "src/main/java/com/example/mod").mkdir(parents=True)
+    (r / "src/main/java/com/example/mod/Mod.java").write_text("package com.example.mod;\nclass Mod {}\n", encoding="utf-8")
+    (r / "gradle.properties").write_text(f"minecraft_version={mc}\nneo_version={neo}\n", encoding="utf-8")
+    if exempt is not None:
+        (r / f".port/{mc}").mkdir(parents=True); (r / f".port/{mc}/baseline-exempt.txt").write_text(exempt, encoding="utf-8")
+    if ship:
+        d = r / "src/main/resources/data/examplemod/structure"; d.mkdir(parents=True); (d / ship).write_bytes(b"mod")
+    for cmd in (["init", "-q"], ["add", "-A"], ["-c", "user.name=a", "-c", "user.email=a@b", "commit", "-qm", "x"]):
+        subprocess.run(["git", "-C", str(r)] + cmd if cmd[0] != "init" else ["git", "init", "-q", str(r)], check=True)
+    return r
+
+def build(r):
+    w = T / ("work-" + r.name); w.mkdir()
+    return pg.harness({"repo": r, "dir": w, "args": types.SimpleNamespace(modid="examplemod", base="HEAD")})
+
+def fails(fn, needle):
+    try:
+        fn(); return False
+    except pg.Fail as e:
+        return needle in str(e)
+
+EX = '# what the mod replaces\n\nexamplemod:stand_in   becomes a "rig" when it joins\nexamplemod:ghost a pet that never stays\n'
+ok = True
+# a single-version 1.21.1 fork that ships its OWN empty_test.nbt (the collision): the harness's structure has the kit's name
+r = fork("sv", "1.21.1", "21.1.228", EX, ship="empty_test.nbt")
+h = build(r)
+files = sorted(p.relative_to(h).as_posix() for p in h.rglob("*.nbt"))
+ok &= files == ["resources/data/examplemod/structure/port_ci_harness_empty.nbt"]
+src = "\n".join(p.read_text(encoding="utf-8") for p in (h / "java").rglob("*.java"))
+ok &= '"empty_test"' not in src and 'template = "port_ci_harness_empty"' in src
+ok &= 'REPLACED.put("examplemod:stand_in", "becomes a \\"rig\\" when it joins");' in src
+ok &= 'REPLACED.put("examplemod:ghost", "a pet that never stays");' in src and "/*BASELINE_EXEMPT*/" not in src
+# the exemptions are in the gate report, each with its reason
+rows = []; cg.exempt_rows(rows, pg, r, "examplemod")
+ok &= rows == ['| Gate B -- baseline exemptions (`.port/1.21.1/baseline-exempt.txt`) | REPORT | examplemod:stand_in: '
+               'becomes a "rig" when it joins; examplemod:ghost: a pet that never stays |']
+# no file: nothing exempt, the static block is empty, no report row
+r2 = fork("none", "1.21.1", "21.1.228")
+src2 = "\n".join(p.read_text(encoding="utf-8") for p in (build(r2) / "java").rglob("BaselineGameTest.java"))
+rows = []; cg.exempt_rows(rows, pg, r2, "examplemod")
+ok &= "REPLACED.put" not in src2 and "/*BASELINE_EXEMPT*/" not in src2 and rows == [] and pg.baseline_exemptions(r2, "examplemod") == []
+# a version branch: .port/<its version>/ (PORT_BRANCH_MC), and the annotation-free harness wires the kit's structure
+os.environ.update(PORT_BRANCH_MC="1.21.8", PORT_BRANCH_BASE="1.21.1")
+try:
+    r3 = fork("vb", "1.21.8", "21.8.57", "examplemod:stand_in replaced by a rig\n")
+    (r3 / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.228\n", encoding="utf-8")
+    h3 = build(r3)
+    src3 = "\n".join(p.read_text(encoding="utf-8") for p in (h3 / "java").rglob("*.java"))
+    ok &= pg.baseline_exempt_file(r3) == r3 / ".port/1.21.8/baseline-exempt.txt"
+    ok &= 'REPLACED.put("examplemod:stand_in", "replaced by a rig");' in src3
+    ok &= '"empty_test"' not in src3 and '"port_ci_harness_empty"' in src3
+finally:
+    del os.environ["PORT_BRANCH_MC"], os.environ["PORT_BRANCH_BASE"]
+# refused: no reason, another mod's entity, not an id, listed twice, and a mod that ships the kit's own structure name
+for i, (text, needle) in enumerate([("examplemod:stand_in\n", "has no reason"),
+                                    ("othermod:thing because\n", "not in this mod's namespace"),
+                                    ("Stand In because\n", "is not an entity id"),
+                                    ("examplemod:a x\nexamplemod:a y\n", "listed twice")]):
+    rb = fork(f"bad{i}", "1.21.1", "21.1.228", text)
+    ok &= fails(lambda: pg.baseline_exemptions(rb, "examplemod"), needle) and fails(lambda: build(rb), needle)
+rk = fork("kitname", "1.21.1", "21.1.228", ship="port_ci_harness_empty.nbt")
+ok &= fails(lambda: build(rk), "the gate harness's own structure name")
+print("self-check: OK" if ok else "self-check: FAILED")
+PY
+mkdir -p "$T/harness-exempt"
+out="$(python3 "$T/test-port-tools-harness-exempt.py" "$T/harness-exempt" 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "port_gates harness: its structure is the kit's own (port_ci_harness_empty), so a mod's empty_test.nbt never collides and a mod shipping the kit's name is refused; the baseline's every-entity test excuses only a refusal the fork lists in .port/<mc>/baseline-exempt.txt with a reason (single-version and version-branch routes), the gate report lists each, and a line with no reason, another mod's id, a non-id or a repeat is refused" \
+  || bad "port_gates harness exemptions: $out"
 
 # the round's queue diff (part 2's on its own): here to balance the parts (Windows: part 2 holds round.py's self-check)
 out="$(python3 tools/round-qdiff.py --self-check 2>&1)"
@@ -979,6 +1058,14 @@ class FakeGates:                  # tools/port_gates.py with no Gradle: Gate A g
     @staticmethod
     def gate_env(c):
         return {"PORT_LOG_DIR": str(c["dir"])}
+
+    @staticmethod
+    def baseline_exemptions(repo, modid, mc=None):    # no .port/<mc>/baseline-exempt.txt in these fixtures
+        return []
+
+    @staticmethod
+    def baseline_exempt_file(repo, mc=None):
+        return None
 
     @staticmethod
     def gradle(repo, args, log, extra_init=(), env=None, timeout=None):

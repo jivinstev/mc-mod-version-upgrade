@@ -111,12 +111,77 @@ def author_unlisted_mixins(repo, base):
     return sorted(out)
 
 
+# The harness's own GameTest structure. A kit-owned name, never the `empty_test` a mod ships for its own GameTests: the
+# harness's resources are added to the mod's resource root for the gate run, so a shared name is a duplicate entry
+# that fails processResources (and with a duplicate strategy, one of the two files silently loses).
+HARNESS_STRUCTURE = "port_ci_harness_empty"
+# Entity types the mod deliberately replaces when they join a level, with the fork's reason for each: the baseline's
+# every-entity test excuses only the level refusing one of these, and the gate report lists them.
+BASELINE_EXEMPT = "baseline-exempt.txt"
+
+
+def baseline_exempt_file(repo, mc=None):
+    """The fork's committed .port/<mc>/baseline-exempt.txt, or None (<mc>: the given one, else the version branch's
+    (PORT_BRANCH_MC), else gradle.properties' minecraft_version), on every kind of fork."""
+    repo = pathlib.Path(repo)
+    if not mc:
+        mc = layer_target()
+    if not mc:
+        gp = repo / "gradle.properties"
+        m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
+        mc = m.group(1) if m else None
+    f = repo / ".port" / str(mc) / BASELINE_EXEMPT if mc else None
+    return f if f is not None and f.is_file() else None
+
+
+def baseline_exemptions(repo, modid, mc=None):
+    """[(entity id, reason)] from the fork's baseline-exempt.txt, in file order: one `<modid>:<path> <reason>` a line,
+    `#` comments and blank lines ignored. A line with no reason, an id outside the mod's namespace or a repeated id is
+    refused (Fail): an exemption nobody can explain, or one for another mod's entity, is not one to grant silently."""
+    f = baseline_exempt_file(repo, mc)
+    if f is None:
+        return []
+    out, seen = [], set()
+    for n, raw in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        line = "" if raw.lstrip().startswith("#") else raw.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        eid, reason = parts[0], (parts[1].strip() if len(parts) > 1 else "")
+        where = f"{f.as_posix()}:{n}"
+        if not re.fullmatch(r"[a-z0-9_.-]+:[a-z0-9_./-]+", eid):
+            raise Fail(f"{where}: {eid!r} is not an entity id (namespace:path)")
+        if eid.split(":", 1)[0] != modid:
+            raise Fail(f"{where}: {eid} is not in this mod's namespace ({modid}); the baseline only tests the mod's own")
+        if not reason:
+            raise Fail(f"{where}: {eid} has no reason; say why the mod replaces it (`{eid} <reason>`)")
+        if eid in seen:
+            raise Fail(f"{where}: {eid} is listed twice")
+        seen.add(eid)
+        out.append((eid, reason))
+    return out
+
+
+def _java_str(s):
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def harness_baseline(gt, pkg, modid, exempt):
+    """The baseline GameTest source for the harness: the mod's package and namespace, the kit's own structure, and the
+    fork's exemptions written into REPLACED."""
+    gt = re.sub(r"(?m)^package\s+[\w.]+;", f"package {pkg}.gatetest;", gt).replace('"examplemod"', f'"{modid}"')
+    gt = gt.replace('template = "empty_test"', f'template = "{HARNESS_STRUCTURE}"')
+    puts = "\n        ".join(f"REPLACED.put({_java_str(e)}, {_java_str(r)});" for e, r in exempt)
+    return gt.replace("/*BASELINE_EXEMPT*/", puts)
+
+
 def harness(c):
     """The external harness: a baseline GameTest, its structure, the mixin integrity test."""
     h, modid = c["dir"] / "harness", c["args"].modid
     # reuse a harness only when it was built for this target by this harness code: a stale one fails the same way
     # on every later run (measured: a pre-1.21.5-adapter harness, reused through a persistent --work-dir)
-    stamp = f"{layer_target() or 'base'}\n{_harness_code_hash()}"
+    exempt = baseline_exemptions(c["repo"], modid)
+    stamp = f"{layer_target() or 'base'}\n{_harness_code_hash()}\n{exempt!r}"
     if h.exists() and (h / ".built-for").is_file() and (h / ".built-for").read_text(encoding="utf-8") == stamp:
         return h
     shutil.rmtree(h, ignore_errors=True)
@@ -124,21 +189,25 @@ def harness(c):
         encoding="utf-8")) or [None, modid])[1].split(".")
     pkg = ".".join(pkg[:2]) if len(pkg) > 1 else pkg[0]
     gt = (ROOT / "templates/neoforge-mod/test-templates/BaselineGameTest.java.example").read_text(encoding="utf-8")
-    gt = re.sub(r"(?m)^package\s+[\w.]+;", f"package {pkg}.gatetest;", gt).replace('"examplemod"', f'"{modid}"')
+    gt = harness_baseline(gt, pkg, modid, exempt)
     (h / "java" / pkg.replace(".", "/") / "gatetest").mkdir(parents=True)
     (h / "java" / pkg.replace(".", "/") / "gatetest/BaselineGameTest.java").write_text(gt, encoding="utf-8")
     tg0 = tgt(c)
     if tg0.gametest != "registration":     # data liveness: annotation-discovered targets (1.21.x); 26.x registers tests
         dl = (ROOT / "templates/neoforge-mod/test-templates/DataLivenessGameTest.java.example").read_text(encoding="utf-8")
         dl = re.sub(r"(?m)^package\s+[\w.]+;", f"package {pkg}.gatetest;", dl).replace('"examplemod"', f'"{modid}"')
+        dl = dl.replace('template = "empty_test"', f'template = "{HARNESS_STRUCTURE}"')
         (h / "java" / pkg.replace(".", "/") / "gatetest/DataLivenessGameTest.java").write_text(dl, encoding="utf-8")
     sd = h / "resources/data" / modid / "structure"; sd.mkdir(parents=True)
+    own = [p for p in sorted((c["repo"] / "src").glob(f"*/resources/data/{modid}/structure/{HARNESS_STRUCTURE}.nbt"))]
+    if own:
+        raise Fail(f"the mod ships {own[0].as_posix()}, the gate harness's own structure name: rename the mod's file")
     import gzip, importlib.util
     spec = importlib.util.spec_from_file_location("ges", ROOT / "tools/gen-empty-structure.py")
     ges = importlib.util.module_from_spec(spec); spec.loader.exec_module(ges)
     tg = tgt(c)
     world_version = targets.derive_pack(tg, [c["repo"]])[0]["world_version"]     # the structure's DataVersion: the target's
-    (sd / "empty_test.nbt").write_bytes(gzip.compress(ges.build(modid, "empty_test", 9, world_version)))
+    (sd / f"{HARNESS_STRUCTURE}.nbt").write_bytes(gzip.compress(ges.build(modid, HARNESS_STRUCTURE, 9, world_version)))
     sg = importlib.util.spec_from_file_location("sgc", ROOT / "tools/scaffold-gatec.py")
     sgc = importlib.util.module_from_spec(sg); sg.loader.exec_module(sgc)
     (h / "java" / pkg.replace(".", "/") / "test").mkdir(parents=True, exist_ok=True)
@@ -196,7 +265,7 @@ def harness_layer_registration(c, h, pkg, mc):
                else "1.21.8" if mc_tuple(mc) >= (1, 21, 6) else "1.21.5")
     r = subprocess.run([sys.executable, str(ROOT / "templates/multi-version/tools/gametest_adapter.py"), "--root",
                         str(h / "java"), "--modid", c["args"].modid, "--package", f"{pkg}.gatetest", "--structure",
-                        "empty_test", "--dialect", dialect],
+                        HARNESS_STRUCTURE, "--dialect", dialect],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode or "wired 0 tests" in r.stdout:
         raise Fail(f"wiring the harness GameTests for {mc} failed: {(r.stderr or r.stdout)[-400:]}")
@@ -308,7 +377,7 @@ def harness_registration(c, h, pkg):
         f.write_text(apply_patch(f.read_text(encoding="utf-8"), read_patch(patch.read_text(encoding="utf-8")), f.name),
                      encoding="utf-8")
     r = subprocess.run([sys.executable, str(tools / "gametest_adapter.py"), "--root", str(h / "java"), "--modid", modid,
-                        "--package", f"{pkg}.gatetest", "--structure", "empty_test"],
+                        "--package", f"{pkg}.gatetest", "--structure", HARNESS_STRUCTURE],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode or "wired 0 tests" in r.stdout:
         raise Fail(f"wiring the harness GameTests failed: {(r.stderr or r.stdout)[-400:]}")
