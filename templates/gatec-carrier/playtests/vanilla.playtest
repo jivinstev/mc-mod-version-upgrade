@@ -76,7 +76,6 @@ gamemode survival
 @assert execute if items entity @s hotbar.1 minecraft:netherite_sword
 # crafting in the 2x2 grid, the way a player does: pick the planks up, right-click one into each grid slot (1-4), put
 # the rest back, shift-click the result (slot 0) into the inventory
-clear @s minecraft:oak_planks
 give @s minecraft:oak_planks 8
 @key key.inventory
 @expect screen InventoryScreen within 3s
