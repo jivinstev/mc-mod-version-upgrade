@@ -304,14 +304,21 @@ final class PlaytestRunner {
             }
             case "@click": {
                 String[] a = arg.split("\\s+", 2);
+                // a slot click may end in a modifier: `right` (the right mouse button: carrying a stack, it puts ONE
+                // item down; on a stack, it picks up half) or `shift` (a shift-click: the stack moves across)
+                String how = "left";
+                if (a.length == 2 && (a[0].equals("slot") || a[0].equals("item"))) {
+                    java.util.regex.Matcher mm = java.util.regex.Pattern.compile("^(.*?)\\s+(right|shift)$").matcher(a[1].trim());
+                    if (mm.matches()) { how = mm.group(2); a[1] = mm.group(1); }
+                }
                 if (a.length == 2 && a[0].equals("slot")) {
-                    try { return new ClickOp(no, text, Integer.parseInt(a[1].trim()), null); } catch (NumberFormatException e) {
-                        throw new ScriptError(no, "@click slot <N>");
+                    try { return new ClickOp(no, text, Integer.parseInt(a[1].trim()), null, how); } catch (NumberFormatException e) {
+                        throw new ScriptError(no, "@click slot <N> [right|shift]");
                     }
                 }
-                if (a.length == 2 && a[0].equals("button")) return new ClickOp(no, text, -1, unquote(a[1]));
-                if (a.length == 2 && a[0].equals("item")) return new ClickOp(no, text, -2, unquote(a[1]));
-                throw new ScriptError(no, "@click slot <N> | @click button \"<text>\" | @click item \"<name>\"");
+                if (a.length == 2 && a[0].equals("button")) return new ClickOp(no, text, -1, unquote(a[1]), how);
+                if (a.length == 2 && a[0].equals("item")) return new ClickOp(no, text, -2, unquote(a[1]), how);
+                throw new ScriptError(no, "@click slot <N> [right|shift] | @click button \"<text>\" | @click item \"<name>\" [right|shift]");
             }
             case "@type": {
                 String t = unquote(arg.trim());
@@ -656,7 +663,16 @@ final class PlaytestRunner {
     static final class ClickOp extends Op {
         final int slot;
         final String button;
-        ClickOp(int no, String text, int slot, String button) { super(no, text); this.slot = slot; this.button = button; }
+        final String how;   // left | right | shift (a slot or an item click)
+        ClickOp(int no, String text, int slot, String button, String how) {
+            super(no, text); this.slot = slot; this.button = button; this.how = how;
+        }
+
+        /** The click type (PICKUP, or QUICK_MOVE for shift) and mouse button (1 for right) of this slot click. */
+        Object[] kind(Class<?> ct) {
+            Object type = ct.isEnum() ? enumValue(ct, how.equals("shift") ? "QUICK_MOVE" : "PICKUP") : null;
+            return new Object[] {type, how.equals("right") ? 1 : 0};
+        }
 
         @Override Res start(PlaytestRunner r, Minecraft mc) throws Exception {
             Screen screen = mc.screen;
@@ -678,11 +694,11 @@ final class PlaytestRunner {
                 Method m = R.method(mc.gameMode.getClass(), "handleInventoryMouseClick", 5);
                 if (m == null) m = R.method(mc.gameMode.getClass(), "handleContainerInput", 5);
                 if (m == null) return fail("no MultiPlayerGameMode slot-click method on this version");
-                Class<?> ct = m.getParameterTypes()[3];
-                Object pickup = ct.isEnum() ? enumValue(ct, "PICKUP") : null;
+                Object[] k = kind(m.getParameterTypes()[3]);
                 String nm = menu.slots.get(found).getItem().getHoverName().getString();
-                m.invoke(mc.gameMode, menu.containerId, found, 0, pickup, mc.player);
-                return pass("clicked slot " + found + " (\"" + nm + "\") of " + screen.getClass().getSimpleName());
+                m.invoke(mc.gameMode, menu.containerId, found, k[1], k[0], mc.player);
+                return pass(how + "-clicked slot " + found + " (\"" + nm + "\") of " + screen.getClass().getSimpleName() + "; carried "
+                    + menu.getCarried().getHoverName().getString() + " x" + menu.getCarried().getCount());
             }
             if (button == null) {
                 var menu = mc.player.containerMenu;
@@ -690,10 +706,9 @@ final class PlaytestRunner {
                 Method m = R.method(mc.gameMode.getClass(), "handleInventoryMouseClick", 5);
                 if (m == null) m = R.method(mc.gameMode.getClass(), "handleContainerInput", 5);
                 if (m == null) return fail("no MultiPlayerGameMode slot-click method on this version");
-                Class<?> ct = m.getParameterTypes()[3];
-                Object pickup = ct.isEnum() ? enumValue(ct, "PICKUP") : null;
-                m.invoke(mc.gameMode, menu.containerId, slot, 0, pickup, mc.player);
-                return pass("clicked slot " + slot + " of " + screen.getClass().getSimpleName() + "; carried "
+                Object[] k = kind(m.getParameterTypes()[3]);
+                m.invoke(mc.gameMode, menu.containerId, slot, k[1], k[0], mc.player);
+                return pass(how + "-clicked slot " + slot + " of " + screen.getClass().getSimpleName() + "; carried "
                     + menu.getCarried().getHoverName().getString() + " x" + menu.getCarried().getCount());
             }
             List<String> seen = new ArrayList<>();

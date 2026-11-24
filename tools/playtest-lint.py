@@ -17,6 +17,8 @@ The grammar (one line at a time; blank lines and '# comments' are ignored):
                                    key by its name (key.keyboard.escape, key.mouse.left); default hold 2t
     @click slot <N> | @click button "<text>" | @click item "<name>"   (item: the open menu's slot whose item's name
                                    contains the text, case-insensitive: no slot numbers when a page's size moves its tiles)
+                                   a slot or item click may end in `right` (the right mouse button: carrying a stack it
+                                   puts ONE down, on a stack it picks up half) or `shift` (a shift-click: the stack moves)
     @type "<text>"                 the open screen's text box (the focused one, else the first) is set to the text
     @expect <kind> [<match>] [gone] [within <duration>]   kinds: sound subtitle chat title actionbar bossbar screen error;
                                    match = case-insensitive substring of the text or of a translation key, or /regex/
@@ -154,8 +156,10 @@ def lint(text):
         elif d == "@click":
             k, _, rest = arg.partition(" ")
             rest = rest.strip()
+            if k in ("slot", "item"):
+                rest = re.sub(r"\s+(right|shift)$", "", rest)
             if not ((k == "slot" and re.fullmatch(r"\d+", rest)) or (k in ("button", "item") and rest)):
-                probs.append((no, '@click slot <N> | @click button "<text>" | @click item "<name>"'))
+                probs.append((no, '@click slot <N> [right|shift] | @click button "<text>" | @click item "<name>" [right|shift]'))
         elif d == "@type":
             if not arg.strip().strip('"'):
                 probs.append((no, '@type "<text>"'))
@@ -203,12 +207,12 @@ def self_check():
         "@step one", "/say hi", "@expect chat hi within 5s", "@wait 10t", "@wait 1.5s",
         "@aim entity minecraft:zombie", "@aim entity @e[type=zombie,limit=1]", "@aim entity minecraft:zombie if-present", "@goto structure #minecraft:village", "@goto structure minecraft:fortress in minecraft:the_nether",
         "@repeat each @e[tag=t] max 5 until execute unless entity {it}", "@aim entity {it}", "@end-repeat", "@aim pos ~ ~1 10", "@aim look 90 -10",
-        "@key key.attack", "@key key.forward hold 20t", "@click slot 36", '@click button "Done"', '@click item "Done"', '@type "a red apple"',
+        "@key key.attack", "@key key.forward hold 20t", "@click slot 36", "@click slot 1 right", "@click slot 0 shift", '@click button "Done"', '@click item "Done"', '@click item "Oak Planks" shift', '@type "a red apple"',
         "@expect sound entity.zombie.* gone within 2s", "@expect subtitle /zombie (hurts|groans)/", "@expect error gone",
         "@expect screen none", "@shot after-fight", "@assert execute if entity @s", "@step two", "@allow error Foo.*", "@end",
         "@not-a-directive after end is ignored"])
     p, s = lint(good)
-    expect(p == [] and s["steps"] == ["one", "two"] and s["lines"] == 24, f"a script using every directive is clean: {p} {s}")
+    expect(p == [] and s["steps"] == ["one", "two"] and s["lines"] == 27, f"a script using every directive is clean: {p} {s}")
     for src, want in [("@step a\n@repeat each @e[tag=t] until execute unless entity {it}\n@wait 1t\n@end-repeat", "bound N"),
                       ("@step a\n@repeat until execute if entity @s\n@wait 1t\n@end-repeat", "bound N"),
                       ("@step a\n@repeat 3\n@wait 1t", "without @end-repeat"), ("@step a\n@end-repeat", "without @repeat"),
@@ -217,7 +221,7 @@ def self_check():
         expect(any(want in m for _n, m in lint(src)[0]), f"{src!r} is refused naming {want!r}: {lint(src)[0]}")
     for bad, want in (("@step a\n@wait 10", "a duration"), ("@step a\n@expect smell roses", "unknown @expect kind"),
                       ("@step a\n@aim at zombie", "@aim entity|pos|look"), ("@step a\n@key key.use hold", "@key <key"),
-                      ("@step a\n@click 3", "@click slot"), ("@step a\n@type", "@type"), ("@step a\n@world flat", "header"),
+                      ("@step a\n@click 3", "@click slot"), ("@step a\n@click slot 3 middle", "@click slot"), ("@step a\n@type", "@type"), ("@step a\n@world flat", "header"),
                       ("@step a\n@expect chat", "needs a match"), ("@step a\n@expect chat /(/", "bad /regex/"),
                       ("@step a\n@shot bad name", "@shot <name>"), ("@step a\n@frobnicate", "unknown directive"),
                       ("@world tilted", "@world takes"), ("# nothing", "no steps"), ("@step a\n@allow warn x", "@allow error"),
