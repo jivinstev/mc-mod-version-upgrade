@@ -68,7 +68,9 @@ For each version, install does these steps:
 2. **Java:** fetches the Java runtime the version names, when it is absent.
 3. **NeoForge:** installs it with its own installer, headless, on the Launcher's Java (tools/install-port.py's code
    path). `launcher_profiles.json` is restored byte for byte afterwards, which undoes the installer's edit to the
-   player's "NeoForge" profile. A NeoForge install refuses while the Launcher is running.
+   player's "NeoForge" profile. A NeoForge install refuses while the Launcher is running. Where no Launcher ever
+   ran (a headless CI or agent container) the file is absent, so a minimal one is written first and the output says
+   so; an existing file is never rewritten.
 4. **The instance:** writes `<minecraft>/instances/<label>-<mc>/` (or `--instances-dir`). Its `mods/` holds exactly
    that version's set, plus `gatec-carrier-<mc>.jar` with `--with-carrier`. A stray jar is moved to `mods-removed/`
    and is not deleted. A folder this tool did not create is refused.
@@ -124,6 +126,11 @@ checked against SHA256SUMS. Other sources:
 - `--carrier-release TAG`: one particular release;
 - `--carrier-dir DIR`: a folder of jars, such as a CI artifact (its SHA256SUMS is checked when present);
 - `--carrier-jar [MC=]JAR`: one jar.
+
+With `--with-carrier` and none of these flags, the environment's `CARRIER_DIR` / `CARRIER_JAR` stand for the last
+two. Where api.github.com is refused, the release is read from github.com instead: the newest `gatec-carrier-v<N>`
+tag from `git ls-remote` (or `--carrier-release`), then the plain release download URL, checked against SHA256SUMS.
+When that fails too, the plan stops and names `CARRIER_DIR` / `CARRIER_JAR`: hand the jars over that way.
 
 Forks carry nothing for it.
 

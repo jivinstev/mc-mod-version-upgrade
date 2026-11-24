@@ -140,7 +140,9 @@ real Minecraft Launcher installs of every Minecraft version the port supports, w
   (default 5) would stay free.
 - **install** does four things per version:
   - fetches whatever Minecraft files the Launcher never downloaded, and the Java runtime if it is absent;
-  - installs NeoForge headless with its own installer;
+  - installs NeoForge headless with its own installer. On a machine where no Launcher ever ran (a headless CI or
+    agent container) there is no `launcher_profiles.json`, so a minimal one is written first, and the output says
+    so. An existing file is never rewritten;
   - creates one instance per version, `<minecraft>/instances/<label>-<mc>/`, whose `mods/` holds exactly that
     version's set;
   - with `--profiles`, adds a Launcher profile per version (after a backup, and never while the Launcher runs).
@@ -160,7 +162,12 @@ it. To use it by hand, put the jar for your version in an instance's `mods/` and
 `-Dsmokeharness.boottest=true -Dsmokeharness.testmode=<launch|spawn|battle|gauntlet>
 -Dsmokeharness.namespaces=<mod ids>`; it prints `SMOKEHARNESS_BOOT_TEST: PASS|FAIL ...` and quits. The runner uses the
 newest release by default, checked against SHA256SUMS. `--carrier-release TAG` picks another release,
-`--carrier-dir DIR` takes a folder of jars (such as a CI artifact), and `--carrier-jar [MC=]JAR` takes one jar.
+`--carrier-dir DIR` takes a folder of jars (such as a CI artifact), and `--carrier-jar [MC=]JAR` takes one jar. With
+`--with-carrier` and none of those flags, the environment variables `CARRIER_DIR` and `CARRIER_JAR` stand for them.
+Where `api.github.com` is refused (a proxy's 403), the runner reads the release from `github.com` instead: the newest
+`gatec-carrier-vN` tag from `git ls-remote` (or `--carrier-release`), then the plain download URL
+`https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>`, checked against SHA256SUMS. If that fails too,
+the plan stops with a message naming `CARRIER_DIR` and `CARRIER_JAR`.
 
 ## Playtests: scripted play in the real game
 
