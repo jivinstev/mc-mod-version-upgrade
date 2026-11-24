@@ -121,8 +121,8 @@ BASELINE_EXEMPT = "baseline-exempt.txt"
 
 
 def baseline_exempt_file(repo, mc=None):
-    """The fork's committed .port/<mc>/baseline-exempt.txt, or None (<mc>: the given one, else the version branch's
-    (PORT_BRANCH_MC), else gradle.properties' minecraft_version), on every kind of fork."""
+    """The fork's committed .port/<mc>/baseline-exempt.txt, else the nearest lower version's, or None (<mc>: the given
+    one, else the version branch's (PORT_BRANCH_MC), else gradle.properties' minecraft_version), on every kind of fork."""
     repo = pathlib.Path(repo)
     if not mc:
         mc = layer_target()
@@ -131,7 +131,17 @@ def baseline_exempt_file(repo, mc=None):
         m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
         mc = m.group(1) if m else None
     f = repo / ".port" / str(mc) / BASELINE_EXEMPT if mc else None
-    return f if f is not None and f.is_file() else None
+    if f is None or f.is_file():
+        return f
+    # no file of this version's own: the nearest LOWER version's (.port/<lower>/ is carried up by every merge, and a
+    # single-version fork that moved its minecraft_version keeps its old directory). What a mod replaces when it joins
+    # a level is the mod's behaviour, not the version's, so a new version branch inherits it rather than failing Gate B
+    # on the same stand-in the lower version excused (measured: a new rung's baseline failed "the level refused it").
+    # The report row names the file used; an empty file of the version's own grants nothing.
+    lower = sorted((mc_tuple(d.name), d / BASELINE_EXEMPT) for d in (repo / ".port").glob("*")
+                   if re.fullmatch(r"\d+(\.\d+)+", d.name) and mc_tuple(d.name) < mc_tuple(str(mc))
+                   and (d / BASELINE_EXEMPT).is_file()) if (repo / ".port").is_dir() else []
+    return lower[-1][1] if lower else None
 
 
 def baseline_exemptions(repo, modid, mc=None):

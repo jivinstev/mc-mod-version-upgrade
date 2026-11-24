@@ -717,6 +717,26 @@ try:
     ok &= '"empty_test"' not in src3 and '"port_ci_harness_empty"' in src3
 finally:
     del os.environ["PORT_BRANCH_MC"], os.environ["PORT_BRANCH_BASE"]
+# a new version branch with no file of its own inherits the nearest LOWER version's (never a higher one), the report
+# row names that file, and an empty file of its own grants nothing
+os.environ.update(PORT_BRANCH_MC="1.21.10", PORT_BRANCH_BASE="1.21.8")
+try:
+    r4 = fork("vb-new", "1.21.8", "21.8.57", "examplemod:stand_in replaced by a rig\n")
+    for v, t in (("1.21.1", "examplemod:old too old\n"), ("1.21.11", "examplemod:new too new\n")):
+        (r4 / f".port/{v}").mkdir(parents=True); (r4 / f".port/{v}/baseline-exempt.txt").write_text(t, encoding="utf-8")
+    ok &= pg.baseline_exempt_file(r4) == r4 / ".port/1.21.8/baseline-exempt.txt"
+    ok &= pg.baseline_exemptions(r4, "examplemod") == [("examplemod:stand_in", "replaced by a rig")]
+    rows = []; cg.exempt_rows(rows, pg, r4, "examplemod")
+    ok &= rows == ['| Gate B -- baseline exemptions (`.port/1.21.8/baseline-exempt.txt`) | REPORT | examplemod:stand_in: replaced by a rig |']
+    (r4 / ".port/1.21.10").mkdir(); (r4 / ".port/1.21.10/baseline-exempt.txt").write_text("# none here\n", encoding="utf-8")
+    ok &= pg.baseline_exempt_file(r4) == r4 / ".port/1.21.10/baseline-exempt.txt" and pg.baseline_exemptions(r4, "examplemod") == []
+finally:
+    del os.environ["PORT_BRANCH_MC"], os.environ["PORT_BRANCH_BASE"]
+# a single-version fork that moved its minecraft_version in place keeps its old directory's exemptions
+r5 = fork("sv-moved", "1.21.8", "21.8.57", "examplemod:stand_in replaced by a rig\n")
+(r5 / "gradle.properties").write_text("minecraft_version=1.21.10\nneo_version=21.10.64\n", encoding="utf-8")
+ok &= pg.baseline_exempt_file(r5) == r5 / ".port/1.21.8/baseline-exempt.txt"
+ok &= pg.baseline_exempt_file(fork("sv-higher", "1.21.11", "21.11.1", "examplemod:x y\n"), mc="1.21.10") is None
 # refused: no reason, another mod's entity, not an id, listed twice, and a mod that ships the kit's own structure name
 for i, (text, needle) in enumerate([("examplemod:stand_in\n", "has no reason"),
                                     ("othermod:thing because\n", "not in this mod's namespace"),
@@ -730,7 +750,7 @@ print("self-check: OK" if ok else "self-check: FAILED")
 PY
 mkdir -p "$T/harness-exempt"
 out="$(python3 "$T/test-port-tools-harness-exempt.py" "$T/harness-exempt" 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "port_gates harness: its structure is the kit's own (port_ci_harness_empty), so a mod's empty_test.nbt never collides and a mod shipping the kit's name is refused; the baseline's every-entity test excuses only a refusal the fork lists in .port/<mc>/baseline-exempt.txt with a reason (single-version and version-branch routes), the gate report lists each, and a line with no reason, another mod's id, a non-id or a repeat is refused" \
+grep -q 'self-check: OK' <<<"$out" && ok "port_gates harness: its structure is the kit's own (port_ci_harness_empty), so a mod's empty_test.nbt never collides and a mod shipping the kit's name is refused; the baseline's every-entity test excuses only a refusal the fork lists in .port/<mc>/baseline-exempt.txt with a reason (single-version and version-branch routes; a version with no file of its own inherits the nearest lower version's), the gate report lists each, and a line with no reason, another mod's id, a non-id or a repeat is refused" \
   || bad "port_gates harness exemptions: $out"
 
 # the round's queue diff (part 2's on its own): here to balance the parts (Windows: part 2 holds round.py's self-check)
