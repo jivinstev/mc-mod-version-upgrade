@@ -214,6 +214,11 @@ A command that fails fails its step. The directives are:
   (a slot or item click may end in `right`, which puts one item of a carried stack down, or `shift`, which moves the
   stack across, so a script crafts in a crafting grid and empties a chest the way a player does);
 - travel and loops: `@goto structure <id>`, and bounded `@repeat … @end-repeat` blocks (also once per entity, `{it}`);
+- fights: `@fight <selector or {it}> within 60s [inside <x0> <z0> <x1> <z1>]` beats every entity it matches with
+  what is in his hand, the way a player does: nearest first, walking up to reach, swinging at full charge, a jump and
+  a step aside when walking makes no headway; with a box he does not walk out of it, and walks back in if a hit knocks
+  him out. Who is left is the server's answer, not the client's view. It fails at the time limit naming each one left
+  and where, and fails when it matches nothing alive at all;
 - control and evidence: `@wait`, `@allow error <regex>`, `@shot <name>`, `@continue-on-fail` and `@end`.
 - header only: `@world [flat|normal] [structures] [seed=<n>]` (default flat, seed 0; `structures` adds the flat world's villages and strongholds) and `@continue-on-fail`. An `@intent` inside a
   step is that step's purpose.

@@ -58,6 +58,16 @@ effect give @e[tag=playtest] minecraft:fire_resistance infinite 0 true
 # the zombie is dead: a repeated strike passes as "nothing to aim at" instead of failing
 @aim entity @e[tag=playtest,limit=1] if-present
 
+@step fight
+# two zombies that move and fight back (no NoAI), one 6 blocks out and one 9 behind it: @fight walks to the nearest,
+# swings at full charge, then the next, and never steps out of the 21x21 box around him
+summon minecraft:zombie ~ ~ ~6 {Tags:["fight"]}
+summon minecraft:zombie ~3 ~ ~9 {Tags:["fight"]}
+effect give @e[tag=fight] minecraft:fire_resistance infinite 0 true
+effect give @s minecraft:resistance 600 4 true
+@fight @e[tag=fight] within 60s inside ~-10 ~-10 ~10 ~10
+@assert execute unless entity @e[tag=fight]
+
 @step inventory
 @key key.inventory
 @expect screen Inventory within 3s
