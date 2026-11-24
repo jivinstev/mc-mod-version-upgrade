@@ -168,6 +168,13 @@ workflow → branch `neoforge-<mc>`, release: true**, or `gh workflow run port-c
 -f release=true`. It publishes the authors' own JARs as a pre-release named `<modid>-<version>-mc<mc>`,
 only if every gate passes. The kit is published when the maintainer merges the change to main, so a change that needs a new kit waits for that merge (never merge it yourself). Give the user the release link; they smoke-test it on their machine.
 
+**A GameTest suite longer than Gate B's limit** (1500 s): never add `env: PORT_GRADLE_ARGS` to the workflow by hand
+(the next regeneration drops it). Commit `.port/<mc>/gate-gradle-args.txt` instead, one Gradle argument a line (`#`
+comments), e.g. `-Pshard=ci` for a build that selects a test subset from that property. Port CI's gates job
+(`ci-gates.py --port-ci`, both passes, full and minimal) appends it to every Gradle call and lists it in the gate
+summary; local gate runs (`fork-port.py`, the weekly round) do not read it, so they run the full tier. `port-ci.py`
+and `port-ci.py check` warn about a hand-added `PORT_GRADLE_ARGS` until the file holds it.
+
 **Promote it once they have played it** (`> Promote my fork's release`). Ask who played it and, optionally,
 one line on what they did; never promote on your own or from an unattended run -- promotion is the "a person
 played it" gate, and the fork's newest full Release is the baseline everything after it (syncing, publishing)

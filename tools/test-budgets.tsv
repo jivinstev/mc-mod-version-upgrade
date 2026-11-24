@@ -145,6 +145,7 @@ port-provenance: the release commit is matched by publish time and the unrelease
 port-sync: the author's new commits merge into the dev port branch; a conflict stops with the files 	2	10	15
 port-upstream: an unlicensed or mismatched repo stops before spending; a dropped copyright line stop	3	5	6
 port.py and port-upstream.py both run tools/mechanical-hop.py's Forge and era stages; no route runs 	2	2	2
+port_gates gate-gradle-args: .port/<mc>/gate-gradle-args.txt read for the version gated (single-vers	2	2	3
 port_gates.gate_a itself (Gradle faked): reads build/test-results/test and counts the tests run	2	2	2
 port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone	2	2	2
 port_gates harness: its structure is the kit's own (port_ci_harness_empty), so a mod's empty_test.nb	2	6	12

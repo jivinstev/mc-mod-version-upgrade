@@ -188,7 +188,7 @@ jobs:
           git rev-parse "HEAD^{tree}" > "$RUNNER_TEMP/built-tree.txt"   # the tree this run built: a from_run release checks it
           git fetch --no-tags origin "master"
           python3 .port-tools/tools/ci-gates.py --repo . --modid "examplemod" --base "origin/master" \
-            --gatec "launch,spawn" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md"
+            --gatec "launch,spawn" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md" --port-ci
       - name: Gate summary
         if: always()
         run: cat "$RUNNER_TEMP/gates.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
