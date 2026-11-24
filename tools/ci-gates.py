@@ -523,6 +523,34 @@ def exempt_rows(rows, pu, repo, modid):
                     "; ".join(f"{e}: {r}".replace("|", "/") for e, r in ex)[:600] + " |")
 
 
+def gate_args_rows(port_ci, pu, repo, rows, record):
+    """A Port CI run (--port-ci): the fork's .port/<mc>/gate-gradle-args.txt appended to PORT_GRADLE_ARGS (after what
+    it already holds), so every Gradle call of the run -- the author's build, Gate A, Gate B, Gate C, both environments
+    -- carries it, and a REPORT row saying so: a run that gated a subset says which in its summary. A bad file fails the
+    run before anything is built. Any other run (a round's or fork-port.py's local gates, the full tier) leaves the
+    file unread and says so."""
+    f = pu.gate_gradle_args_file(repo)
+    if f is None:
+        return
+    rel = f.relative_to(repo).as_posix()
+    if not port_ci:
+        print(f"[ci-gates] {rel}: not applied -- it is for the fork's Port CI runs (--port-ci); this run gates with no "
+              "extra Gradle arguments", flush=True)
+        return
+    try:
+        extra = pu.gate_gradle_args(repo)
+    except pu.Fail as e:
+        record(f"Gate run -- extra Gradle arguments (`{rel}`)", False, str(e)[:300])
+        return
+    if not extra:
+        return
+    os.environ["PORT_GRADLE_ARGS"] = pu.with_gradle_args(os.environ.get("PORT_GRADLE_ARGS"), extra)
+    shown = " ".join(f"`{x}`" for x in extra).replace("|", "/")
+    rows.append(f"| Gate run -- extra Gradle arguments (`{rel}`) | REPORT | {shown} on every Gradle call of this Port CI "
+                "run (the gates ran what these select) |")
+    print(f"[ci-gates] Port CI: every Gradle call carries {' '.join(extra)} ({rel})", flush=True)
+
+
 def self_check():
     ok = green_detail("[x] All 4 required tests passed :)") == "4 required test(s) passed"
     ok &= green_detail("M_BOOT_TEST: spawned 40 creature type(s): [a]\nM_BOOT_TEST: PASS — ticked 200").startswith(
@@ -727,6 +755,10 @@ def main():
                          ".port/<mc>/shipped-expect.txt (every kind of fork)")
     ap.add_argument("--shipped-jar", help="glob (under the build's libs dir) naming the jar a player installs; default: "
                                           ".port/<mc>/shipped-jar.txt, else the only jar there")
+    ap.add_argument("--port-ci", action="store_true",
+                    help="this is the fork's Port CI run (the workflow passes it): the fork's .port/<mc>/gate-gradle-args.txt "
+                         "(one Gradle argument a line, e.g. -Pshard=ci) is appended to PORT_GRADLE_ARGS for every Gradle "
+                         "call of the run; without it (a round's or fork-port.py's local gates) the file is not read")
     ap.add_argument("--mc", help="the Minecraft version of the version branch checked out (tools/fork-branches.py; "
                                  "it must be that branch's): the run takes build/.fork-port.lock, so a second run on the "
                                  "same checkout is refused (exit 14)")
@@ -772,6 +804,7 @@ def main():
         rows.append(f"| {name} | {'PASS' if passed else 'FAIL'} | {detail} |")
         print(f"[ci-gates] {name}: {'PASS' if passed else 'FAIL'} -- {detail}", flush=True)
 
+    gate_args_rows(a.port_ci, pu, repo, rows, record)
     excluded, ex, arts = {}, [], []
     if a.env == "minimal":
         env0 = dict(os.environ, **pu.gate_env(c))

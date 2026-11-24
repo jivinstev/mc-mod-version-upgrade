@@ -262,6 +262,9 @@ def check(repo, file=None, kit_version=None, say=print):
             say(f"port-ci: check: cannot read the newest Port CI kit ({e}); pass --kit-version N")
     why = stale_workflow(wf, newest)
     branch = git(repo, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip() or "the port branch"
+    hand = hand_gradle_args(wf, repo, props(repo).get("minecraft_version"))
+    if hand:
+        say(f"port-ci: check: WARNING {branch}: {hand}")
     if not why:
         say(f"port-ci: check: {branch}: its workflow is current" + (f" (kit {newest})" if newest else "")); return 0
     if _load_tool("fork_kind", "fork-kind.py").detect(repo)[0] == "version-branches":
@@ -280,6 +283,22 @@ def check(repo, file=None, kit_version=None, say=print):
         how = " -- regenerate it with tools/port-ci.py (its options could not be read back)"
     say(f"port-ci: check: WARNING {branch}: " + "; ".join(why) + how)
     return 0
+
+
+GATE_ARGS_FILE = "gate-gradle-args.txt"     # tools/port_gates.py GATE_GRADLE_ARGS
+
+
+def hand_gradle_args(wf, repo, mc):
+    """A warning when the installed workflow sets PORT_GRADLE_ARGS itself (a hand edit: the template never does) and the
+    fork has no .port/<mc>/gate-gradle-args.txt: regenerating drops the edit, and the gates would run the whole suite.
+    The committed file, read by every Port CI run (ci-gates.py --port-ci), is where those arguments go. None otherwise."""
+    m = re.search(r"(?m)^\s*PORT_GRADLE_ARGS:\s*(.*)$", wf)
+    rel = f".port/{mc}/{GATE_ARGS_FILE}"
+    if not m or (pathlib.Path(repo) / rel).is_file():
+        return None
+    return (f"the installed workflow sets PORT_GRADLE_ARGS by hand ({m.group(1).strip() or 'a block'}); a regenerated "
+            f"workflow does not: put each argument on its own line in {rel} and commit it, so every Port CI gate run "
+            "reads it")
 
 
 def render(text, values):
@@ -942,6 +961,24 @@ def workflow_check_check():
                    "records warning", said)
         ok &= want("check: stale_workflow is the head's check", stale_workflow(cur, 7) == [] and len(stale_workflow(old, 9)) == 2
                    and stale_workflow(cur, None) == [], "[] / 2 reasons / []", (stale_workflow(cur, 7), stale_workflow(old, 9)))
+        # a hand-added PORT_GRADLE_ARGS (the gates' subset) is warned about until .port/<mc>/gate-gradle-args.txt holds it
+        (r / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        hand = cur.replace("      - name: Build and gates\n", '      - name: Build and gates\n        env:\n'
+                           '          PORT_GRADLE_ARGS: "-Pshard=ci"\n', 1)
+        (r / WORKFLOW).write_text(hand, encoding="utf-8")
+        said = []
+        check(r, kit_version=7, say=said.append)
+        ok &= want("check: a hand-added PORT_GRADLE_ARGS warns, naming the file", hand != cur and len(said) == 2 and
+                   'PORT_GRADLE_ARGS by hand ("-Pshard=ci")' in said[0] and ".port/1.21.1/gate-gradle-args.txt" in said[0]
+                   and "is current" in said[1], "hand warning + current", said)
+        (r / ".port/1.21.1").mkdir(parents=True)
+        (r / ".port/1.21.1/gate-gradle-args.txt").write_text("-Pshard=ci\n", encoding="utf-8")
+        said = []
+        check(r, kit_version=7, say=said.append)
+        ok &= want("check: the file present: no hand warning", len(said) == 1 and "is current" in said[0], "current", said)
+        ok &= want("check: the template never sets PORT_GRADLE_ARGS", hand_gradle_args(cur, d, "1.21.4") is None
+                   and hand_gradle_args(fixture(True), d, "1.21.4") is None, None, "a template PORT_GRADLE_ARGS")
+        (r / WORKFLOW).write_text(old, encoding="utf-8")       # the cases below read the records-less workflow
         said = []
         def no_kit(*a, **k):
             raise SystemExit("offline")
@@ -1392,7 +1429,8 @@ def _without_reuse(wf):
                  "          run-id: ${{ inputs.from_run || github.run_id }}\n",
                  "          github-token: ${{ inputs.from_run && github.token || '' }}\n",
                  "          FROM_RUN: ${{ inputs.from_run }}\n", "${FROM_RUN:+ (jars and gates of run $FROM_RUN, the same tree)}",
-                 ' ${gates[@]+"${gates[@]}"}'):
+                 ' ${gates[@]+"${gates[@]}"}',
+                 ' --port-ci'):     # a later change: the gates run reads .port/<mc>/gate-gradle-args.txt (ci-gates.py)
         w = w.replace(gone, "")
     w = _cut(w, "    # from_run: the gates (and shipped) jobs", "    needs: ")
     w = _cut(w, "      - name: Jar digests", "      - uses: actions/upload-artifact@v4\n        if: matrix.env == 'full'")
@@ -1926,6 +1964,9 @@ def main():
     if a.print:
         print(out); return 0
     f = repo / WORKFLOW
+    hand = hand_gradle_args(f.read_text(encoding="utf-8", errors="replace"), repo, mc) if f.is_file() else None
+    if hand:
+        print(f"port-ci: WARNING: {hand}")
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(out, encoding="utf-8")
     if a.no_commit:

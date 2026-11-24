@@ -172,6 +172,62 @@ def baseline_exemptions(repo, modid, mc=None):
     return out
 
 
+# Extra Gradle arguments for a fork's Port CI gate runs (ci-gates.py --port-ci): e.g. `-Pshard=ci`, so a fork whose
+# whole GameTest suite outlasts the kit's Gate B limit gates a subset on Port CI and its full tier elsewhere (a
+# keep-current round's local gates, which never read this file). Committed per version, read at run time, so
+# regenerating the workflow cannot lose it.
+GATE_GRADLE_ARGS = "gate-gradle-args.txt"
+
+
+def port_mc(repo, mc=None):
+    """The Minecraft version a .port/<mc>/ file is looked up for: the given one, else the version branch's
+    (PORT_BRANCH_MC), else gradle.properties' minecraft_version, else None -- baseline_exempt_file's order."""
+    if mc:
+        return str(mc)
+    mc = layer_target()
+    if mc:
+        return mc
+    gp = pathlib.Path(repo) / "gradle.properties"
+    m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
+    return m.group(1) if m else None
+
+
+def gate_gradle_args_file(repo, mc=None):
+    """The fork's committed .port/<mc>/gate-gradle-args.txt, or None, on every kind of fork. The version's own file
+    only (a lower version's, carried up by a merge, is not read for another version)."""
+    mc = port_mc(repo, mc)
+    f = pathlib.Path(repo) / ".port" / mc / GATE_GRADLE_ARGS if mc else None
+    return f if f is not None and f.is_file() else None
+
+
+def gate_gradle_args(repo, mc=None):
+    """[argument] from the fork's gate-gradle-args.txt, in file order: one Gradle argument a line (an option with a
+    value in its one-word form, `-Pshard=ci`, `--exclude-task=check`), `#` comment lines and blank lines ignored. A line
+    that is not an option (a task name would run on every Gradle call of the gate run) or holds a space (two arguments
+    on one line, which Gradle would get as one) is refused (Fail)."""
+    f = gate_gradle_args_file(repo, mc)
+    if f is None:
+        return []
+    out = []
+    for n, raw in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        line = "" if raw.lstrip().startswith("#") else raw.strip()
+        if not line:
+            continue
+        where = f"{f.as_posix()}:{n}"
+        if not line.startswith("-"):
+            raise Fail(f"{where}: {line!r} is not a Gradle option; the file holds options only (`-Pshard=ci`), one a line")
+        if re.search(r"\s", line):
+            raise Fail(f"{where}: {line!r} holds more than one word; one argument a line (`--exclude-task=check`, not "
+                       "`-x check`)")
+        out.append(line)
+    return out
+
+
+def with_gradle_args(current, extra):
+    """PORT_GRADLE_ARGS with `extra` appended after what it already holds (a round's -Dmaven.repo.local stays)."""
+    return "\n".join(a for a in [*(current or "").splitlines(), *extra] if a.strip())
+
+
 def _java_str(s):
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 

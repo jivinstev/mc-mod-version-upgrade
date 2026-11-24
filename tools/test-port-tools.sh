@@ -752,6 +752,61 @@ mkdir -p "$T/harness-exempt"
 out="$(python3 "$T/test-port-tools-harness-exempt.py" "$T/harness-exempt" 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "port_gates harness: its structure is the kit's own (port_ci_harness_empty), so a mod's empty_test.nbt never collides and a mod shipping the kit's name is refused; the baseline's every-entity test excuses only a refusal the fork lists in .port/<mc>/baseline-exempt.txt with a reason (single-version and version-branch routes; a version with no file of its own inherits the nearest lower version's), the gate report lists each, and a line with no reason, another mod's id, a non-id or a repeat is refused" \
   || bad "port_gates harness exemptions: $out"
+# A fork's extra Gradle arguments for its Port CI gate runs (.port/<mc>/gate-gradle-args.txt, ci-gates.py --port-ci): the
+# reader on a single-version fork (gradle.properties' version) and a version branch (PORT_BRANCH_MC), and how it
+# combines with a PORT_GRADLE_ARGS already set (a round's -Dmaven.repo.local).
+cat > "$T/test-port-tools-gate-args.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
+import importlib.util, os, pathlib, sys
+T = pathlib.Path(sys.argv[1])
+s = importlib.util.spec_from_file_location("pg", "tools/port_gates.py"); pg = importlib.util.module_from_spec(s); s.loader.exec_module(pg)
+ok, why = True, []
+def want(name, good):
+    global ok
+    ok &= bool(good)
+    if not good:
+        why.append(name)
+def fails(fn, needle):
+    try:
+        fn(); return False
+    except pg.Fail as e:
+        return needle in str(e)
+os.environ.pop("PORT_BRANCH_MC", None)
+sv = T / "sv"; (sv / ".port/1.21.1").mkdir(parents=True)
+(sv / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.228\n", encoding="utf-8")
+want("single-version, no file: None, no arguments", pg.gate_gradle_args_file(sv) is None and pg.gate_gradle_args(sv) == [])
+f = sv / ".port/1.21.1/gate-gradle-args.txt"
+f.write_text("# the ci shard on Port CI\n\n  -Pshard=ci  \n   # indented comment\n--exclude-task=javadoc\n", encoding="utf-8")
+want("single-version: the version's own file", pg.gate_gradle_args_file(sv) == f)
+want("comments and blanks ignored, file order kept", pg.gate_gradle_args(sv) == ["-Pshard=ci", "--exclude-task=javadoc"])
+(sv / ".port/1.21.4").mkdir()
+want("another version's file is not this version's", pg.gate_gradle_args_file(sv, "1.21.4") is None)
+want("an empty file: no arguments", (f.write_text("# nothing yet\n", encoding="utf-8"), pg.gate_gradle_args(sv))[1] == [])
+for text, needle in (("shard\n", "is not a Gradle option"), ("-x javadoc\n", "one argument a line"),
+                     ("-Pa=1\ttab\n", "one argument a line")):
+    f.write_text(text, encoding="utf-8")
+    want(f"refused: {text!r}", fails(lambda: pg.gate_gradle_args(sv), needle) and fails(lambda: pg.gate_gradle_args(sv), ":1:"))
+# a version branch: .port/<its version>/ (PORT_BRANCH_MC), not gradle.properties' (the base's)
+vb = T / "vb"; (vb / ".port/1.21.4").mkdir(parents=True)
+(vb / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+(vb / ".port/1.21.4/gate-gradle-args.txt").write_text("-Pshard=ci\n", encoding="utf-8")
+os.environ["PORT_BRANCH_MC"] = "1.21.4"
+try:
+    want("version branch: .port/<PORT_BRANCH_MC>/", pg.gate_gradle_args(vb) == ["-Pshard=ci"])
+finally:
+    del os.environ["PORT_BRANCH_MC"]
+want("version branch fixture read as single-version (1.21.1): no file", pg.gate_gradle_args(vb) == [])
+# combined with a PORT_GRADLE_ARGS already set: appended after it, never replacing it; Gradle gets every argument
+cur = "-Dmaven.repo.local=/private/m2\n"
+both = pg.with_gradle_args(cur, ["-Pshard=ci"])
+want("appended after what PORT_GRADLE_ARGS held", both == "-Dmaven.repo.local=/private/m2\n-Pshard=ci")
+want("every Gradle call carries both", pg.gradle_target_args({"PORT_GRADLE_ARGS": both}) == ["-Dmaven.repo.local=/private/m2", "-Pshard=ci"])
+want("nothing held: only the file's", pg.with_gradle_args(None, ["-Pshard=ci"]) == "-Pshard=ci" and pg.with_gradle_args("", []) == "")
+print("self-check: OK" if ok else "self-check: FAILED " + "; ".join(why))
+PY
+mkdir -p "$T/gate-args"
+out="$(python3 "$T/test-port-tools-gate-args.py" "$T/gate-args" 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "port_gates gate-gradle-args: .port/<mc>/gate-gradle-args.txt read for the version gated (single-version: gradle.properties; version branch: PORT_BRANCH_MC), one option a line with # comments and blanks ignored, a non-option or two words on a line refused with file:line, and appended after a PORT_GRADLE_ARGS already set (a round's -Dmaven.repo.local stays)" \
+  || bad "port_gates gate-gradle-args: $out"
 
 # the round's queue diff (part 2's on its own): here to balance the parts (Windows: part 2 holds round.py's self-check)
 out="$(python3 tools/round-qdiff.py --self-check 2>&1)"
@@ -1039,7 +1094,7 @@ out="$(python3 "$T/test-port-tools-heredoc-7.py" "$T/u1" 2>&1)"
 echo "#161 U2: mixin-target and event-listener audits as ci-gates REPORT rows -- both kinds of fork"
 if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
 cat > "$T/test-port-tools-heredoc-8.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
-import contextlib, importlib.util, io, pathlib, shutil, subprocess, sys, zipfile
+import contextlib, importlib.util, io, os, pathlib, shutil, subprocess, sys, zipfile
 d = pathlib.Path(sys.argv[1]); d.mkdir()
 L = lambda n, f: (lambda s: (s.loader.exec_module(m := importlib.util.module_from_spec(s)), m)[1])(importlib.util.spec_from_file_location(n, f"tools/{f}"))
 fb, cg, fk = L("fb", "fork-branches.py"), L("cg", "ci-gates.py"), L("fk", "fork-kind.py")
@@ -1064,11 +1119,14 @@ for f, src in {"net/minecraft/world/item/Item.java": "package net.minecraft.worl
     (ev / "src" / f).parent.mkdir(parents=True, exist_ok=True); (ev / "src" / f).write_text(src + "\n", encoding="utf-8")
 subprocess.run(["javac", "-d", str(ev / "classes"), *map(str, (ev / "src").rglob("*.java"))], check=True, capture_output=True)
 subprocess.run(["jar", "cf", str(ev / "fake.jar"), "-C", str(ev / "classes"), "."], check=True, capture_output=True)
-calls = []
+calls, loop_envs = [], []
+PG = L("pg_real", "port_gates.py")    # the real reader of .port/<mc>/gate-gradle-args.txt
 
 
 class FakeGates:                  # tools/port_gates.py with no Gradle: Gate A green, the classpath task printed
-    Fail = type("Fail", (Exception,), {})
+    Fail = PG.Fail
+    gate_gradle_args_file, gate_gradle_args, with_gradle_args = (
+        staticmethod(PG.gate_gradle_args_file), staticmethod(PG.gate_gradle_args), staticmethod(PG.with_gradle_args))
     qtc = True
 
     @staticmethod
@@ -1104,7 +1162,7 @@ class FakeGates:                  # tools/port_gates.py with no Gradle: Gate A g
 
 real_load, real_run = cg._load, subprocess.run
 cg._load = lambda n, f: FakeGates if n == "port_gates" else real_load(n, f)
-subprocess.run = lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "", "") \
+subprocess.run = lambda cmd, *a, **k: (loop_envs.append(dict(k.get("env") or {})), subprocess.CompletedProcess(cmd, 0, "", ""))[1] \
     if any(str(x).endswith("gate-loop.py") for x in cmd) else real_run(cmd, *a, **k)
 JAR = "build/moddev/artifacts/neoforge-{neo}-sources.jar"
 VANILLA = "package net.x;\npublic class Dragon {\n    public void hurt(int amount) {}\n}\n"
@@ -1130,20 +1188,24 @@ def tree(w, method="hurt", event="Stage.After", jar=True, mixin=True, hook=True)
     G(w, "add", "-A"); G(w, "commit", "-qm", "fixture", "--allow-empty")
 
 
-def gates(w, name, reverted=False):
-    calls.clear()
+def gates(w, name, reverted=False, extra=()):
+    calls.clear(); loop_envs.clear()
+    held = os.environ.get("PORT_GRADLE_ARGS")       # ci-gates --port-ci extends it in-process: put it back after
     real = cg.target_audit_rows
     if reverted:                  # the change undone: what ci-gates wrote before it
         cg.target_audit_rows = lambda *a, **k: []
     summ, work = d / f"{name}.md", d / f"{name}-work"
     bv = cg.branch_version(w)
     sys.argv = ["ci-gates.py", "--repo", str(w), "--modid", "examplemod", "--gatec", "", "--skip-author-build",
-                "--summary", str(summ), "--work-dir", str(work)] + (["--mc", bv] if bv else [])
+                "--summary", str(summ), "--work-dir", str(work)] + (["--mc", bv] if bv else []) + list(extra)
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             rc = cg.main()
     finally:
         cg.target_audit_rows = real
+        os.environ.pop("PORT_GRADLE_ARGS", None)
+        if held is not None:
+            os.environ["PORT_GRADLE_ARGS"] = held
     return rc, summ.read_text(encoding="utf-8"), work
 
 
@@ -1246,10 +1308,34 @@ for kind, w in (("single-version", sv), ("version-branch", r)):
     rc, md, work = gates(w, f"{kind}-none")
     (rc == 0 and "| REPORT |" not in md and not any("qtcClasspath" in c for c in calls)
      and not (work / "audit-mixin-targets.log").exists()) or bad.append(f"{kind}: a tree with no mixin and no listener runs neither audit: {calls}\n{md}")
+    # .port/<mc>/gate-gradle-args.txt: appended to PORT_GRADLE_ARGS (a round's -Dmaven.repo.local kept first) on a Port CI
+    # run (--port-ci) only, with a REPORT row; a local run (no --port-ci) leaves it unread; a bad line fails the run
+    mc = cg.branch_version(w) or "1.21.1"
+    ga = w / ".port" / mc / "gate-gradle-args.txt"
+    ga.parent.mkdir(parents=True, exist_ok=True)
+    ga.write_text("# Port CI gates the ci shard; the round's local gates run the whole suite\n\n-Pshard=ci\n", encoding="utf-8")
+    os.environ["PORT_GRADLE_ARGS"] = "-Dmaven.repo.local=/private/m2"
+    rc, md, _ = gates(w, f"{kind}-gate-args", extra=["--port-ci"])
+    seen = [e.get("PORT_GRADLE_ARGS") for e in loop_envs]
+    (rc == 0 and seen == ["-Dmaven.repo.local=/private/m2\n-Pshard=ci"]
+     and f"| Gate run -- extra Gradle arguments (`.port/{mc}/gate-gradle-args.txt`) | REPORT | `-Pshard=ci` on every Gradle "
+         "call of this Port CI run (the gates ran what these select) |" in md
+     and os.environ.get("PORT_GRADLE_ARGS") == "-Dmaven.repo.local=/private/m2") \
+        or bad.append(f"{kind}: --port-ci appends .port/{mc}/gate-gradle-args.txt to PORT_GRADLE_ARGS, with a REPORT row: {rc} {seen}\n{md}")
+    rc, md, _ = gates(w, f"{kind}-gate-args-local")
+    seen = [e.get("PORT_GRADLE_ARGS") for e in loop_envs]
+    (rc == 0 and seen == ["-Dmaven.repo.local=/private/m2"] and "Gate run -- extra Gradle arguments" not in md) \
+        or bad.append(f"{kind}: without --port-ci (a local run) the file is not read: {rc} {seen}\n{md}")
+    ga.write_text("-x test\n", encoding="utf-8")
+    rc, md, _ = gates(w, f"{kind}-gate-args-bad", extra=["--port-ci"])
+    (rc != 0 and not loop_envs and f"| Gate run -- extra Gradle arguments (`.port/{mc}/gate-gradle-args.txt`) | FAIL | " in md
+     and "one argument a line" in md) or bad.append(f"{kind}: a two-word line fails the Port CI run before any gate: {rc}\n{md}")
+    del os.environ["PORT_GRADLE_ARGS"]
+    ga.unlink()
 print("\n".join(bad) or "OK")
 PY
 out="$(python3 "$T/test-port-tools-heredoc-8.py" "$T/u2" 2>&1)"
-[ "$out" = "OK" ] && ok "#161 U2 on a single-branch clone of the head (single-version) and version branch 1.21.4: ci-gates' mixin-target and event-listener audits write one REPORT row each for a stale target and an abstract-event listener (never red), \`skipped: <why>\` with no sources jar or no classpath, no row when the audit crashes, and neither runs (no Gradle call) with nothing to check; a hung classpath resolution or audit is \`skipped: timed out after Ns\`; the classpath or sources-jar plumbing raising writes no row and leaves every other row as it was; a skipped row quotes Gradle's own reason; a mixin in src/client/java is audited and configured mixins it cannot read (outside mixin/, Kotlin) are named, a nested Outer\$Inner read in Outer's file; a clean tree's GATES.md is byte-identical to the one written without them" \
+[ "$out" = "OK" ] && ok "#161 U2 on a single-branch clone of the head (single-version) and version branch 1.21.4: ci-gates' mixin-target and event-listener audits write one REPORT row each for a stale target and an abstract-event listener (never red), \`skipped: <why>\` with no sources jar or no classpath, no row when the audit crashes, and neither runs (no Gradle call) with nothing to check; a hung classpath resolution or audit is \`skipped: timed out after Ns\`; the classpath or sources-jar plumbing raising writes no row and leaves every other row as it was; a skipped row quotes Gradle's own reason; a mixin in src/client/java is audited and configured mixins it cannot read (outside mixin/, Kotlin) are named, a nested Outer\$Inner read in Outer's file; a clean tree's GATES.md is byte-identical to the one written without them; .port/<mc>/gate-gradle-args.txt is appended to PORT_GRADLE_ARGS after what it held, with a REPORT row, on a Port CI run (--port-ci) only, a local run leaves it unread and a bad line fails the Port CI run before any gate" \
   || bad "#161 U2: $out"
 else
   echo "  SKIP  #161 U2 ci-gates audit rows (no javac/jar)"

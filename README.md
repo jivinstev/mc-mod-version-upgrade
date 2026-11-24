@@ -54,6 +54,17 @@ tree. Then:
   `.port/<mc>/shipped-expect.txt`, on every kind of fork (none: the jar is only booted, as before; a `.multiversion/`
   left at HEAD with these files is refused, exit 2, by every tool, told to move them to `.port/<mc>/`); the release needs it. A dependent of such a mod adds `--dep-jar-variant` (the other platform's asset of the same pinned
   release), which runs one more `gates (full, <label>)` leg against that jar. Without either, the workflow is unchanged.
+- **Two classes of gate run** (opt-in): a fork whose whole GameTest suite outlasts the kit's Gate B limit (1500 s)
+  commits `.port/<mc>/gate-gradle-args.txt`, one Gradle argument a line (`#` comments; an option with a value in its
+  one-word form, e.g. `-Pshard=ci`), on every kind of fork (a version branch reads its own version's file, a
+  single-version fork the one for `gradle.properties`' version). Port CI's gates job passes `ci-gates.py --port-ci`,
+  which appends the file's arguments to `PORT_GRADLE_ARGS` (after anything already there) for every Gradle call of the
+  run, the authors' build, Gate A, B and C, in both passes, full and minimal (and every variant leg), and writes a
+  REPORT row naming them in the gate summary; a line that is not one option fails the run before any gate. The file is
+  read at run time, so regenerating the workflow keeps it (`port-ci.py` and `port-ci.py check` warn about a
+  hand-added `PORT_GRADLE_ARGS` in the installed workflow until the file holds it). The full tier is the local one:
+  the weekly round's and `fork-port.py`'s gates call `ci-gates.py` without `--port-ci` and run the whole suite. The
+  `shipped jars` job is not a gate run and does not read it. Without the file, nothing changes.
 - **Single-version first.** A fork port is one `neoforge-<mc>` branch by default. More versions are opt-in per fork,
   and then they are **stacked version branches**: `neoforge-1.21.3` made from `neoforge-1.21.1`, `neoforge-1.21.4`
   from `neoforge-1.21.3`, ..., each the full source for its version with its own build, gates, CI and release, a fix
