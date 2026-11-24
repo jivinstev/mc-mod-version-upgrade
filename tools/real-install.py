@@ -18,7 +18,13 @@ several jars the `--variant` one, default `mr`), each sibling-port jar a fork's 
 `--dep-jar` curl line and the sha256 on the line after; with `--variant cf` the workflow's `--dep-jar-variant` cf pin
 when there is one) unless that sibling is itself a --fork (its own release wins, `--prefer-pins` takes the pin), and
 every registry dependency the jars require (each jar's META-INF/neoforge.mods.toml; Modrinth/CurseForge through
-tools/mod-registry, sha1-verified, as tools/install-port.py resolves what CI had no file for). `--all-versions` is every
+tools/mod-registry, sha1-verified, as tools/install-port.py resolves what CI had no file for). A repository that ships SEVERAL mods (a folder per mod with its own gradle.properties, tags
+`<name>-<version>-mc<mc>`, maybe no `neoforge-<mc>` branch) is named per mod, `--fork owner/repo:NAME` (repeat for
+each): NAME's jar is the newest release whose tag is `NAME-<version>-mc<mc>` of the `mod_version` series in
+`NAME/gradle.properties` (NeoForge from there, else the root gradle.properties) on the `neoforge-<mc>` branch, else
+the default branch; its sibling pins are the curl pins in the workflow steps that name NAME (the step's text without
+the pin URLs), or every pin when no step names it; the versions it has are its branches' and its tags'. The mods
+named, and the pins they need, go into one instance per version. `--all-versions` is every
 `neoforge-<mc>` branch ALL the forks have: a library version whose dependent has no port there is skipped, and said
 so. A fork branch's `.github/port-install.json` is not read (every version branch carries the base version's). The
 plan prints what each version downloads and an estimate of what it adds on disk (client jar, libraries, assets the
@@ -216,6 +222,9 @@ class Sources:
     def branches(self, repo):
         return [b["name"] for b in self._pages(f"repos/{repo}/branches")]
 
+    def default_branch(self, repo):
+        return self._api(f"repos/{repo}")["default_branch"]
+
     def releases(self, repo):
         if ("rel", repo) not in self._mem:
             self._mem[("rel", repo)] = self._pages(f"repos/{repo}/releases")
@@ -284,11 +293,13 @@ def props(text):
     return out
 
 
-def pick_release(releases, mc, mod_version=None, prerelease=False):
+def pick_release(releases, mc, mod_version=None, prerelease=False, name=None):
     """The newest release of a version branch's tag series (`*-mc<mc>` or `*-mc<mc>-rN`) that has a jar; of the
-    branch's own mod_version series when it has one there. -> (release, why-not)."""
+    branch's own mod_version series when it has one there. With `name` (one mod of a repository that ships several),
+    only that mod's tags, `<name>-<version>-mc<mc>`. -> (release, why-not)."""
     tail = re.compile(r"-mc" + re.escape(mc) + r"(?:-r\d+)?$")
     cands = [r for r in releases if not r.get("draft") and tail.search(r.get("tag_name", ""))
+             and (not name or tag_is(name, r.get("tag_name", "")))
              and any(a["name"].endswith(".jar") for a in r.get("assets", []))]
     full = [r for r in cands if not r.get("prerelease")]
     if not prerelease:
@@ -325,9 +336,45 @@ PIN_SHA = re.compile(r"\b([0-9a-f]{64})\b")
 PIN_LEG = re.compile(r"matrix\.variant\s*==\s*'([\w.+-]+)'")
 
 
+def tag_is(name, tag):
+    """Is `tag` a release of the mod `name` of a repository that ships several (`<name>-<version>-mc<mc>`)?"""
+    return bool(re.match(re.escape(name) + r"-\d", tag))
+
+
+def fork_spec(f):
+    """A --fork: `owner/repo` (one mod per version branch) or `owner/repo:name` (the mod `name` of a repository that
+    ships several, each in its own folder `<name>/` with tags `<name>-<version>-mc<mc>`). -> (spec, repo, name)."""
+    f = re.sub(r"^https://github\.com/", "", f.strip())
+    repo, _, name = f.partition(":")
+    repo = repo.strip("/").removesuffix(".git")
+    name = name.strip().strip("/") or None
+    return (f"{repo}:{name}" if name else repo), repo, name
+
+
+STEP = re.compile(r"^(\s*)-\s")
+
+
+def step_text(lines, i):
+    """The text of the workflow step (the `- ` list item) that holds line i, without the pin URLs in it."""
+    ind = len(lines[i]) - len(lines[i].lstrip())
+    s = next((k for k in range(i, -1, -1) if STEP.match(lines[k]) and (k == i or len(STEP.match(lines[k]).group(1)) < ind)),
+             None)
+    if s is None:
+        return ""
+    d = len(STEP.match(lines[s]).group(1))
+    e = next((k for k in range(s + 1, len(lines)) if lines[k].strip()
+              and len(lines[k]) - len(lines[k].lstrip()) <= d), len(lines))
+    return PIN.sub(" ", "\n".join(lines[s:e]))
+
+
+def names_mod(text, name):
+    return bool(re.search(r"(?<![\w-])" + re.escape(name) + r"(?!\w)", text or ""))
+
+
 def parse_pins(workflow):
     """The sibling-port jars a fork's workflow pins (port-ci.py --dep-jar / --dep-jar-variant): [{repo, tag, asset,
-    url, sha256, leg}] where leg is None for the default pin and the matrix leg (`cf`) for a variant."""
+    url, sha256, leg, step}] where leg is None for the default pin and the matrix leg (`cf`) for a variant, and step
+    the text of the workflow step the pin is in (its pin URLs left out)."""
     lines = (workflow or "").splitlines()
     out = []
     for i, line in enumerate(lines):
@@ -339,8 +386,15 @@ def parse_pins(workflow):
         s = next((PIN_SHA.search(x) for x in lines[i + 1:i + 3] if PIN_SHA.search(x)), None)
         leg = next((PIN_LEG.search(x).group(1) for x in reversed(lines[max(0, i - 4):i]) if PIN_LEG.search(x)), None)
         out.append({"repo": m.group(1), "tag": m.group(2), "asset": m.group(3), "url": m.group(0),
-                    "sha256": s.group(1) if s else None, "leg": leg})
+                    "sha256": s.group(1) if s else None, "leg": leg, "step": step_text(lines, i)})
     return out
+
+
+def pins_for_mod(pins, name):
+    """One mod's pins in a repository that ships several: those in the workflow steps that name it. When no step
+    names it, every pin (the repository pins one set for all its mods). -> (pins, how)."""
+    mine = [p for p in pins if names_mod(p["step"], name)]
+    return (mine, "the steps that name it") if mine else (pins, "no step names it: every pin")
 
 
 def choose_pins(pins, variant):
@@ -587,16 +641,28 @@ def parse_sums(text):
 
 
 def build_plan(a, src, plat, log=print):
-    forks = [re.sub(r"^https://github\.com/", "", f).strip("/").removesuffix(".git") for f in a.fork]
+    specs = {}
+    for f in a.fork:
+        k, repo, name = fork_spec(f)
+        specs[k] = (repo, name)
+    forks = list(specs)
+    repo_of = lambda f: specs[f][0]
+    name_of = lambda f: specs[f][1]
     mcdir = pathlib.Path(a.minecraft_dir)
     label = a.label
     inst_root = pathlib.Path(a.instances_dir) if a.instances_dir else mcdir / "instances"
     plan = {"label": label, "minecraft_dir": str(mcdir), "instances_dir": str(inst_root), "variant": a.variant,
             "forks": forks, "created": datetime.datetime.now().isoformat(timespec="seconds"),
             "with_carrier": bool(a.with_carrier), "versions": [], "skipped": []}
-    vbranches = {}
+    vbranches, real_br = {}, {}
     for f in forks:
-        vbranches[f] = {BRANCH.match(b).group(1) for b in src.branches(f) if BRANCH.match(b)}
+        real_br[f] = {BRANCH.match(b).group(1) for b in src.branches(repo_of(f)) if BRANCH.match(b)}
+        vbranches[f] = set(real_br[f])
+        if name_of(f):        # one mod of several: its own release tags name its versions too (it may have no branch)
+            for r in src.releases(repo_of(f)):
+                m = re.search(r"-mc(\d+\.\d+(?:\.\d+)?)(?:-r\d+)?$", r.get("tag_name", ""))
+                if m and not r.get("draft") and tag_is(name_of(f), r["tag_name"]):
+                    vbranches[f].add(m.group(1))
     if a.all_versions:
         common = set.intersection(*vbranches.values()) if vbranches else set()
         for f in forks:
@@ -611,7 +677,8 @@ def build_plan(a, src, plat, log=print):
         v = {"mc": mc, "mods": [], "problems": [], "notes": [], "modids_under_test": []}
         no = [f for f in forks if mc not in vbranches[f]]
         if no:
-            plan["skipped"].append({"mc": mc, "why": ", ".join(no) + f" has no neoforge-{mc} branch"})
+            plan["skipped"].append({"mc": mc, "why": ", ".join(no) + f" has no neoforge-{mc} branch"
+                                    + (f" (nor a release for {mc})" if any(name_of(f) for f in no) else "")})
             continue
         neos, have = [], {}
         def add(entry, data, under_test=False):
@@ -626,12 +693,21 @@ def build_plan(a, src, plat, log=print):
                 v["modids_under_test"] += [m for m in entry["modids"] if m not in v["modids_under_test"]]
         pins_all = {}
         for f in forks:
+            repo, name = repo_of(f), name_of(f)
             br = f"neoforge-{mc}"
-            pr = props(src.file(f, br, "gradle.properties"))
+            if name and mc not in real_br[f]:
+                br = src.default_branch(repo)
+            pr = props(src.file(repo, br, "gradle.properties"))
+            if name:              # this mod's own folder: its version series (and NeoForge, else the root's)
+                own_props = src.file(repo, br, f"{name}/gradle.properties")
+                if own_props is None:
+                    v["notes"].append(f"{f}: no {name}/gradle.properties on {br} -- its newest {name}-* release is used")
+                mp = props(own_props)
+                pr = {**{k: x for k, x in pr.items() if k in ("neo_version", "neoforge_version")}, **mp}
             n = pr.get("neo_version") or pr.get("neoforge_version")
             if n:
                 neos.append((n, f"{f}@{br}"))
-            rel, why = pick_release(src.releases(f), mc, pr.get("mod_version"), a.prerelease)
+            rel, why = pick_release(src.releases(repo), mc, pr.get("mod_version"), a.prerelease, name)
             if rel is None:
                 v["problems"].append(f"{f}: {why}")
                 continue
@@ -646,13 +722,22 @@ def build_plan(a, src, plat, log=print):
                 continue
             add({"name": asset["name"], "url": asset["browser_download_url"], "sha256": sha(data), "size": len(data),
                  "source": f"{f} release {rel['tag_name']}" + (" (pre-release)" if rel.get("prerelease") else ""),
-                 "repo": f}, data, under_test=True)
-            for t in src.workflows(f, br):
-                for r, p in choose_pins(parse_pins(t), a.variant).items():
-                    pins_all.setdefault(r, (p, f))
+                 "repo": repo, **({"fork": f} if name else {})}, data, under_test=True)
+            sets = [parse_pins(t) for t in src.workflows(repo, br)]      # per workflow: the first workflow's pin wins
+            if name:                                                       # one mod of several: its own steps' pins
+                mine, how = pins_for_mod([p for ps in sets for p in ps], name)
+                sets = [mine]
+                if mine:
+                    v["notes"].append(f"{f}: sibling pins from {how}")
+            for r, p in [x for ps in sets for x in choose_pins(ps, a.variant).items()]:
+                if name and r in pins_all and pins_all[r][0]["url"] != p["url"]:
+                    v["notes"].append(f"{f} pins {r} at {p['tag']}/{p['asset']}, {pins_all[r][1]} at "
+                                      f"{pins_all[r][0]['tag']}/{pins_all[r][0]['asset']}: installing the latter")
+                pins_all.setdefault(r, (p, f))
         for r, (p, by) in pins_all.items():
-            if r in forks:
-                own = next((m for m in v["mods"] if m.get("repo") == r), None)
+            mine = [g for g in forks if repo_of(g) == r and (not name_of(g) or tag_is(name_of(g), p["tag"]))]
+            if mine:
+                own = next((m for m in v["mods"] if m.get("fork", m.get("repo")) == mine[0]), None)
                 if a.prefer_pins and own:
                     v["mods"].remove(own)
                     for m in own["modids"]:
@@ -669,7 +754,7 @@ def build_plan(a, src, plat, log=print):
                 v["problems"].append(f"{r}: {p['asset']} from {p['tag']} does not match the sha256 {by}'s workflow pins")
                 continue
             add({"name": p["asset"], "url": p["url"], "sha256": sha(data), "size": len(data),
-                 "source": f"{r} release {p['tag']}, pinned by {by}'s CI", "repo": r}, data, under_test=r in forks)
+                 "source": f"{r} release {p['tag']}, pinned by {by}'s CI", "repo": r}, data, under_test=bool(mine))
         for p in (extra.get(mc) or []) + (extra.get("*") or []):
             data = pathlib.Path(p).expanduser().read_bytes()
             add({"name": pathlib.Path(p).name, "path": str(pathlib.Path(p).expanduser().resolve()), "sha256": sha(data),
@@ -1366,6 +1451,7 @@ class FakeSources(Sources):
         self.fetched = []
 
     def branches(self, repo): return self.b[repo]
+    def default_branch(self, repo): return "main"
     def releases(self, repo):
         got = self.r.get(repo, [])
         if isinstance(got, Exception):
@@ -1620,6 +1706,67 @@ def self_check():
         chk(p3["versions"][0]["neoforge"] == "21.1.3" and p3["versions"][0]["mods"][0]["source"] == "local jar"
             and p3["versions"][0]["modids_under_test"] == ["examplemod"], "local jars + a pinned NeoForge, no fork")
 
+        # ── a repository that ships several mods: --fork owner/repo:name, per-mod series and pins, one instance ──
+        chk(fork_spec("https://github.com/o/levels.git:examplea") == ("o/levels:examplea", "o/levels", "examplea")
+            and fork_spec("o/lib/") == ("o/lib", "o/lib", None), "--fork owner/repo[:name], a URL too")
+        chk(not any("fork" in e for e in v.get("mods", [])) and p["forks"] == ["o/lib", "o/mod"],
+            "one mod per branch (no :name): the plan is as before (no per-mod keys)")
+        ja, jb = _jar("examplea", requires=["examplecore"]), _jar("exampleb", requires=["examplecore", "exampleextra"])
+        jc, jx, jo = _jar("examplecore"), _jar("exampleextra"), _jar("exampleaddon")
+        core = "https://github.com/o/core/releases/download/examplecore-2.0-mc1.21.8/examplecore-2.0.jar"
+        extra_u = "https://github.com/o/extra/releases/download/examplea-compat-3/examplea-compat-3.jar"   # names examplea
+        lv_wf = ("name: build\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+                 "      - uses: actions/checkout@v4\n"
+                 "      - name: examplea -- the core it builds against (pinned by sha256)\n        run: |\n"
+                 f"          curl -fsSL -o core.jar {core}\n"
+                 f"          echo \"{sha(jc)}  core.jar\" | sha256sum -c -\n"
+                 "      - name: Pins for exampleb\n        working-directory: exampleb\n        run: |\n"
+                 f"          curl -fsSL -o core.jar {core}\n          echo \"{sha(jc)}  core.jar\" | sha256sum -c -\n"
+                 f"          curl -fsSL -o extra.jar {extra_u}\n          echo \"{sha(jx)}  extra.jar\" | sha256sum -c -\n"
+                 "      - name: Build examplea\n        run: ./gradlew -p examplea build\n")
+        files.update({("o/levels", "main", "gradle.properties"): "neo_version=21.8.5\n",
+                      ("o/levels", "main", "examplea/gradle.properties"): "mod_version=1.0.0\nneo_version=21.8.7\n",
+                      ("o/levels", "main", "exampleb/gradle.properties"): "mod_version=0.1.0\n",
+                      ("o/levels", "main", ".github/workflows/port-ci.yml"): lv_wf})
+        src.b["o/levels"] = ["main", "dev"]
+        src.r["o/levels"] = [rel("examplea-1.0.0-mc1.21.8", False, "2026-11-01", ["examplea-1.0.0.jar"]),
+                             rel("examplea-0.9.1-mc1.21.8", False, "2026-11-05", ["examplea-0.9.1.jar"]),
+                             rel("exampleb-0.1.0-mc1.21.8", False, "2026-11-02", ["exampleb-0.1.0.jar"]),
+                             rel("exampleaddon-1.0.0-mc1.21.8", False, "2026-11-09", ["exampleaddon-1.0.0.jar"]),
+                             rel("exampleb-0.1.0-mc1.21.4", False, "2026-10-02", ["exampleb-0.1.0.jar"])]
+        urls.update({"https://g/examplea-1.0.0-mc1.21.8/examplea-1.0.0.jar": ja, "https://g/examplea-0.9.1-mc1.21.8/examplea-0.9.1.jar": ja,
+                     "https://g/exampleb-0.1.0-mc1.21.8/exampleb-0.1.0.jar": jb, core: jc, extra_u: jx,
+                     "https://g/exampleaddon-1.0.0-mc1.21.8/exampleaddon-1.0.0.jar": jo})
+        metas[VERSION_MANIFEST]["versions"].append({"id": "1.21.8", "url": "https://m/1.21.1.json", "sha1": "f" * 40})
+        lv = lambda *x: build_plan(args("plan", *x, "--minecraft-dir", str(mcd), "--work", str(tmp / "w")),
+                                   src, osx, log=lambda *y: None)
+        pa = lv("--fork", "o/levels:examplea", "--mc", "1.21.8")
+        va = pa["versions"][0] if pa["versions"] else {}
+        chk([e["name"] for e in va.get("mods", [])] == ["examplea-1.0.0.jar", "examplecore-2.0.jar"]
+            and va.get("modids_under_test") == ["examplea"] and va.get("neoforge") == "21.8.7" and not va.get("problems")
+            and va.get("instance") == str(mcd / "instances" / "examplea-1.21.8"),
+            f"one mod of several: its folder's series (1.0.0, not the newer 0.9.1 or exampleaddon), its folder's NeoForge, "
+            f"the pins of the step that names it only (a pin URL naming it is not the step naming it), no neoforge-<mc> branch needed (got {va.get('mods') and [e['name'] for e in va['mods']]}, {va.get('problems')})")
+        pab = lv("--fork", "o/levels:examplea", "--fork", "o/levels:exampleb", "--all-versions")
+        vab = pab["versions"][0] if pab["versions"] else {}
+        chk([x["mc"] for x in pab["versions"]] == ["1.21.8"] and [s_["mc"] for s_ in pab["skipped"]] == ["1.21.4"]
+            and sorted(e["name"] for e in vab.get("mods", [])) == ["examplea-1.0.0.jar", "examplea-compat-3.jar",
+                                                                   "exampleb-0.1.0.jar", "examplecore-2.0.jar"]
+            and vab.get("modids_under_test") == ["examplea", "exampleb"] and not vab.get("problems")
+            and vab.get("instance") == str(mcd / "instances" / "exampleb-1.21.8"),
+            f"two mods of one repository and every pin they need, together in one instance; --all-versions from their "
+            f"tags (got {vab.get('mods') and [e['name'] for e in vab['mods']]}, {vab.get('problems')}, {pab['skipped']})")
+        files[("o/levels", "main", ".github/workflows/port-ci.yml")] = lv_wf.replace("Pins for exampleb", "More pins").replace("working-directory: exampleb", "shell: bash")
+        vb = lv("--fork", "o/levels:exampleb", "--mc", "1.21.8")["versions"][0]
+        chk(sorted(e["name"] for e in vb["mods"]) == ["examplea-compat-3.jar", "exampleb-0.1.0.jar", "examplecore-2.0.jar"]
+            and any("no step names it" in n for n in vb["notes"]),
+            "no step names the mod: every pin of the workflow, and said so")
+        del files[("o/levels", "main", "exampleb/gradle.properties")]
+        vb = lv("--fork", "o/levels:exampleb", "--mc", "1.21.8")["versions"][0]
+        chk(vb["mods"][0]["name"] == "exampleb-0.1.0.jar" and any("no exampleb/gradle.properties" in n for n in vb["notes"]),
+            "no folder gradle.properties: that mod's newest release, noted")
+        chk(lv("--fork", "o/levels:examplec", "--mc", "1.21.8")["skipped"][0]["why"].endswith("(nor a release for 1.21.8)"),
+            "a mod with neither a branch nor a release for the version: skipped and said so")
         # ── a headless machine: no launcher_profiles.json -> a minimal one; an existing file is never rewritten ──
         hd = tmp / "headless"
         logs = []
@@ -1757,7 +1904,8 @@ def make_parser():
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("plan", "install", "test"):
         s = sub.add_parser(name)
-        s.add_argument("--fork", action="append", default=[], help="owner/repo of a fork port (repeat; dependents last)")
+        s.add_argument("--fork", action="append", default=[], help="owner/repo of a fork port (repeat; dependents "
+                       "last); owner/repo:NAME for the mod NAME of a repository that ships several")
         s.add_argument("--mc", action="append", default=[], help="a Minecraft version (repeat)")
         s.add_argument("--all-versions", action="store_true", help="every neoforge-<mc> branch all the forks have")
         s.add_argument("--prerelease", action="store_true", help="pre-releases may be used")
@@ -1808,7 +1956,8 @@ def finish_args(a):
         a.carrier_dir = os.environ.get("CARRIER_DIR") or None          # what a play script hands over
         a.carrier_jar = [os.environ["CARRIER_JAR"]] if os.environ.get("CARRIER_JAR") and not a.carrier_dir else []
     if not a.label:
-        a.label = (re.sub(r"[^a-z0-9]+", "", a.fork[-1].rstrip("/").split("/")[-1].lower()) if a.fork else
+        last = fork_spec(a.fork[-1]) if a.fork else None
+        a.label = (re.sub(r"[^a-z0-9]+", "", (last[2] or last[1].split("/")[-1]).lower()) if a.fork else
                    (pathlib.Path(a.plan).parent.name if a.plan else None))
     a.minecraft_dir = str(pathlib.Path(a.minecraft_dir or default_minecraft_dir()).expanduser())
     if not a.work:
