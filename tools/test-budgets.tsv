@@ -176,6 +176,7 @@ shared rows (1.21.3): boolean hurt -> Hurt.server, hurt overrides, InteractionRe
 shared rows: R25 registry ids -- suppliers enter their name, Item/Block Properties are stamped, a co	2	2	2
 shared rows: Screen.hasControlDown/hasAltDown (1.21.10) and BLOCK_SHEET_MIPPED (1.21.11) rewrite the	2	2	2
 shared rows: isClientSide becomes a call, an existing call is left alone	2	2	2
+shared rows: getChunkSource().broadcast/broadcastAndSend become sendToTrackingPlayers(AndSelf); Bloc	2	2	2
 shared rows: receiver-chain rows (26.2 drawInBatch/setFilter/bufferSource, 1.21.3 culling box, 1.21.	2	2	2
 shared rows: the 1.21.6 renderBackground row applies in a Screen subclass only, not to another Rende	2	2	2
 shared rows: the 1.21.6 text-colour row makes 0xRRGGBB opaque in drawString/drawCenteredString/drawW	2	2	2

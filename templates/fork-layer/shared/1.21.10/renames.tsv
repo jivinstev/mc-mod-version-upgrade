@@ -23,4 +23,13 @@ Screen.hasShiftDown	Minecraft.getInstance().hasShiftDown
 re:(?<![\w$.])Screen\.hasControlDown\(\)	net.minecraft.client.Minecraft.getInstance().hasControlDown()
 re:(?<![\w$.])Screen\.hasAltDown\(\)	net.minecraft.client.Minecraft.getInstance().hasAltDown()
 addRenderLayer	withRenderLayer
+# ---- harvested from a 1.21.8 -> 1.21.10 port (1.21.9 API). ServerChunkCache.broadcast / broadcastAndSend are
+# sendToTrackingPlayers / sendToTrackingPlayersAndSelf, same arguments (CATALOG M89; a MIXIN on the per-entity method stays on
+# ChunkMap$TrackedEntity, see its augment). Only the getChunkSource() receiver: TrackedEntity.broadcast has its own new name.
+re:getChunkSource\(\)\.broadcast\(	getChunkSource().sendToTrackingPlayers(
+re:getChunkSource\(\)\.broadcastAndSend\(	getChunkSource().sendToTrackingPlayersAndSelf(
+# minecraft:chain is minecraft:iron_chain (DataFixers schema 4541; CATALOG V85). `\b` keeps CHAIN_COMMAND_BLOCK whole, and the
+# closing quote keeps "minecraft:chain_command_block" whole. Data files and a mod's own stored data are not Java: V85's augment.
+re:\bBlocks\.CHAIN\b	Blocks.IRON_CHAIN
+re:"minecraft:chain"	"minecraft:iron_chain"
 #!strict
