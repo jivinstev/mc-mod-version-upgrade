@@ -20,7 +20,7 @@ runs alone, one after another, through real-install's launch (the Launcher's com
 
 Script format: tools/playtest-lint.py's docstring is the grammar (the carrier runs it; `lint` here checks it with
 playtest-lint's checker, then adds what needs the mod: --jar ids, --forbid ids, a missing @intent). In short:
-Minecraft commands, one per line, plus @intent @step @assert @wait @aim @key @click @expect @shot @allow @world
+Minecraft commands, one per line, plus @intent @step @assert @wait @aim @key @click @expect @shot @fight @allow @world
 @continue-on-fail @end.
 Output per version: <report>/<mc>/ with stdout/stderr/latest.log, playtest-result.json and the frames; then
 <report>/report.md and report.html (frames embedded by relative path) for the run. Standard library only; macOS

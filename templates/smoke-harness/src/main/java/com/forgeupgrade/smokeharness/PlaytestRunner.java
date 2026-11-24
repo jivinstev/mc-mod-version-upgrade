@@ -331,6 +331,8 @@ final class PlaytestRunner {
                 if (!arg.matches("[A-Za-z0-9._-]+")) throw new ScriptError(no, "@shot <name> (letters, digits, . _ -)");
                 return new ShotOp(no, text, arg);
             }
+            case "@fight":
+                return FightOp.parse(no, text, arg);
             case "@goto": {
                 Matcher m = Pattern.compile("structure\\s+(#?[a-z0-9_.-]+:[a-z0-9_./-]+)(?:\\s+in\\s+([a-z0-9_.-]+:[a-z0-9_./-]+))?").matcher(arg);
                 if (!m.matches()) throw new ScriptError(no, "@goto structure <id or #tag> [in <dimension>]");
@@ -338,7 +340,7 @@ final class PlaytestRunner {
             }
             default:
                 throw new ScriptError(no, "unknown directive " + dir + " (known: @intent @step @assert @wait @aim @key @click @type "
-                    + "@expect @shot @goto @repeat @allow @world @continue-on-fail @end)");
+                    + "@expect @shot @fight @goto @repeat @allow @world @continue-on-fail @end)");
         }
     }
 
@@ -368,6 +370,8 @@ final class PlaytestRunner {
         Res start(PlaytestRunner r, Minecraft mc) throws Exception { return null; }
         /** Called every tick after start until it returns a result. */
         abstract Res tick(PlaytestRunner r, Minecraft mc) throws Exception;
+        /** Called once when the line ends by any road (pass, fail, a throw, the run's end): let go of what it holds. */
+        void stop(PlaytestRunner r, Minecraft mc) { }
     }
 
     static final class AllowOp extends Op {
@@ -554,7 +558,7 @@ final class PlaytestRunner {
                 return pass(String.format(Locale.ROOT, "looking at %.1f %.1f %.1f; crosshair %s", v[0], v[1], v[2], r.pickDesc(mc)));
             }
             if (arg.startsWith("@") || UUID_RX.matcher(arg).matches()) {      // a selector, or one entity's UUID ({it})
-                r.selectEntities(mc, arg, this);
+                r.selectEntities(mc, arg, l -> found = l, e -> serverError = e);
                 return null;
             }
             String want = arg.contains(":") ? arg : "minecraft:" + arg;
@@ -636,8 +640,7 @@ final class PlaytestRunner {
                                 + " blocks" + (reach instanceof Double d ? String.format("; reach %.1f", d) : "")
                                 + "): summon it or tp the player closer");
                     }
-                    mc.gameMode.attack(mc.player, r.aimed);
-                    R.call(mc.player, "swing", InteractionHand.MAIN_HAND);   // cosmetic; 26.3's swing takes more arguments
+                    r.strike(mc, r.aimed);
                     how = "direct gameMode.attack on " + typeId(r.aimed) + " #" + r.aimed.getId() + " (crosshair " + on + ")";
                     r.note("aim", "attack: " + how);
                     released = true;
@@ -657,6 +660,234 @@ final class PlaytestRunner {
                 released = true;
             }
             return null;
+        }
+    }
+
+    /**
+     * <b>@fight &lt;selector or UUID&gt; within &lt;duration&gt; [inside &lt;x0&gt; &lt;z0&gt; &lt;x1&gt; &lt;z1&gt;]</b> (block
+     * columns, inclusive; {@code ~} is relative to where he stands when the fight begins): beat every entity it matches,
+     * the way a player does, with whatever is in his hand (pick it first: @key key.hotbar.N). Nearest first, the target
+     * re-chosen as they move; he walks up to reach and swings only at full attack charge, so the result does not depend
+     * on how fast a script clicks. Walking that makes no headway for a second is answered with a jump and a step aside.
+     * With {@code inside} he does not walk out of that box (an arena's floor): at its edge he holds his ground and lets
+     * them come, and if a hit knocks him out of it he walks back in. While he is knocked out, he waits.
+     *
+     * <p>Who is left is the SERVER's answer (its living matches), never the client's view: a match the client has not
+     * got yet is walked toward by where the server says it is. PASS when every one it matched is beaten; FAIL at the
+     * time limit, naming each one left, where it is and how far, and FAIL when it matches nothing alive from the start.
+     */
+    static final class FightOp extends Op {
+        static final int RESELECT = 10;         // ticks between asking the server who is left
+        static final int STUCK_WINDOW = 20;     // ticks of walking that must close some distance
+        static final double STUCK_GAIN = 0.5;   // blocks that window must close
+        static final int UNSTICK = 12;          // ticks of jump + side step
+        static final int MIN_SWING_GAP = 4;     // ticks between swings while the charge can be read
+        static final int BLIND_SWING_GAP = 10;  // ticks between swings when it cannot (about a sword's full charge)
+        static final String USAGE = "@fight <selector or UUID> within <duration> [inside <x0> <z0> <x1> <z1>]";
+        final String selector;
+        final int limit;
+        final String[] boxArgs;                 // {x0, z0, x1, z1} as written, or null
+        double[] box;                           // resolved at the start
+        KeyMapping fwd, jump, left, right, side;
+        int t, sinceSwing, swings, unsticks, unstickLeft, windowStart;
+        double windowDist;
+        boolean asked, stepLeft, blindCharge;
+        volatile List<double[]> found;
+        volatile String serverError;
+        final Map<Integer, String> beaten = new LinkedHashMap<>();   // every one it matched alive: id -> type, once seen
+        final Set<KeyMapping> held = Collections.newSetFromMap(new IdentityHashMap<>());
+
+        FightOp(int no, String text, String selector, int limit, String[] boxArgs) {
+            super(no, text); this.selector = selector; this.limit = limit; this.boxArgs = boxArgs;
+        }
+
+        static FightOp parse(int no, String text, String arg) throws ScriptError {
+            Matcher m = Pattern.compile("(\\S+)\\s+within\\s+(\\S+)(?:\\s+inside\\s+(\\S+)\\s+(\\S+)\\s+(\\S+)\\s+(\\S+))?").matcher(arg.trim());
+            if (!m.matches() || !(m.group(1).startsWith("@") || UUID_RX.matcher(m.group(1)).matches())) throw new ScriptError(no, USAGE);
+            int limit = ticks(m.group(2), no);
+            if (limit < 20) throw new ScriptError(no, "@fight: within at least 1s");
+            String[] box = null;
+            if (m.group(3) != null) {
+                box = new String[]{m.group(3), m.group(4), m.group(5), m.group(6)};
+                for (String c : box) coord(c, no);
+            }
+            return new FightOp(no, text, m.group(1), limit, box);
+        }
+
+        @Override Res start(PlaytestRunner r, Minecraft mc) {
+            t = 0; sinceSwing = 1000; swings = 0; unsticks = 0; unstickLeft = 0; windowStart = 0; windowDist = -1;
+            asked = false; blindCharge = false; found = null; serverError = null; beaten.clear(); held.clear(); side = null;
+            fwd = mapping(mc, "key.forward"); jump = mapping(mc, "key.jump");
+            left = mapping(mc, "key.left"); right = mapping(mc, "key.right");
+            if (fwd == null || jump == null || left == null || right == null) return fail("no key.forward/jump/left/right mapping on this version");
+            box = null;
+            if (boxArgs != null) {
+                var p = mc.player;
+                double[] b = new double[4];
+                for (int i = 0; i < 4; i++) {
+                    String c = boxArgs[i];
+                    double base = i % 2 == 0 ? p.getX() : p.getZ();
+                    b[i] = Math.floor(c.startsWith("~") ? base + (c.length() > 1 ? Double.parseDouble(c.substring(1)) : 0) : Double.parseDouble(c));
+                }
+                if (b[0] > b[2] || b[1] > b[3]) return fail("@fight inside: x0 <= x1 and z0 <= z1 (here " + java.util.Arrays.toString(b) + ")");
+                box = b;
+            }
+            return null;
+        }
+
+        @Override Res tick(PlaytestRunner r, Minecraft mc) {
+            t++; sinceSwing++;
+            if (serverError != null) return fail("selector " + selector + ": " + serverError);
+            if (!asked || t % RESELECT == 0) {
+                asked = true;
+                r.selectEntities(mc, selector, l -> found = l, e -> serverError = e);
+            }
+            List<double[]> f = found;
+            if (f == null) return t > 100 ? fail("selector " + selector + ": no answer from the server") : null;
+            var p = mc.player;
+            List<double[]> alive = new ArrayList<>();
+            for (double[] e : f) {
+                if (e[4] == 0) continue;            // dying: beaten
+                alive.add(e);
+                int id = (int) e[0];
+                Entity ce = mc.level.getEntity(id);
+                if (!beaten.containsKey(id) || beaten.get(id) == null) beaten.put(id, ce == null ? null : typeId(ce));
+            }
+            if (alive.isEmpty()) {
+                // nothing to fight from the start is a FAIL: whatever should have made the mob did not
+                return beaten.isEmpty() ? fail("selector " + selector + " matched nothing alive: nothing to fight")
+                    : pass(String.format(Locale.ROOT, "beat %d (%s) in %.1f s: %d swing(s), %d unstick(s)%s", beaten.size(),
+                        kinds(), t / 20.0, swings, unsticks, blindCharge ? "; the attack charge could not be read on this version, "
+                        + "so a swing every " + BLIND_SWING_GAP + " ticks" : ""));
+            }
+            if (t > limit) return fail(String.format(Locale.ROOT, "within %.0f s: %d of %d left: %s", limit / 20.0,
+                alive.size(), beaten.size(), leftList(mc, alive)) + (Boolean.TRUE.equals(R.call(p, "isCreative"))
+                    ? " (he is in creative mode: mobs do not come for him; `gamemode survival` first)" : ""));
+            if (!p.isAlive()) { stopMoving(mc); return null; }          // knocked out: no steering through the death screen
+
+            double[] nearest = alive.get(0);
+            for (double[] e : alive) if (dist2(p, e) < dist2(p, nearest)) nearest = e;
+            Entity target = mc.level.getEntity((int) nearest[0]);   // null: the client has not got it yet
+            double tx = target != null ? target.getX() : nearest[1], tz = target != null ? target.getZ() : nearest[3];
+            if (target != null) r.aimAt(mc, target); else lookAt(p, new Vec3(tx, nearest[2] + 1.6, tz));
+
+            if (box != null && !inBox(p.getX(), p.getZ(), 0.3)) {      // knocked out of the box: back to its middle first
+                stopUnstick(mc);
+                lookAt(p, new Vec3((box[0] + box[2]) / 2 + 0.5, p.getEyePosition().y(), (box[1] + box[3]) / 2 + 0.5));
+                hold(mc, fwd, true);
+                return null;
+            }
+            double dist = target != null ? Math.sqrt(target.distanceToSqr(p)) : Math.sqrt(dist2(p, nearest));
+            if (target == null || dist > reach(p) - 0.5) {             // walk up to it
+                double[] dir = unit(tx - p.getX(), tz - p.getZ());
+                if (box != null && !inBox(p.getX() + dir[0] * 0.8, p.getZ() + dir[1] * 0.8, 0.3)) {
+                    stopMoving(mc);                                   // at the box's edge: hold, let it come
+                    return null;
+                }
+                hold(mc, fwd, true);
+                if (unstickLeft > 0) {
+                    unstickLeft--;
+                    hold(mc, jump, unstickLeft > UNSTICK / 2);
+                    if (side != null) hold(mc, side, true);
+                    if (unstickLeft == 0) { stopUnstick(mc); windowDist = -1; }
+                    return null;
+                }
+                if (windowDist < 0) { windowDist = dist; windowStart = t; }
+                else if (t - windowStart >= STUCK_WINDOW) {
+                    if (windowDist - dist < STUCK_GAIN) {               // no headway: jump and step aside, on the box's side
+                        unsticks++; unstickLeft = UNSTICK; stepLeft = !stepLeft; side = sideStep(p, dir);
+                        r.note("fight", String.format(Locale.ROOT, "no headway at %.1f blocks: jump and step aside", dist));
+                    }
+                    windowDist = dist; windowStart = t;
+                }
+                return null;
+            }
+            stopMoving(mc);                                             // in reach: stand and swing at full charge
+            if (charged(p) && sinceSwing >= (blindCharge ? BLIND_SWING_GAP : MIN_SWING_GAP)) {
+                r.pick(mc);
+                if (!(mc.hitResult instanceof EntityHitResult ehr) || ehr.getEntity() != target) {
+                    r.note("fight", "swing at " + typeId(target) + " #" + target.getId() + " off the crosshair");
+                }
+                r.strike(mc, target);
+                swings++; sinceSwing = 0;
+            }
+            return null;
+        }
+
+        @Override void stop(PlaytestRunner r, Minecraft mc) {
+            for (KeyMapping k : new ArrayList<>(held)) Input.press(mc, k, false);
+            held.clear();
+        }
+
+        /** The side to step to (his left or right of {@code dir}, alternating), or null when neither stays in the box. */
+        KeyMapping sideStep(Entity p, double[] dir) {
+            double[] l = {dir[1], -dir[0]};                         // his left, facing dir
+            KeyMapping first = stepLeft ? left : right, second = stepLeft ? right : left;
+            for (KeyMapping k : new KeyMapping[]{first, second}) {
+                double sx = k == left ? l[0] : -l[0], sz = k == left ? l[1] : -l[1];
+                if (box == null || inBox(p.getX() + sx * 1.5, p.getZ() + sz * 1.5, 0.3)) return k;
+            }
+            return null;
+        }
+
+        boolean inBox(double x, double z, double margin) {
+            return x >= box[0] + margin && x <= box[2] + 1 - margin && z >= box[1] + margin && z <= box[3] + 1 - margin;
+        }
+
+        static double dist2(Entity p, double[] e) {
+            double dx = e[1] - p.getX(), dy = e[2] - p.getY(), dz = e[3] - p.getZ();
+            return dx * dx + dy * dy + dz * dz;
+        }
+
+        static double[] unit(double dx, double dz) {
+            double d = Math.sqrt(dx * dx + dz * dz);
+            return d < 1e-6 ? new double[]{0, 0} : new double[]{dx / d, dz / d};
+        }
+
+        /** Is the attack fully charged? The game's own scale where it can be read; else the blind gap alone (and said). */
+        boolean charged(Entity p) {
+            Object v = R.call(p, "getAttackStrengthScale", 0.5F);
+            if (v instanceof Float f) return f >= 0.95F;
+            blindCharge = true;
+            return true;
+        }
+
+        void hold(Minecraft mc, KeyMapping k, boolean down) {
+            if (down == held.contains(k)) return;
+            Input.press(mc, k, down);
+            if (down) held.add(k); else held.remove(k);
+        }
+
+        void stopUnstick(Minecraft mc) {
+            unstickLeft = 0;
+            hold(mc, jump, false);
+            if (side != null) hold(mc, side, false);
+            side = null;
+        }
+
+        void stopMoving(Minecraft mc) {
+            stopUnstick(mc);
+            hold(mc, fwd, false);
+            windowDist = -1;
+        }
+
+        String kinds() {
+            Map<String, Integer> n = new LinkedHashMap<>();
+            for (String k : beaten.values()) n.merge(k == null ? "an entity out of view" : k, 1, Integer::sum);
+            List<String> out = new ArrayList<>();
+            n.forEach((k, c) -> out.add(c + "× " + k));
+            return String.join(", ", out);
+        }
+
+        String leftList(Minecraft mc, List<double[]> alive) {
+            List<String> out = new ArrayList<>();
+            for (double[] e : alive) {
+                Entity ce = mc.level.getEntity((int) e[0]);
+                out.add(String.format(Locale.ROOT, "%s #%d at %.0f %.0f %.0f, %.1f blocks%s%s", ce == null ? "an entity" : typeId(ce),
+                    (int) e[0], e[1], e[2], e[3], Math.sqrt(dist2(mc.player, e)), ce == null ? " (not in his view)" : "",
+                    box != null && !inBox(e[1], e[3], 0) ? ", outside the box" : ""));
+            }
+            return String.join("; ", out);
         }
     }
 
@@ -936,6 +1167,10 @@ final class PlaytestRunner {
             return null;
         }
 
+        @Override void stop(PlaytestRunner r, Minecraft mc) {
+            if (cur != null) cur.stop(r, mc);
+        }
+
         private String sub(String c) {
             String it = targets == null || ti >= targets.size() ? null : targets.get(ti);
             return it == null ? c : c.replace("{it}", it);
@@ -944,6 +1179,7 @@ final class PlaytestRunner {
         /** A block line finished: null to go on, or the block's failure. */
         private Res done(PlaytestRunner r, Res x) {
             String who = targets.get(ti) == null ? "" : ", " + targets.get(ti);
+            cur.stop(r, mref);
             r.say(TAG + ":     [" + cur.no + "] (run " + (iter + 1) + who + ") " + (x.ok ? "ok" : "FAIL") + (x.detail.isEmpty() ? "" : " -- " + x.detail));
             if (!x.ok) return fail("run " + (iter + 1) + who + ", line " + cur.no + ": " + cur.text + " -- " + x.detail);
             cur = null; oi++;
@@ -1689,6 +1925,7 @@ final class PlaytestRunner {
 
     /** Record a finished line; false when the step stops here. */
     private boolean lineDone(Minecraft mc, Res r) {
+        current.stop(this, mc);
         JsonObject l = new JsonObject();
         l.addProperty("line", current.no);
         l.addProperty("text", current.text);
@@ -1778,6 +2015,9 @@ final class PlaytestRunner {
     }
 
     private void finishRun(boolean ok, String why) {
+        if (current != null) {
+            try { current.stop(this, Minecraft.getInstance()); } catch (Throwable ignored) { }
+        }
         verdict = ok;
         done = true;
         stage = Stage.FINISHED;
@@ -2009,7 +2249,6 @@ final class PlaytestRunner {
         return (CommandSource) Proxy.newProxyInstance(CommandSource.class.getClassLoader(), new Class<?>[]{CommandSource.class}, h);
     }
 
-    /** Resolve an entity selector on the server as the player; the AimOp gets {id, x, y, z} per entity. */
     /** Is the entity with this UUID in some level and alive (not removed, not dying)? */
     void entityAlive(Minecraft mc, String uuid, Consumer<Boolean> done) {
         IntegratedServer server = mc.getSingleplayerServer();
@@ -2046,7 +2285,8 @@ final class PlaytestRunner {
         });
     }
 
-    void selectEntities(Minecraft mc, String selector, AimOp op) {
+    /** Resolve an entity selector on the server as the player: {id, x, y, z, alive 1|0} per entity, or the server's error. */
+    void selectEntities(Minecraft mc, String selector, Consumer<List<double[]>> done, Consumer<String> failed) {
         IntegratedServer server = mc.getSingleplayerServer();
         UUID id = mc.player.getUUID();
         server.execute(() -> {
@@ -2054,10 +2294,12 @@ final class PlaytestRunner {
                 ServerPlayer sp = server.getPlayerList().getPlayer(id);
                 var sel = EntityArgument.entities().parse(new StringReader(selector));
                 List<double[]> out = new ArrayList<>();
-                for (Entity e : sel.findEntities(sp.createCommandSourceStack())) out.add(new double[]{e.getId(), e.getX(), e.getY(), e.getZ()});
-                op.found = out;
+                for (Entity e : sel.findEntities(sp.createCommandSourceStack())) {
+                    out.add(new double[]{e.getId(), e.getX(), e.getY(), e.getZ(), e.isAlive() ? 1 : 0});
+                }
+                done.accept(out);
             } catch (Throwable t) {
-                op.serverError = t.getMessage() != null ? t.getMessage() : t.toString();
+                failed.accept(t.getMessage() != null ? t.getMessage() : t.toString());
             }
         });
     }
@@ -2075,6 +2317,24 @@ final class PlaytestRunner {
         note("aim", "aimed at " + typeId(e) + " #" + e.getId() + "; crosshair " + crosshair);
         return pass(String.format(Locale.ROOT, "aimed at %s #%d, %.1f blocks; crosshair %s", typeId(e), e.getId(),
             Math.sqrt(e.distanceToSqr(mc.player)), crosshair));
+    }
+
+    /** Hit this entity the way the attack key does on it, and swing the arm. */
+    void strike(Minecraft mc, Entity e) {
+        mc.gameMode.attack(mc.player, e);
+        R.call(mc.player, "swing", InteractionHand.MAIN_HAND);   // cosmetic; 26.3's swing takes more arguments
+    }
+
+    /** How far he reaches to hit an entity (by reflection: not named alike on every version), else the classic 3. */
+    static double reach(Entity p) {
+        Object v = R.call(p, "entityInteractionRange");
+        return v instanceof Double d ? d : 3.0;
+    }
+
+    /** A key mapping by its name (key.forward, key.jump, a mod's own), or null. */
+    static KeyMapping mapping(Minecraft mc, String name) {
+        for (KeyMapping k : mc.options.keyMappings) if (k.getName().equals(name)) return k;
+        return null;
     }
 
     static void lookAt(Entity p, Vec3 target) {

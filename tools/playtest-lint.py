@@ -24,6 +24,12 @@ The grammar (one line at a time; blank lines and '# comments' are ignored):
                                    match = case-insensitive substring of the text or of a translation key, or /regex/
     @shot <name>                   a screenshot <out>/<NN>-<name>.png
     @goto structure <id | #tag> [in <dimension>]   travel to the nearest naturally generated one (/locate), inside its start piece
+    @fight <selector | UUID> within <duration> [inside <x0> <z0> <x1> <z1>]   (block columns; ~ relative to him at
+                                   the start; within at least 1s) beat every entity it matches with what is in his hand:
+                                   nearest first, walking up to reach, swinging at full charge, a jump and a step aside when
+                                   walking makes no headway; with a box he does not walk out of it, and walks back in if a
+                                   hit knocks him out. Who is left is the server's answer. PASS when every one is beaten;
+                                   FAIL at the time limit naming each one left, or when it matches nothing alive at all
     @repeat <N> [until <command>] ... @end-repeat   the block's lines up to N times, stopping when the command succeeds
     @repeat each <selector> max <N> [until <command>] ... @end-repeat
                                    the block for every entity the selector matched when it began, up to N times each
@@ -39,11 +45,12 @@ Standard library only.
 import pathlib, re, sys
 
 KINDS = ("sound", "subtitle", "chat", "title", "actionbar", "bossbar", "screen", "error")
-DIRECTIVES = ("@intent", "@step", "@assert", "@wait", "@aim", "@key", "@click", "@type", "@expect", "@shot", "@goto", "@repeat",
+DIRECTIVES = ("@intent", "@step", "@assert", "@wait", "@aim", "@key", "@click", "@type", "@expect", "@shot", "@fight", "@goto", "@repeat",
               "@end-repeat", "@allow",
               "@world", "@continue-on-fail", "@end")
 DURATION = re.compile(r"\d+(?:\.\d+)?[ts]")
 NUM = re.compile(r"-?\d+(?:\.\d+)?")
+UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|\{it\}")   # {it}: @repeat each
 
 
 def _coord(s):
@@ -183,6 +190,19 @@ def lint(text):
         elif d == "@shot":
             if not re.fullmatch(r"[A-Za-z0-9._-]+", arg):
                 probs.append((no, "@shot <name> (letters, digits, . _ -)"))
+        elif d == "@fight":
+            m = re.fullmatch(r"(\S+)\s+within\s+(\S+)(?:\s+inside\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+))?", arg)
+            if not m or not (m.group(1).startswith("@") or UUID.fullmatch(m.group(1))):
+                probs.append((no, "@fight <selector or UUID> within <duration> [inside <x0> <z0> <x1> <z1>]"))
+            elif not DURATION.fullmatch(m.group(2)):
+                probs.append((no, "@fight: within takes a duration (<N>t or <N>s)"))
+            elif float(m.group(2)[:-1]) * (20 if m.group(2).endswith("s") else 1) < 20:
+                probs.append((no, "@fight: within at least 1s"))
+            elif m.group(3) and not all(_coord(v) for v in m.group(3, 4, 5, 6)):
+                probs.append((no, "@fight inside <x0> <z0> <x1> <z1>: four coordinates (~ relative)"))
+            elif m.group(3) and all(NUM.fullmatch(v) for v in m.group(3, 4, 5, 6)) and (
+                    float(m.group(3)) > float(m.group(5)) or float(m.group(4)) > float(m.group(6))):
+                probs.append((no, "@fight inside <x0> <z0> <x1> <z1>: x0 <= x1 and z0 <= z1"))
         elif d == "@goto":
             if not re.fullmatch(r"structure\s+#?[a-z0-9_.-]+:[a-z0-9_./-]+(\s+in\s+[a-z0-9_.-]+:[a-z0-9_./-]+)?", arg):
                 probs.append((no, "@goto structure <id or #tag> [in <dimension>]"))
@@ -206,13 +226,13 @@ def self_check():
         "# header", "@intent prove it", "@world flat structures seed=3", "@continue-on-fail", "@allow error Narrator",
         "@step one", "/say hi", "@expect chat hi within 5s", "@wait 10t", "@wait 1.5s",
         "@aim entity minecraft:zombie", "@aim entity @e[type=zombie,limit=1]", "@aim entity minecraft:zombie if-present", "@goto structure #minecraft:village", "@goto structure minecraft:fortress in minecraft:the_nether",
-        "@repeat each @e[tag=t] max 5 until execute unless entity {it}", "@aim entity {it}", "@end-repeat", "@aim pos ~ ~1 10", "@aim look 90 -10",
+        "@repeat each @e[tag=t] max 5 until execute unless entity {it}", "@aim entity {it}", "@fight {it} within 20s", "@end-repeat", "@aim pos ~ ~1 10", "@aim look 90 -10",
         "@key key.attack", "@key key.forward hold 20t", "@click slot 36", "@click slot 1 right", "@click slot 0 shift", '@click button "Done"', '@click item "Done"', '@click item "Oak Planks" shift', '@type "a red apple"',
         "@expect sound entity.zombie.* gone within 2s", "@expect subtitle /zombie (hurts|groans)/", "@expect error gone",
-        "@expect screen none", "@shot after-fight", "@assert execute if entity @s", "@step two", "@allow error Foo.*", "@end",
+        "@expect screen none", "@fight @e[tag=wave] within 60s", "@fight @e[type=zombie] within 30s inside -15 -15 15 15", "@fight @e[tag=w] within 30s inside ~-10 ~-10 ~10 ~10", "@shot after-fight", "@assert execute if entity @s", "@step two", "@allow error Foo.*", "@end",
         "@not-a-directive after end is ignored"])
     p, s = lint(good)
-    expect(p == [] and s["steps"] == ["one", "two"] and s["lines"] == 27, f"a script using every directive is clean: {p} {s}")
+    expect(p == [] and s["steps"] == ["one", "two"] and s["lines"] == 31, f"a script using every directive is clean: {p} {s}")
     for src, want in [("@step a\n@repeat each @e[tag=t] until execute unless entity {it}\n@wait 1t\n@end-repeat", "bound N"),
                       ("@step a\n@repeat until execute if entity @s\n@wait 1t\n@end-repeat", "bound N"),
                       ("@step a\n@repeat 3\n@wait 1t", "without @end-repeat"), ("@step a\n@end-repeat", "without @repeat"),
@@ -225,7 +245,10 @@ def self_check():
                       ("@step a\n@expect chat", "needs a match"), ("@step a\n@expect chat /(/", "bad /regex/"),
                       ("@step a\n@shot bad name", "@shot <name>"), ("@step a\n@frobnicate", "unknown directive"),
                       ("@world tilted", "@world takes"), ("# nothing", "no steps"), ("@step a\n@allow warn x", "@allow error"),
-                      ("@step a\n@expect title x within soon", "within takes a duration")):
+                      ("@step a\n@expect title x within soon", "within takes a duration"),
+                      ("@step a\n@fight zombie within 30s", "@fight <selector or UUID>"), ("@step a\n@fight @e within soon", "within takes a duration"),
+                      ("@step a\n@fight @e within 30s inside 5 5 -5 -5", "x0 <= x1"),
+                      ("@step a\n@fight @e within 10t", "at least 1s")):
         p, _ = lint(bad)
         expect(any(want in m for _, m in p), f"{bad!r} -> a problem containing {want!r}: {p}")
     p, s = lint("say hi\n@expect chat hi")
