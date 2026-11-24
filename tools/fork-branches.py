@@ -4111,6 +4111,9 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
     start = have.get(parent) if parent else resolve_branch(repo, pb)
     if not start:
         say(f"fork-branches: no branch {branch_name(parent) if parent else pb}"); return 2
+    if parent and not resolve_branch(repo, pb):
+        say(f"fork-branches: no port branch {pb} (no version branch's {BRANCH_PROPS} names port_branch=): "
+            "pass --port-branch <the port branch>"); return 2
     allowed = ""
     if parent:
         why = target_done(repo, parent)
@@ -4134,7 +4137,12 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
     pkg = re.search(rb"(?m)^package\s+([\w.]+)\s*;", first)
     mv_pkg = pp.get("mv_package") or ".".join((pkg.group(1).decode("utf-8", "replace").split(".") if pkg else ["mv"])[:2]) + ".mv"
     order = [l["mc"] for l in versions_table()["lines"] if l.get("stable")]
-    lo = parent or base_mc
+    # A jump from the port branch starts at the Minecraft version the port branch itself builds: a port branch made
+    # at a later line than the table's base already has every lower version's API, and applying those lower
+    # libraries' rows over it rewrites code that is already right (getString(k).ifPresent ->
+    # getStringOr(k, "").ifPresent, which does not compile).
+    port_mc = gp.get("minecraft_version", "").strip()
+    lo = parent or (port_mc if version_line(port_mc) and mc_key(base_mc) < mc_key(port_mc) < mc_key(t) else base_mc)
     new_versions = [v for v in order if mc_key(lo) < mc_key(v) <= mc_key(t)][::-1]        # nearest first
     neo = ln["neo"]
     mc_range, neo_range = toml_ranges(t, neo)
@@ -7421,6 +7429,26 @@ def self_check():
                    "head_only: the ledgers and the weekly plan's files, nothing else (the carried records use it too)")
             git(r, "worktree", "remove", "--force", str(lw))
             g("branch", "-D", "latin-port", "neoforge-1.21.10")
+            # a port branch that builds a later line than the table's base (here 1.21.8): a jump from it applies only
+            # the libraries above that line -- the lower ones' rows would rewrite code that is already right
+            lw = r / "build/late"
+            git(r, "worktree", "add", "-q", "-b", "late-port", str(lw), "neoforge-1.21.1", check=True)
+            gpl = lw / "gradle.properties"
+            gpl.write_text(re.sub(r"(?m)^minecraft_version=.*$", "minecraft_version=1.21.8", gpl.read_text(encoding="utf-8")),
+                           encoding="utf-8")
+            git(lw, "commit", "-qam", "the port branch builds 1.21.8", check=True)
+            rc, out = _quiet(add_target, r, "1.21.10", parent="port", port_branch="late-port")
+            fl = ref_files(r, resolve_branch(r, "neoforge-1.21.10")) if rc == 0 else {}
+            sh = fl.get(".port/1.21.10/shared-renames.tsv", b"")
+            expect(rc == 0 and b"# ---- shared 1.21.10" in sh
+                   and not any(f"# ---- shared {v}".encode() in sh for v in ("1.21.3", "1.21.4", "1.21.5", "1.21.8")),
+                   f"add-target from a 1.21.8 port branch: only the 1.21.10 library, none below the port branch's line: rc {rc}: {out[-300:]}")
+            git(r, "worktree", "remove", "--force", str(lw))
+            g("branch", "-D", "late-port", "neoforge-1.21.10")
+            # a port branch nobody names and that does not exist: a clear refusal, not a crash
+            rc, out = _quiet(add_target, r, "1.21.10", port_branch="no-such-port", allow_undone_parent=True)
+            expect(rc == 2 and "no port branch no-such-port" in out and not resolve_branch(r, "neoforge-1.21.10"),
+                   f"add-target with an unresolvable port branch: exit 2, named, nothing made: rc {rc}: {out[-300:]}")
             # sync-shared: the shared library moved (a row and a helper): 1.21.3 takes both, its rows-only files re-made
             with tempfile.TemporaryDirectory() as e:
                 lib = pathlib.Path(e)
