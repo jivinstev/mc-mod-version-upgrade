@@ -18,6 +18,9 @@ launches the game. Each step reads the plan the step before saved, so they can r
 1. **Which forks and versions?** The forks as `owner/repo`, the library first and its dependents after it (the last
    fork names the instances). The versions are `--mc X` (repeat it), or `--all-versions`: every `neoforge-<mc>` branch
    that **all** the forks have. A library version whose dependent has no port there is skipped, and the plan says so.
+   A repository that ships **several mods** (a folder per mod with its own `gradle.properties`, tags
+   `<name>-<version>-mc<mc>`, maybe no `neoforge-<mc>` branch) is named once per mod to install:
+   `--fork owner/repo:examplea --fork owner/repo:exampleb`.
 2. **Pre-releases?** Use `--prerelease` while the ports only have pre-releases, which is the case until a release is
    promoted. Without the flag, a version with no full release is a plan problem that names the flag.
 3. **Modrinth or CurseForge build?** Use `--variant mr` (the default) or `--variant cf`. When a release has one jar
@@ -47,6 +50,11 @@ For each Minecraft version the plan works out:
 - **Registry dependencies:** every dependency the jars' `neoforge.mods.toml` marks required that nothing in the set
   provides or bundles. These come from Modrinth or CurseForge for that version, sha1-verified, and are labelled "not
   tested by CI".
+- **One mod of several (`--fork owner/repo:name`):** its jar is the newest `<name>-<version>-mc<mc>` release of the
+  `mod_version` series in `<name>/gradle.properties` (NeoForge from there, else the root's), read on the
+  `neoforge-<mc>` branch when there is one, else the default branch. Its sibling pins are the pins in the workflow
+  steps that name it (a pin's own URL does not count), or every pin when no step names it; the plan notes which. Its
+  versions for `--all-versions` are its branches' and its tags'. All the named mods and their pins share one instance.
 - **Not read:** a branch's `.github/port-install.json`. Every version branch carries the base version's copy.
 
 The plan prints every jar with its size and source. It also prints what each version adds on disk: the client jar,
