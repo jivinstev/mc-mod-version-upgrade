@@ -1887,9 +1887,22 @@ class Run:
         return self.sh([BASH, "gradlew", *tasks, "--continue", "--console=plain", *init, "-Dorg.gradle.jvmargs=-Xmx6g",
                         *gradle_args(self.env)], log)
 
-    def artifacts(self, root=None):
-        d = (root or self.repo) / "build" / "moddev" / "artifacts"
-        return sorted(d.glob("*merged.jar")), sorted(j for j in d.glob("*-sources.jar") if "resources" not in j.name)
+    def artifacts(self, root=None, mc=None):
+        """(merged jars, sources jars) the build staged: ModDevGradle's build/moddev/artifacts, else NeoGradle's
+        build/neoForm/neoFormJoined<mc>-*/ (raw.jar, the recompiled game; sources.jar, or on NeoGradle 7.x
+        steps/transformSource/outputs.jar). A NeoGradle checkout keeps every version it ever staged side by side, so
+        only the dirs of `mc` (default: this run's target) count -- never the parent's, which would compile and audit
+        against the wrong Minecraft."""
+        root = root or self.repo
+        d = root / "build" / "moddev" / "artifacts"
+        merged, sources = sorted(d.glob("*merged.jar")), sorted(j for j in d.glob("*-sources.jar") if "resources" not in j.name)
+        if merged or sources:
+            return merged, sources
+        want = re.compile(r"neoFormJoined" + re.escape(mc or self.t) + r"-")
+        dirs = sorted(x for x in (root / "build" / "neoForm").glob("neoFormJoined*") if want.match(x.name))
+        merged = [x / "raw.jar" for x in dirs if (x / "raw.jar").is_file()]
+        sources = [s for x in dirs for s in (x / "sources.jar", x / "steps/transformSource/outputs.jar") if s.is_file()][:1]
+        return merged, sources
 
     def records_rel(self):
         return f".port/{self.t}/"
@@ -1998,11 +2011,15 @@ class Run:
         if work is None:
             return {"stop": f"cannot check out {fb.branch_name(pv)} to stage it: {why}", "code": 10,
                     "choices": [f"stage it by hand: git worktree add <dir> {fb.branch_name(pv)} && ./gradlew createMinecraftArtifacts"]}
-        old = self.artifacts(work)[0]
+        old = self.artifacts(work, pv)[0]
         if not old:
             self.sh([BASH, "gradlew", "createMinecraftArtifacts", "--console=plain", *gradle_args(self.env)],
                     self.work / "stage-prev.log", cwd=work)
-            old = self.artifacts(work)[0]
+            old = self.artifacts(work, pv)[0]
+        if not old:          # NeoGradle has no createMinecraftArtifacts: compiling stages the game
+            self.sh([BASH, "gradlew", "compileJava", "--console=plain", *gradle_args(self.env)],
+                    self.work / "stage-prev-compile.log", cwd=work)
+            old = self.artifacts(work, pv)[0]
         new, _ = self.artifacts()
         if not old or not new:
             return {"stop": f"no staged merged jar for {pv if not old else self.t}", "code": 10,
@@ -2614,6 +2631,27 @@ def self_check():
                f"a crashing converter stops the moves stage (exit 10, resume named), not passed off as a refusal: {stop}")
         *_r, stop = Run.hop_converters(fake, "1.21.4", run=lambda *a: (7, "died"))
         expect(stop and "exit 7" in stop["stop"], "an unexpected exit code is a stop too, not a traceback out of s_moves")
+    # the staged jars of a NeoGradle build: only the target version's dirs, never the parent's beside them
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d)
+        for mc_, date in (("1.21.1", "20240808.144430"), ("1.21.10", "20251010.172816")):
+            nf = repo / f"build/neoForm/neoFormJoined{mc_}-{date}"
+            (nf / "steps/transformSource").mkdir(parents=True)
+            (nf / "raw.jar").write_bytes(b"PK")
+            (nf / "steps/transformSource/outputs.jar").write_bytes(b"PK")
+        fake = _ty.SimpleNamespace(repo=repo, t="1.21.10")
+        merged, sources = Run.artifacts(fake)
+        expect([x.parent.name for x in merged] == ["neoFormJoined1.21.10-20251010.172816"]
+               and [x.name for x in sources] == ["outputs.jar"] and "1.21.10-" in sources[0].as_posix(),
+               f"NeoGradle: the target's raw.jar and transformSource sources, not 1.21.1's: {merged} {sources}")
+        merged, sources = Run.artifacts(fake, repo, "1.21.1")
+        expect([x.parent.name for x in merged] == ["neoFormJoined1.21.1-20240808.144430"],
+               f"NeoGradle: the parent's own dir for a parent version (1.21.1 never matches 1.21.10's): {merged}")
+        art = repo / "build/moddev/artifacts"
+        art.mkdir(parents=True)
+        (art / "minecraft-patched-1.21.10-merged.jar").write_bytes(b"PK")
+        expect([x.name for x in Run.artifacts(fake)[0]] == ["minecraft-patched-1.21.10-merged.jar"],
+               "ModDevGradle's artifacts win when the build staged both")
     # a re-run from measure (a gate re-run) has no compile-loop budget unless given one; a porting run keeps $15
     expect(default_budget(None, None) == 15.0 and default_budget(None, "setup") == 15.0 and default_budget(None, "loop") == 15.0
            and default_budget(None, "moves") == 15.0 and all(default_budget(None, x) == 0.0 for x in RECHECK_STAGES)

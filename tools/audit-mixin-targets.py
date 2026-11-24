@@ -441,14 +441,23 @@ def find_sources_jar(workspace):
     none matching, the newest of the layout's jars, said on stderr when there was a choice.
     """
     neo = build_neo_version(workspace)
+    gp = os.path.join(workspace, "gradle.properties")
+    mc = read_properties(gp).get("minecraft_version") if os.path.isfile(gp) else None
     for pattern in ("build/moddev/artifacts/minecraft-patched-*-sources.jar",
                     "build/moddev/artifacts/neoforge-*-sources.jar",
-                    "build/neoForm/*/sources.jar"):
+                    "build/neoForm/*/sources.jar",
+                    # NeoGradle 7.x writes no sources.jar: the last source step's output is the patched sources
+                    "build/neoForm/*/steps/transformSource/outputs.jar"):
         found = sorted(glob.glob(os.path.join(workspace, pattern)))
         if not found:
             continue
         if neo:
             rx = re.compile(r"(?<![\w.])" + re.escape(neo) + r"(?![\w.])")
+            hit = [f for f in found if rx.search(os.path.relpath(f, workspace).replace(os.sep, "/"))]
+            if hit:
+                return hit[0]
+        if mc and "/neoForm/" in pattern:    # NeoGradle names its dirs by Minecraft version: neoFormJoined<mc>-<date>
+            rx = re.compile(r"/neoFormJoined" + re.escape(mc) + r"-")
             hit = [f for f in found if rx.search(os.path.relpath(f, workspace).replace(os.sep, "/"))]
             if hit:
                 return hit[0]
