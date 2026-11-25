@@ -839,6 +839,17 @@ grep -q 'self-check: OK' <<<"$out" && ok "known-issues self-check (in $(grep -o 
 out="$(python3 tools/guard-names.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "guard-names self-check: a mod checkout's toml, gradle.properties, package and remote become list lines, and its known-issues ledger's id prefix (read with git from the head branch, the multi-mod form too, else the working tree; none without a ledger) one whole-word <PREFIX>-<n> line that check-no-ip --push-range enforces on a commit message; ensure merges, is idempotent and refuses a list inside a repository" \
   || bad "guard-names self-check: $(tail -5 <<<"$out")"
+# ---- the gate harness's init script (templates/upstream-harness/gates.init.gradle, #298): a single-version fork built
+# with NeoGradle userdev gets the same harness as one built with ModDevGradle -- static, no Gradle, under a second.
+# The real build (GATES_USERDEV_BUILD=1) is opt-in: it decompiles Minecraft 1.21.1 through NeoGradle (minutes, network).
+out="$(python3 tools/test-gates-init.py 2>&1)"
+grep -q '^gates-init: OK' <<<"$out" && ok "gates.init.gradle: the ModDevGradle and NeoGradle userdev blocks each add the harness sources, JUnit and the project-dir test working directory, point the client run at run-client with the boottest/testmode switches, and give a gameTestServer run the harness's run/ and namespace; each check fails on a planted copy with that wiring removed" \
+  || bad "gates.init.gradle: $out"
+if [ "${GATES_USERDEV_BUILD:-}" = 1 ]; then
+  out="$(python3 tools/test-gates-init.py --build "$T/userdev" 2>&1)"
+  grep -q '^gates-init build: OK' <<<"$out" && ok "gates.init.gradle on a real NeoGradle userdev build (examplemod, 1.21.1): Gate A runs the harness's MixinConfigIntegrityTest; the client and gameTestServer runs get the harness's directories and switches" \
+    || bad "gates.init.gradle on a real userdev build: $(tail -20 <<<"$out")"
+fi
 # ---- the weekly cycle (tools/weekly-plan.py, issue #135 part 2a): the plan workflow's golden, its Pacific-time gate on
 # both sides of daylight saving, install / round-task, and the steps against a fake GitHub on two tiny single-version
 # forks -- no network, seconds
