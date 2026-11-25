@@ -1156,6 +1156,12 @@ def render_plan(inp):
         lines += [f"- `/decide {d['id']} {d['choice']}` by @{d['by']}" for d in carried["decide"]]
         lines += [f"- `/grade {g['fork']}:{g['id']} {g['severity']}` by @{g['by']}" for g in carried["grade"]]
         lines.append("")
+    lines += ["## After the round: promote what you played", "",
+              "The round cuts pre-releases and never promotes one. Once you have played them, comment `/promote` here "
+              "(every pre-release the round cut) or `/promote <version> ...`, e.g. `/promote 1.21.1 26.3` (those "
+              f"Minecraft versions only). Only {mention(owner)} may; a workflow (`weekly-plan-promote.yml`, no model) "
+              "then dispatches Port CI's promote for the newest pre-release of each version, recording you as the one "
+              "who played it, and replies here with each run.", ""]
     data = {"schema": 1, "repo": inp["repo"], "week": inp["week"], "deadline": inp["deadline"], "owner": owner,
             "forks": data_forks, "carried": carried if prev.get("issue") else {"decide": [], "grade": []},
             "carried_from": prev.get("issue"), "migrator": inp.get("migrator", {})}
@@ -2864,10 +2870,16 @@ def plan_untaken_check(expect, cli):
     sv0 = json.loads(json.dumps(sv))
     sv0["forks"][0].update(new_count=0, new_commits=[])
     # pinned: a single-version fork's plan issue and frozen input, byte for byte (#161 U3 changed the first on purpose:
-    # with new commits its Decisions section shows the fetch step's trial merge, here "Could not preview", none recorded)
+    # with new commits its Decisions section shows the fetch step's trial merge, here "Could not preview", none recorded;
+    # and on purpose again with promote-by-comment: the body ends with "After the round: promote what you played", the
+    # frozen input unchanged)
     expect("Could not preview merging" in res["body"] and "Could not preview" not in render_plan(sv0)["body"]
-           and (h(res), h(fr), h(render_plan(sv0))) == ("ce1aa9dc5af34a9c", "af5159d1b42a19c3", "9b9ceb2f13e3497b"),
+           and (h(res), h(fr), h(render_plan(sv0))) == ("203729606498decb", "af5159d1b42a19c3", "c89dbadcd674ba25"),
            f"a single-version fork's plan and frozen input are unchanged: {(h(res), h(fr), h(render_plan(sv0)))}")
+    pr_ = res["body"].split("## After the round: promote what you played", 1)
+    expect(len(pr_) == 2 and DATA_BEGIN in pr_[1] and "comment `/promote` here" in pr_[1]
+           and "`/promote 1.21.1 26.3`" in pr_[1] and "Only @someone may" in pr_[1],
+           "the plan tells the owner to comment /promote after playing, and that only they may")
     # an OWNED fork's release bump: one line under the authors' box naming the version the take ships; a plan without
     # one is the pinned plan above, byte for byte, and what the round reads from the issue is unchanged
     vb_ = json.loads(json.dumps(sv))
