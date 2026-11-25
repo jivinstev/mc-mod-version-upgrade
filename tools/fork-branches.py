@@ -1264,11 +1264,19 @@ def accept_ledgered(rows, minor):
     return out
 
 
-def gate_text_problems(text, t, what="GATES.md", tag_version=False):
+# ci-gates.py's rows for the fork's own Gate C (.port/<mc>/gate-c.json, issue #308): PASS on the full environment, and
+# `full only` on the minimal one, which runs no client -- that row stands for a green Gate C only beside the release's
+# full summary whose fork's own Gate C is PASS (release_gate_record's fork_c)
+FORK_GATEC_PASS = re.compile(r"^\|\s*Gate C -- fork's own \(.*\|\s*PASS\s*\|")
+FORK_GATEC_FULL_ONLY = re.compile(r"^\|\s*Gate C -- fork's own \(.*\|\s*full only\s*\|")
+
+
+def gate_text_problems(text, t, what="GATES.md", tag_version=False, fork_c=False):
     """(commit, problems) of one gate summary -- the committed GATES.md, or a gates-<env>.md a Port CI pre-release
     carries (the same ci-gates.py summary): green Gate C for Minecraft t at a named commit. tag_version: the summary is
     a release asset whose tag already names Minecraft t (-mc<t>), so a header without `for Minecraft` (CI on a version
-    branch writes none) is t's; one naming another version is still refused."""
+    branch writes none) is t's; one naming another version is still refused. fork_c: another summary of the same
+    release has the fork's own Gate C PASS, so this one's `full only` row (the minimal environment's) is its Gate C."""
     if not text:
         return None, [f"no green Gate C recorded in {what}"]
     head = text.splitlines()[0]
@@ -1283,7 +1291,8 @@ def gate_text_problems(text, t, what="GATES.md", tag_version=False):
     rows = [ln for ln in text.splitlines() if ln.startswith("|")]
     if any(re.search(r"\|\s*FAIL\s*\|", ln) for ln in rows):
         return None, [f"{what} has a FAIL row"]
-    if not any("Gate C" in ln and re.search(r"\|\s*PASS\s*\|", ln) for ln in rows):
+    if not any("Gate C" in ln and re.search(r"\|\s*PASS\s*\|", ln) for ln in rows) and \
+            not (fork_c and any(FORK_GATEC_FULL_ONLY.search(ln) for ln in rows)):
         return None, [f"no green Gate C recorded in {what} (A/B green is not done)"]
     return m.group(1).split()[0], []
 
@@ -1342,7 +1351,7 @@ def release_gate_record(repo, root, t, ref, work, files, read=None, mod=None, re
             whys[r.get("tag_name")] = (f"release {r.get('tag_name')} carries no gate summaries (no gates-<env>.md "
                                        "asset: no gate record)")
             continue
-        commits, bad = set(), None
+        commits, bad, texts = set(), None, []
         for a in sorted(assets, key=lambda a: a["name"]):
             try:
                 # the API asset URL carries the token (a private fork's release too); the download link if that fails
@@ -1350,12 +1359,14 @@ def release_gate_record(repo, root, t, ref, work, files, read=None, mod=None, re
                     raw = read(a["url"], "application/octet-stream") if a.get("url") else None
                 except OSError:
                     raw = None
-                text = (raw if raw is not None else read(a["browser_download_url"], "application/octet-stream")
-                        ).decode("utf-8", "replace")
+                texts.append((a["name"], (raw if raw is not None else read(a["browser_download_url"],
+                                                                           "application/octet-stream")).decode("utf-8", "replace")))
             except OSError as e:
                 bad = f"{r['tag_name']}: {a['name']} could not be read ({str(e)[:80]})"
                 break
-            c, probs = gate_text_problems(text, t, f"{r['tag_name']}'s {a['name']}", tag_version=True)
+        fork_c = any(FORK_GATEC_PASS.search(ln) for _n, text in texts for ln in text.splitlines())
+        for name, text in ([] if bad else texts):
+            c, probs = gate_text_problems(text, t, f"{r['tag_name']}'s {name}", tag_version=True, fork_c=fork_c)
             if probs:
                 bad = probs[0]
                 break
@@ -7567,6 +7578,30 @@ def _check_release_gate_record(expect):
                   {u("gates-full.md"): summary(h, "full"), u("gates-minimal.md"): summary(h, "minimal")})
             why = gates_why()
             expect(not why, f"a green, current release record stands for GATES.md: {why}")
+            # the fork's own Gate C (.port/<mc>/gate-c.json, issue #308): the full summary's row is the Gate C, the
+            # minimal one's `full only` row stands only beside it
+            def own(c, env, gate="PASS"):
+                return summary(c, env).replace(
+                    "| Gate C -- real client, `launch` | PASS | reached title screen |\n",
+                    f"| Gate C -- fork's own (`tools/gate/rig.sh`, release set) | {gate} | `tools/gate/rig.sh smoke` "
+                    "(release_args) exited 0 in 31.0 min |\n" if env == "full" else
+                    "| Gate C -- fork's own (`tools/gate/rig.sh`) | full only | declared in `.port/1.21.5/gate-c.json`: it "
+                    "runs on the full environment only, whose summary holds its verdict |\n")
+            setup([rel(tag, ["gates-full.md", "gates-minimal.md"])],
+                  {u("gates-full.md"): own(h, "full"), u("gates-minimal.md"): own(h, "minimal")})
+            why = gates_why()
+            expect(not why, f"the fork's own Gate C PASS (full) and `full only` (minimal): a release record: {why}")
+            expect(gate_text_problems(own(h, "full"), "1.21.5")[1] == [], "a GATES.md with the fork's own Gate C PASS")
+            setup([rel(tag, ["gates-full.md", "gates-minimal.md"])],
+                  {u("gates-full.md"): own(h, "full", "FAIL"), u("gates-minimal.md"): own(h, "minimal")})
+            why = gates_why()
+            expect(any("FAIL" in x for x in why), f"the fork's own Gate C FAIL: not done: {why}")
+            setup([rel(tag, ["gates-full.md", "gates-minimal.md"])],
+                  {u("gates-full.md"): summary(h, "full"), u("gates-minimal.md"): own(h, "minimal")})
+            why = gates_why()
+            expect(any("no green Gate C" in x and "gates-minimal.md" in x for x in why),
+                   f"`full only` with no fork's own Gate C PASS beside it is no Gate C: {why}")
+            expect(gate_text_problems(own(h, "minimal"), "1.21.5")[1] != [], "a GATES.md with only `full only`: no Gate C")
             # the API asset URL refused (a signed redirect, a proxy): the download link is read instead
             rel_api = rel(tag, ["gates-full.md", "gates-minimal.md"])
             for a_ in rel_api["assets"]:

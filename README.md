@@ -112,6 +112,24 @@ tree. Then:
   file, then regenerate the workflow (`port-ci.py check` warns when the installed workflow does not run the gate the file
   names, or runs one the fork no longer has; so does `fork-branches.py ci-check` for a version-branch fork's head).
   Without the file, the workflow is unchanged byte for byte.
+- **The fork's own Gate C** (opt-in): a fork with a real-client check of its own (a script that boots a client under
+  Xvfb and runs its client tests) commits `.port/<mc>/gate-c.json`, `{"schema": 1, "script": "<path>.sh", "args":
+  [...], "release_args": [...], "timeout_minutes": 60}`, on every kind of fork (the version's own file, else the
+  nearest lower version's, as above). `script` is a `.sh` or `.py` file of the repository (relative to its root, no
+  `..`); `args` and `release_args` are lists of plain words (`[A-Za-z0-9_.:=/@+-]`); `timeout_minutes` is 1 to 360
+  (default 60). It is validated by the same code as the fork's release gate file (#306; `port_gates.gate_script`); a bad
+  file fails the gate run, it is never ignored. On the full environment `ci-gates.py` runs the script in place of the
+  built-in client phases, whatever `--gatec` says (`none` included: the file is the fork's gate of record), once (the
+  script owns its retries), as an argv (`bash` / `python3`, never a shell string) in the fork's checkout under the
+  timeout, with `PORT_GATE_MC`, `PORT_GATE_MODID`, `PORT_GATE_SET` and `PORT_GATE_REPO`. `PORT_GATE_SET` is `release`
+  on a Port CI run that can publish (a tag, or a `release = true` dispatch without `dep_override`), where
+  `release_args` replace `args`, else `full` (`--gatec-set release|full` says it outright). Its exit code is the
+  verdict and the Gate C row of `gates.md`: `Gate C -- fork's own (<script>, release set) | PASS`, or `FAIL` with
+  the last output lines. The minimal environment does not run it and records it as `full only`, which the release
+  record (`fork-branches.py`, so `layer-deps.py`'s library-first check) and `round-audit.py` accept only beside the
+  release's full summary with that row PASS. Local gate runs (`fork-port.py --gates full`, the weekly round) run it
+  too; `fork-port.py`'s A/B tier does not (`--no-fork-gatec`). The gates job's own 120-minute limit still bounds the
+  whole job. Without the file, nothing changes.
 - **Single-version first.** A fork port is one `neoforge-<mc>` branch by default. More versions are opt-in per fork,
   and then they are **stacked version branches**: `neoforge-1.21.3` made from `neoforge-1.21.1`, `neoforge-1.21.4`
   from `neoforge-1.21.3`, ..., each the full source for its version with its own build, gates, CI and release, a fix

@@ -2104,6 +2104,7 @@ def self_check():
     _check_install_pins(expect)
     _check_several_mods(expect)
     _check_library_first_names_tag(expect)
+    _check_fork_gatec_library(expect)
     if bad:
         print("layer-deps self-check: FAIL\n  " + "\n  ".join(bad))
         return 1
@@ -2489,6 +2490,58 @@ def several_mods_fixture(root, mc, lib_tag="examplelib-1.0-mc1.21.1", zeta_tag=N
           f'      - run: python3 .port-tools/tools/ci-gates.py --repo {n} --modid "example{n}" --gatec "launch,spawn"\n')
     w(".github/workflows/ci.yml", "name: the repository's own CI\n")
     return specs
+
+
+def _check_fork_gatec_library(expect):
+    """Library first (#308): a library release whose GATES.md at the tag records the fork's own Gate C (ci-gates.py,
+    .port/<mc>/gate-c.json) PASS has green gates (gates_at_tag, the check library_prerelease and the release-side done
+    list read), as a built-in Gate C does; with A/B rows only it has none. Needs tools/fork-branches.py, which the Port
+    CI kit does not ship: skipped there, saying so."""
+    if not (ROOT / "tools/fork-branches.py").is_file():
+        print("layer-deps self-check: the fork's own Gate C library check skipped: tools/fork-branches.py is not here "
+              "(the Port CI kit)")
+        return
+    saved = {k: os.environ.get(k) for k in (GIT_URL_ENV, CACHE_ENV)}
+    with tempfile.TemporaryDirectory() as td:
+        td = pathlib.Path(td).resolve()
+        lib = td / "owner" / "lib"
+        (lib / ".port/1.21.4").mkdir(parents=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(lib), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                       *a], capture_output=True, text=True, encoding="utf-8")
+        g("init", "-q", "-b", "neoforge-1.21.4")
+        g("config", "core.autocrlf", "false")
+        (lib / "gradle.properties").write_text("mod_id=examplelib\nminecraft_version=1.21.4\n", encoding="utf-8")
+        (lib / ".port/1.21.4/branch.properties").write_text("parent=neoforge-1.21.1\nlibrary=true\n", encoding="utf-8")
+        (lib / "Lib.java").write_text("class Lib {}\n", encoding="utf-8")
+        g("add", "-A")
+        g("commit", "-qm", "the library")
+        c = g("rev-parse", "--short", "HEAD").stdout.strip()
+
+        def tagged(tag, gate_rows):
+            (lib / ".port/1.21.4/GATES.md").write_text(
+                f"Gates for `examplelib` at `{c}` for Minecraft 1.21.4 (full environment)\n\n| check | result | detail |\n"
+                "|---|---|---|\n| Gate A -- mixin-config integrity | PASS | 1 test(s) |\n"
+                "| Gate B -- headless server loads the mod, GameTests | PASS | 4 required test(s) passed |\n" + gate_rows,
+                encoding="utf-8")
+            g("add", "-A")
+            g("commit", "-qm", "gate record")
+            g("tag", tag)
+        tagged("examplelib-1.0-mc1.21.4", "")
+        tagged("examplelib-1.1-mc1.21.4", "| Gate C -- fork's own (`tools/gate/rig.sh`, release set) | PASS | "
+                                          "`tools/gate/rig.sh smoke` (release_args) exited 0 in 31.0 min |\n")
+        try:
+            os.environ[GIT_URL_ENV] = str(td) + "/{repo}"
+            os.environ[CACHE_ENV] = str(td / "cache")
+            own = gates_at_tag("owner/lib", "examplelib-1.1-mc1.21.4", "1.21.4")
+            ab = gates_at_tag("owner/lib", "examplelib-1.0-mc1.21.4", "1.21.4")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        expect(own == [], f"library first: the fork's own Gate C PASS in GATES.md at the tag is green gates: {own}")
+        expect(any("no green Gate C" in w for w in ab), f"library first: A/B rows only are not: {ab}")
 
 
 def _check_several_mods(expect):
