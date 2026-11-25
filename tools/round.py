@@ -6201,10 +6201,10 @@ def self_check_repin_several(expect):
                    f"head_pins: the union of the mods' workflow pins: {got}")
             # the repin-head job: head-repin, then the fork's after_repin commands, then ONE commit
             rp = {"id": "multi@1.21.1:repin-head", "fork": "o/multi", "version": "1.21.1", "step": "repin-head",
-                  "extra": {"libraries": ["o/examplelib"], "after_repin": [["python3", "tools/core-pins.py", "--write"]]}}  # exec-ok: fixture data (a key/argv in a test), not a program run
+                  "extra": {"libraries": ["o/examplelib"], "after_repin": [["python3", "scripts/write-pins.py", "--write"]]}}  # exec-ok: fixture data (a key/argv in a test), not a program run
             txt = "\n".join(job_task(_St(), rp))
             expect("layer-deps.py head-repin --repo" in txt and "--port-release o/examplelib@examplelib-1.1-mc1.21.1" in txt
-                   and "--branch neoforge-1.21.1" in txt and "`python3 tools/core-pins.py --write`" in txt
+                   and "--branch neoforge-1.21.1" in txt and "`python3 scripts/write-pins.py --write`" in txt
                    and "ONE commit" in txt, f"repin-head: head-repin, the after_repin command, one commit: {txt}")
             rp["extra"].pop("after_repin")
             expect("after_repin" not in "\n".join(job_task(_St(), rp)), "no after_repin: none named")
@@ -6833,10 +6833,10 @@ def self_check():
         cfg_ar = json.loads(json.dumps(cfg))
         for c_ in cfg_ar["forks"]:
             if c_["repo"] == DEP:
-                c_["after_repin"] = [["python3", "tools/core-pins.py", "--write"]]  # exec-ok: fixture data (a key/argv in a test), not a program run
+                c_["after_repin"] = [["python3", "scripts/write-pins.py", "--write"]]  # exec-ok: fixture data (a key/argv in a test), not a program run
         with State.tx(state, write=False) as st_:
             by_ar = {x["id"]: x for x in build_queue(fz(), cfg_ar, json.loads(json.dumps(st_.data["forks"])), "2026-10-21")}
-        expect(by_ar["examplemod@1.21.4:repin"]["extra"]["after_repin"] == [["python3", "tools/core-pins.py", "--write"]]  # exec-ok: fixture data (a key/argv in a test), not a program run
+        expect(by_ar["examplemod@1.21.4:repin"]["extra"]["after_repin"] == [["python3", "scripts/write-pins.py", "--write"]]  # exec-ok: fixture data (a key/argv in a test), not a program run
                and "after_repin" not in by["examplemod@1.21.4:repin"]["extra"]
                and not any("after_repin" in x["extra"] for x in by_ar.values() if x["fork"] != DEP),
                "a fork's after_repin rides on its re-pin items only; a fork without it: as before")
@@ -8080,7 +8080,7 @@ def self_check():
                 c_ = [str(x) for x in cmd]
                 if "--port-release" in c_:
                     pin_("lib-1.0-mc1.21.4-r2"); order_.append("resolve")
-                elif "core-pins.py" in " ".join(c_):
+                elif "write-pins.py" in " ".join(c_):
                     expect(k_.get("cwd") == str(rp_) and c_[0] == sys.executable, f"after_repin: in the checkout: {k_} {c_}")
                     with open(rp_ / "derived-pins.txt", "a", encoding="utf-8") as fh:
                         fh.write(c_[-1] + "\n")
@@ -8089,8 +8089,8 @@ def self_check():
                     order_.append(("ci", "--modid" in c_, git(rp_, "status", "--porcelain").stdout.strip()))
                 return rec_out("")(st_, it_, cmd, log, **k_)
             sh = sh_ar_
-            rpa = dict(rpi, extra=dict(rpi["extra"], bumps=[], after_repin=[["python3", "tools/core-pins.py", "first"],  # exec-ok: fixture data (a key/argv in a test), not a program run
-                                                                             ["python3", "tools/core-pins.py", "second"]]))  # exec-ok: fixture data (a key/argv in a test), not a program run
+            rpa = dict(rpi, extra=dict(rpi["extra"], bumps=[], after_repin=[["python3", "scripts/write-pins.py", "first"],  # exec-ok: fixture data (a key/argv in a test), not a program run
+                                                                             ["python3", "scripts/write-pins.py", "second"]]))  # exec-ok: fixture data (a key/argv in a test), not a program run
             note, r_ = t_repin(_St5(), rpa, log_)
             expect(order_ == ["resolve", "first", "second", ("ci", False, "")]
                    and "derived-pins.txt" in git(rp_, "show", "--name-only", "--format=", "HEAD").stdout
@@ -8099,8 +8099,8 @@ def self_check():
             pin_("lib-1.0-mc1.21.4")
             git(rp_, "add", "-A"); git(rp_, "commit", "-qm", "back again")
             def sh_fail_(st_, it_, cmd, log, **k_):
-                if "core-pins.py" in " ".join(map(str, cmd)):
-                    raise StepError("core-pins.py exit 3: boom")
+                if "write-pins.py" in " ".join(map(str, cmd)):
+                    raise StepError("write-pins.py exit 3: boom")
                 return sh_ar_(st_, it_, cmd, log, **k_)
             sh = sh_fail_
             try:
@@ -8108,7 +8108,7 @@ def self_check():
                 err_ = ""
             except StepError as e:
                 err_ = str(e)
-            expect("after_repin command `python3 tools/core-pins.py first` failed" in err_ and "exit 3" in err_
+            expect("after_repin command `python3 scripts/write-pins.py first` failed" in err_ and "exit 3" in err_
                    and "Re-pin o/lib" not in git(rp_, "log", "-1", "--format=%s").stdout,
                    f"a failing after_repin command: a StepError naming it, nothing committed: {err_}")
             git(rp_, "checkout", "--", "."); git(rp_, "clean", "-qfd")

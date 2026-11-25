@@ -41,7 +41,7 @@ repository (`=https://github.com/OWNER/REPO.git#main` on its --fork).
 --after-repin REPO="CMD" (repeatable, run in the order given): a command of the fork's own the round runs in its
 checkout after every re-pin of it to a library's new release -- the version branches' (round.py repin) and the head's
 (the repin-head job, whose task names each command) -- and before that re-pin's commit, so files the repository derives
-from its pins (e.g. ["python3", "tools/core-pins.py", "--write"]) land in the same commit; a non-zero exit stops the
+from its pins (e.g. ["python3", "scripts/write-pins.py", "--write"]) land in the same commit; a non-zero exit stops the
 re-pin, naming the command. CMD is split as a shell would (shlex) and run without a shell. It is the repository's own
 code run in its own checkout: the same trust as its Gradle build, which the round runs anyway. Stored per fork as
 `after_repin` (a list of argv lists); a re-run that does not re-pass it warns, or keeps it with --keep-existing.
@@ -1784,15 +1784,15 @@ def self_check():
         gq(fork, "rm", "-q", ".github/port-publish.json"); gq(fork, "commit", "-qm", "a fork again")
         # --after-repin: per fork, shlex-split, in order; dropped with a warning naming the flag, kept with --keep-existing
         par = lambda s_: {"parent": {"clone_url": "https://github.com/a/lib.git", "default_branch": "main"}}
-        ar = ["--after-repin", "o/lib=python3 tools/core-pins.py --write", "--after-repin", 'O/LIB=echo "a b"']
+        ar = ["--after-repin", "o/lib=python3 scripts/write-pins.py --write", "--after-repin", 'O/LIB=echo "a b"']
         rc, o = inst("--plan-owner", "someone", *ar, argv=argv2, info=par)
         c6 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
-        expect(rc == 0 and c6["forks"][0]["after_repin"] == [["python3", "tools/core-pins.py", "--write"], ["echo", "a b"]],  # exec-ok: fixture data (a key/argv in a test), not a program run
+        expect(rc == 0 and c6["forks"][0]["after_repin"] == [["python3", "scripts/write-pins.py", "--write"], ["echo", "a b"]],  # exec-ok: fixture data (a key/argv in a test), not a program run
                f"--after-repin: stored per fork as argv lists, in order: {rc} {o} {c6['forks'][0]}")
         rc, o = inst("--plan-owner", "someone", argv=argv2, info=par)
         c7 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
         expect(rc == 0 and "after_repin" not in c7["forks"][0] and "re-pass --after-repin o/lib=" in o
-               and "core-pins.py --write" in o, f"a re-run without it: dropped, warned about with the flag: {o}")
+               and "write-pins.py --write" in o, f"a re-run without it: dropped, warned about with the flag: {o}")
         inst("--plan-owner", "someone", *ar, argv=argv2, info=par)
         rc, o = inst("--plan-owner", "someone", "--keep-existing", argv=argv2, info=par)
         expect(rc == 0 and json.loads((fork / CONFIG).read_text(encoding="utf-8"))["forks"][0]["after_repin"]

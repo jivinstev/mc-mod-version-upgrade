@@ -996,7 +996,7 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    moves only when the take changes its folder or a shared path (one in no mod folder), every bump of the round is one
    PR (`Versions alpha 1.2.4, zeta 0.3.1: ...`), and the plan has a line per mod.
    **A fork that derives files from its pins** (a pin table its build reads, generated from its workflows or
-   branch.properties) names the command that regenerates them: `--after-repin <owner/repo>="python3 tools/core-pins.py
+   branch.properties) names the command that regenerates them: `--after-repin <owner/repo>="python3 scripts/write-pins.py
    --write"` (repeatable, run in order; split like a shell, run without one; stored as the fork's `after_repin`). The
    round runs it in that fork's checkout after every re-pin -- each version branch's `repin` step, and the head's
    `repin-head` job, whose task names it -- and before that re-pin's commit, so the derived files land in the same
