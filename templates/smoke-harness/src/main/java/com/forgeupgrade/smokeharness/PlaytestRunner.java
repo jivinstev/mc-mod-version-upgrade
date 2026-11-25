@@ -1667,6 +1667,13 @@ final class PlaytestRunner {
         }
     }
 
+    /** GLFW error codes that describe the test machine, never the game or a mod, so a playtest never fails on them.
+     *  65547 GLFW_CURSOR_UNAVAILABLE: "X11: Standard cursor shape unavailable" -- a headless X display (Xvfb) has no
+     *  cursor theme, and from 26.2 a screen sets a standard cursor shape (the pause menu does), so every such screen
+     *  logged a GL ERROR block on CI while a player's display shows the cursor. Only the cursor's look is affected. */
+    static final Set<Integer> ENV_GLFW_CODES = Set.of(65547);
+    static final Pattern GLFW_CODE = Pattern.compile("^(\\d{5,6}): ");
+
     /** ERROR/FATAL log lines, and WARN lines that carry an exception, from a log4j appender on the root logger. */
     final class ErrorObs extends Observer {
         final List<Object[]> lines = Collections.synchronizedList(new ArrayList<>());   // {tick, text}
@@ -1718,12 +1725,35 @@ final class PlaytestRunner {
                 String text = "[" + level + "] [" + R.call(ev, "getLoggerName") + "] " + (msg == null ? "" : R.call(msg, "getFormattedMessage"))
                     + (thrown != null ? " -- " + thrown : "");
                 if (text.contains(TAG + ":")) return;   // our own report
-                lines.add(new Object[]{tick, text});
-                while (lines.size() > 400) lines.remove(0);
-                note(name, text.length() > 300 ? text.substring(0, 300) + "..." : text);
+                glfwReport(String.valueOf(R.call(ev, "getLoggerName")), msg == null ? "" : String.valueOf(R.call(msg, "getFormattedMessage")), text);
             } catch (Throwable ignored) {
             }
         }
+
+        /** A GLFW error the game reports as three Window-logger lines -- "########## GL ERROR ##########", "@ <where>",
+         *  "<code>: <description>" -- is judged by its code line: the first two are held until it arrives. A code in
+         *  ENV_GLFW_CODES is the test machine's, never the game's or a mod's: all three are kept as ENVIRONMENT lines,
+         *  listed in the report, never counted against a step. Any other line (or code) is recorded as before. */
+        private final List<Object[]> glfwPending = new ArrayList<>();
+        private synchronized void glfwReport(String logger, String message, String text) {
+            boolean window = logger.endsWith("blaze3d.platform.Window");
+            if (window && (message.startsWith("########## GL ERROR") || message.startsWith("@ ") && !glfwPending.isEmpty())) {
+                glfwPending.add(new Object[]{tick, text, false});
+                return;
+            }
+            Matcher code = window && !glfwPending.isEmpty() ? GLFW_CODE.matcher(message) : null;
+            boolean env = code != null && code.find() && ENV_GLFW_CODES.contains(Integer.parseInt(code.group(1)));
+            for (Object[] l : glfwPending) add((int) l[0], (String) l[1], env);
+            glfwPending.clear();
+            add(tick, text, env);
+        }
+
+        private void add(int at, String text, boolean env) {
+            lines.add(new Object[]{at, text, env});
+            while (lines.size() > 400) lines.remove(0);
+            note(name, (env ? "(environment) " : "") + (text.length() > 300 ? text.substring(0, 300) + "..." : text));
+        }
+
         boolean allowed(String text) {
             for (Pattern p : globalAllow) if (p.matcher(text).find()) return true;
             for (Pattern p : stepAllow) if (p.matcher(text).find()) return true;
@@ -1735,7 +1765,8 @@ final class PlaytestRunner {
                 for (Object[] l : lines) {
                     if ((int) l[0] < tick) continue;
                     String t = (String) l[1];
-                    if (allowed(t)) { if (includeAllowed) out.add(t + " (allowed)"); } else out.add(t);
+                    if (l.length > 2 && Boolean.TRUE.equals(l[2])) { if (includeAllowed) out.add(t + " (environment: the test machine's, not counted)"); }
+                    else if (allowed(t)) { if (includeAllowed) out.add(t + " (allowed)"); } else out.add(t);
                 }
             }
             return out;
@@ -2522,8 +2553,21 @@ final class PlaytestRunner {
             }
         }
 
-        /** A click on a screen at (x, y) GUI coordinates through its mouseClicked/mouseReleased, whatever their shape. */
+        /** The left mouse button's number on THIS version, read from the game: 0 under GLFW (1.21.x .. 26.2), 1 under
+         *  26.3's SDL3, whose AbstractWidget.isValidClickButton accepts only button() == 1 -- a hard-coded 0 makes every
+         *  vanilla widget drop the click silently. Read at run time, so no other version's constant is ever inlined. */
+        static int leftButton() {
+            try {
+                return InputConstants.class.getField("MOUSE_BUTTON_LEFT").getInt(null);
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+
+        /** A click on a screen at (x, y) GUI coordinates through its mouseClicked/mouseReleased, whatever their shape,
+         *  with this version's left mouse button. */
         static String clickScreen(Screen screen, double x, double y) throws Exception {
+            int left = leftButton();
             for (String n : new String[]{"mouseClicked", "mouseReleased"}) {
                 Method use = null;
                 for (Method m : screen.getClass().getMethods()) {
@@ -2534,15 +2578,15 @@ final class PlaytestRunner {
                 }
                 if (use == null) throw new IllegalStateException("no " + n + " on " + screen.getClass().getSimpleName());
                 Class<?>[] p = use.getParameterTypes();
-                if (p.length == 3 && p[0] == double.class) use.invoke(screen, x, y, 0);
+                if (p.length == 3 && p[0] == double.class) use.invoke(screen, x, y, left);
                 else {
                     Object[] args = new Object[p.length];
-                    args[0] = build(p[0], new ArrayDeque<>(List.of(x, y, 0.0, 0.0)));
+                    args[0] = build(p[0], new ArrayDeque<>(List.of(x, y, (double) left, 0.0)));   // x, y, button, modifiers
                     for (int i = 1; i < p.length; i++) args[i] = R.defaultValue(p[i]);
                     use.invoke(screen, args);
                 }
             }
-            return "mouseClicked + mouseReleased";
+            return "mouseClicked + mouseReleased, button " + left;
         }
 
         /** Build a value of type t (a record/value class of numbers, possibly nested) from the numbers in order. */
