@@ -2166,6 +2166,8 @@ def sv_ci_check(st, it, log):
 
 PORT_CI_WF = ".github/workflows/port-ci.yml"
 MOD_WF_RE = re.compile(r"^\.github/workflows/port-ci-([\w.-]+)\.yml$")
+MOD_WF_GEN = re.compile(r'ci-gates\.py --repo (?!\.\s)\S+ --modid "[^"]+"[\s\S]*port-ci-kit-v\d+|'
+                        r'port-ci-kit-v\d+[\s\S]*ci-gates\.py --repo (?!\.\s)\S+ --modid "[^"]+"')
 
 
 def port_ci_wfs(d, ref=None):
@@ -2179,7 +2181,10 @@ def port_ci_wfs(d, ref=None):
         files = sorted(f".github/workflows/{f.name}" for f in wd.glob("*.yml")) if wd.is_dir() else []
     if PORT_CI_WF in files:
         return [("", PORT_CI_WF)]
-    return sorted((m.group(1), f) for f in files for m in [MOD_WF_RE.match(f)] if m)
+    # a mod's workflow only when port-ci.py --mod-dir generated it (its gates run on a mod folder): a workflow of the
+    # repository's own that merely shares the name pattern (port-ci-check.yml) is never taken for a mod's
+    return sorted((m.group(1), f) for f in files for m in [MOD_WF_RE.match(f)]
+                  if m and MOD_WF_GEN.search(wf_text(d, f, ref)))
 
 
 def wf_text(d, path, ref=None):
@@ -3661,7 +3666,7 @@ def release_one(st, it, log, slug, v, base, mg, name, path):
     rx = re.compile(TAG_RE.format(v=re.escape(v)))
     # published_at is when the release was made; created_at is the tagged commit's time, which precedes the dispatch
     rel = [r for r in gh(f"repos/{slug}/releases?per_page=30") if rx.search(r.get("tag_name", ""))
-           and (not name or r.get("tag_name", "").startswith(f"{name}-"))
+           and (not name or re.match(re.escape(name) + r"-[0-9]", r.get("tag_name", "")))
            and (r.get("published_at") or r.get("created_at") or "") >= since[:19]]
     if not rel:
         raise StepError(f"the release run is green but no release tagged {name + '-' if name else ''}*-mc{v} was "
@@ -5878,15 +5883,19 @@ def self_check_multimod(expect):
         full = "\n".join(f"      {x}:" for x in CI_RECORD_INPUTS) + "\n" + (
             "          curl -fsSL https://github.com/o/m/releases/download/port-ci-kit-v9/port-ci-kit-v9.tar.gz\n"
             f'          echo "{"a" * 64}  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -\n')
+        gen = lambda n_: (f'name: Port CI {n_}\n' + full + f'          python3 .port-tools/tools/ci-gates.py --repo {n_} '
+                          f'--modid "example{n_}" --base "origin/main" \\\n            --gatec "launch,spawn" --env "x"\n')
         for n_ in ("zeta", "alpha"):
-            (wfd / f"port-ci-{n_}.yml").write_text(f"name: Port CI {n_}\n" + full, encoding="utf-8")
+            (wfd / f"port-ci-{n_}.yml").write_text(gen(n_), encoding="utf-8")
         (wfd / "ci.yml").write_text("name: CI\n", encoding="utf-8")
+        (wfd / "port-ci-check.yml").write_text("name: the repository's own check\n" + full, encoding="utf-8")
         git(d, "add", "-A"); git(d, "commit", "-qm", "two mods", check=True)
         sha = git(d, "rev-parse", "HEAD").stdout.strip()
         want_wfs = [("alpha", ".github/workflows/port-ci-alpha.yml"), ("zeta", ".github/workflows/port-ci-zeta.yml")]
         expect(port_ci_wfs(d) == want_wfs and port_ci_wfs(d, "HEAD") == want_wfs and ci_record(d),
-               f"several mods: one workflow per mod, sorted; the gate of record: {port_ci_wfs(d, 'HEAD')}")
-        (wfd / "port-ci-zeta.yml").write_text("name: Port CI zeta\n", encoding="utf-8")
+               f"several mods: one workflow per mod, sorted, the repository's own port-ci-check.yml not one; the gate "
+               f"of record: {port_ci_wfs(d, 'HEAD')}")
+        (wfd / "port-ci-zeta.yml").write_text(gen("zeta").replace("dep_override", "x"), encoding="utf-8")
         expect(not ci_record(d), "several mods: one workflow without the ci_record inputs: not the gate of record")
         one = tmp / "one"
         (one / ".github" / "workflows").mkdir(parents=True)
@@ -5896,9 +5905,7 @@ def self_check_multimod(expect):
                "one mod: PORT_CI_WF alone, whatever else is there; no workflow: none")
         # the gates: each mod's full and minimal pair, run on its own folder with its own summaries
         for n_ in ("zeta", "alpha"):
-            (wfd / f"port-ci-{n_}.yml").write_text(
-                f'name: Port CI {n_}\n' + full + f'          python3 .port-tools/tools/ci-gates.py --repo {n_} --modid '
-                f'"example{n_}" --base "origin/main" \\\n            --gatec "launch,spawn" --env "x"\n', encoding="utf-8")
+            (wfd / f"port-ci-{n_}.yml").write_text(gen(n_), encoding="utf-8")
         cmds = sv_gate_cmds(d)
         got = [(pathlib.Path(c[c.index("--repo") + 1]).name, c[c.index("--modid") + 1], c[c.index("--env") + 1],
                 pathlib.Path(c[c.index("--summary") + 1]).name, c[c.index("--gatec") + 1]) for c in cmds]
@@ -5932,6 +5939,7 @@ def self_check_multimod(expect):
             calls.append((method, path))
             if "/releases" in path:
                 return [{"tag_name": "alpha-0.2.0-mc1.21.10", "published_at": "2999-01-01T00:00:00Z"},
+                        {"tag_name": "alpha-extra-9.0-mc1.21.10", "published_at": "2999-01-01T00:00:09Z"},
                         {"tag_name": "zeta-0.1.0-mc1.21.10", "published_at": "2999-01-01T00:00:01Z"},
                         {"tag_name": "zeta-0.0.9-mc1.21.10", "published_at": "2000-01-01T00:00:00Z"},
                         {"tag_name": "alpha-0.2.0-mc1.21.11", "published_at": "2999-01-01T00:00:00Z"}]
@@ -5966,7 +5974,7 @@ def self_check_multimod(expect):
         git(tmp, "init", "-q", "-b", "neoforge-1.21.10", str(dd), check=True)
         (dd / ".github" / "workflows").mkdir(parents=True)
         for n_ in ("alpha", "zeta"):
-            (dd / f".github/workflows/port-ci-{n_}.yml").write_text(f"pins o/lib {n_}\n" + full, encoding="utf-8")
+            (dd / f".github/workflows/port-ci-{n_}.yml").write_text(f"pins o/lib {n_}\n" + gen(n_), encoding="utf-8")
         git(dd, "add", "-A"); git(dd, "commit", "-qm", "two mods pin the library", check=True)
         git(dd, "remote", "add", "origin", dbare.as_posix()); git(dd, "push", "-q", "origin", "neoforge-1.21.10", check=True)
         pinned_before = git(dd, "rev-parse", "HEAD").stdout.strip()
