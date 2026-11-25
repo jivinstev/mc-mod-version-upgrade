@@ -246,8 +246,10 @@ the newest published Port CI kit rather than the port branch's older pin; `--kit
 `--branch neoforge-<v>`, so the triggers name the version branch even when the command runs on a `keep-current/*` work
 branch -- `port-ci.py` alone also takes `neoforge-<mc>` on a checkout holding `.port/<mc>/`); `--run` runs
 it in a worktree of the branch and commits there. Push the branch; nothing is pushed for you. A tag `<mod>-<ver>-mc<v>` on the branch releases that version (publish-port's single-version path). The
-cascade keeps each branch's own `.github/workflows/port-ci.yml` and install manifest when it merges the lower branch:
-regenerate them with `ci` when a lower branch's change to them should reach this one. `ci` adds a `--variant-jar
+cascade keeps each branch's own `.github/workflows/port-ci.yml` -- in a repository of several mods each mod's
+`port-ci-<NAME>.yml` -- and install manifest when it merges the lower branch (also when both sides added one), and
+`cascade --plan` raises no decision for them: regenerate them with `ci` when a lower branch's change to them should
+reach this one. `ci` adds a `--variant-jar
 *_<v>.jar` for each `.port/<v>/shipped-expect-<v>.txt` the branch keeps (`cf` for `shipped-expect-cf.txt`), so the
 workflow's `shipped jars` job boots that jar too -- a workflow that boots only `_mr` is green while the local `_cf`
 check is red. `ci --all` does every version branch; `ci-check --repo DIR` warns about each branch whose workflow pins an
@@ -262,7 +264,9 @@ push of only those runs no full Port CI; `branch.properties`, the rows, STUBS.js
 expectations still run it, as do every pull request, tag and dispatched release. Only where the checkout holds
 `.port/<mc>/branch.properties` (port-ci.py renders it there; a single-version fork's `.port/<mc>/shipped-expect-*.txt`
 does not count): a single-version fork's workflow is byte-for-byte what it was. `ci-check` names a version branch whose
-workflow lacks it, and counts the head in its summary.
+workflow lacks it, and counts the head in its summary. It also names a version branch whose workflow is not its own --
+a push trigger naming another branch (the head's, merged up), or, with several mods, a mod's workflow the port branch
+has and it lacks -- and its fix line says `ci --all` with no `--modid` for a repository of several mods.
 
 ## Run the tool; handle only the residue
 

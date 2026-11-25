@@ -1308,16 +1308,20 @@ def gh_read(url, accept="application/vnd.github+json"):
         return r.read()
 
 
-def release_gate_record(repo, root, t, ref, work, files, read=None, mod=None):
+def release_gate_record(repo, root, t, ref, work, files, read=None, mod=None, release=None):
     """The gate record of a Port CI pre-release: the newest release of this fork for Minecraft t that carries gate
     summaries (gates-<env>.md assets, attached by the release job from the run that built its jars), every one green
     with Gate C, for a commit this branch carries with nothing jar-relevant changed since. The release is built from
     the commit the gates certified, so no commit records it in the branch (no second commit after a PR's merge).
     mod: one mod of several -- only its own releases, `<mod>-<digit>...` (Port CI's per-mod tags; tools/port-publish.py
     mod_tag's rule, never a bare prefix: mod `a` must not take mod `a-b`'s release).
+    release: (slug, tag) -- the release a caller asked about (layer-deps.py's library-first check of --port-release
+    owner/repo@TAG): read from that repository, and when no release stands, the reason is TAG's own (what TAG's gate
+    record lacks), never the last, oldest release the search happened to read (issue #305).
     -> (commit, where) or (None, why)."""
     read = read or gh_read
-    slug = origin_slug(repo)
+    want = release[1] if release else None
+    slug = (release[0] if release else None) or origin_slug(repo)
     if not slug:
         return None, "no GitHub origin to read releases from"
     try:
@@ -1331,9 +1335,12 @@ def release_gate_record(repo, root, t, ref, work, files, read=None, mod=None):
     rels = sorted((r for r in rels if rx.search(r.get("tag_name") or "") and (not mod or mod_tag(mod, r.get("tag_name")))),
                   key=lambda r: r.get("published_at") or r.get("created_at") or "", reverse=True)
     why = f"no {mod + ' ' if mod else ''}release of {slug} for {t} carries gate summaries"
+    whys = {}                               # tag -> why that release's gate record does not stand
     for r in rels:
         assets = [a for a in r.get("assets") or [] if GATE_ASSET.fullmatch(a.get("name") or "")]
         if not assets:
+            whys[r.get("tag_name")] = (f"release {r.get('tag_name')} carries no gate summaries (no gates-<env>.md "
+                                       "asset: no gate record)")
             continue
         commits, bad = set(), None
         for a in sorted(assets, key=lambda a: a["name"]):
@@ -1354,17 +1361,19 @@ def release_gate_record(repo, root, t, ref, work, files, read=None, mod=None):
                 break
             commits.add(c)
         if bad or len(commits) != 1:
-            why = bad or f"{r['tag_name']}'s gate summaries name different commits"
+            why = whys[r["tag_name"]] = bad or f"{r['tag_name']}'s gate summaries name different commits"
             continue
         c = commits.pop()
         good, w = commit_current(repo, root, t, c, ref, work, "gates", files)
         if good:
             return c, f"release {r['tag_name']} ({len(assets)} gate summaries)"
-        why = f"release {r['tag_name']}'s gate record {w}"
+        why = whys[r["tag_name"]] = f"release {r['tag_name']}'s gate record {w}"
+    if want:
+        return None, whys.get(want) or f"{slug} has no {mod + ' ' if mod else ''}release {want} for Minecraft {t}"
     return None, why
 
 
-def gate_record(repo, root, t, ref, work, files):
+def gate_record(repo, root, t, ref, work, files, release=None):
     """(commit, problems): the Gate C record version t's done check accepts -- .port/<t>/GATES.md certifying a commit
     this branch carries with nothing jar-relevant changed since (a local full run), else a Port CI pre-release's gate
     summaries for such a commit (release_gate_record). A red local run (GATES-RED.md) counts against both.
@@ -1374,14 +1383,14 @@ def gate_record(repo, root, t, ref, work, files):
     if per:
         commits, probs = [], []
         for m, d in per:
-            c, p = one_gate_record(repo, root, t, ref, work, files, d, f"{m}/", m)
+            c, p = one_gate_record(repo, root, t, ref, work, files, d, f"{m}/", m, release)
             commits.append(c)
             probs += [f"mod {m}: {x}" for x in p]
         return (None if probs else commits[0]), probs
-    return one_gate_record(repo, root, t, ref, work, files, rec_dir(root, t))
+    return one_gate_record(repo, root, t, ref, work, files, rec_dir(root, t), release=release)
 
 
-def one_gate_record(repo, root, t, ref, work, files, d, label="", mod=None):
+def one_gate_record(repo, root, t, ref, work, files, d, label="", mod=None, release=None):
     """gate_record for the records in `d` (label: how the problems name them; mod: only that mod's releases count)."""
     if (d / "GATES-RED.md").is_file():
         return None, [f"the last full gate run was red ({label}GATES-RED.md); {label}GATES.md's older green record does not "
@@ -1392,16 +1401,17 @@ def one_gate_record(repo, root, t, ref, work, files, d, label="", mod=None):
         if good:
             return c, []
         probs = [f"{label}GATES.md {why}"]
-    rc, where = release_gate_record(repo, root, t, ref, work, files, mod=mod)
+    rc, where = release_gate_record(repo, root, t, ref, work, files, mod=mod, release=release)
     if rc:
         return rc, []
     return None, [f"{probs[0]}; and no release record either: {where}"]
 
 
-def gates_problems(repo, root, t, ref, work, files):
+def gates_problems(repo, root, t, ref, work, files, release=None):
     """[] when version t has a green Gate C record at a commit this branch carries with nothing jar-relevant changed
-    since: .port/<t>/GATES.md, or the gate summaries of the Port CI pre-release built from it (gate_record)."""
-    return gate_record(repo, root, t, ref, work, files)[1]
+    since: .port/<t>/GATES.md, or the gate summaries of the Port CI pre-release built from it (gate_record; release:
+    release_gate_record's)."""
+    return gate_record(repo, root, t, ref, work, files, release)[1]
 
 
 def remerge_problems(repo, root, t, work, files=None):
@@ -1477,19 +1487,21 @@ def inventory_problems(repo, root, t, ref, work, files, write, mechanical, sv=No
     return out
 
 
-def target_done(repo, t, root=None, ref=None, write=False, _seen=None, base=None, gates=True):
+def target_done(repo, t, root=None, ref=None, write=False, _seen=None, base=None, gates=True, release=None):
     """[] when version t is DONE (the list in this file's header); else every reason it is not. root: the tree to
     judge (default: the checkout when it is on t's branch, else an export of the branch); ref: its commit. A
     SINGLE-VERSION fork's tree at Minecraft t (sv_version) is judged by the same list (#161 U5, C2) -- its records in
     .port/<t>/ too -- against its review base (base, else the one REVIEW.md records) instead of a parent branch: the
-    list's version-branch items (rows, the parent, the library's dependents' record) do not apply there."""
+    list's version-branch items (rows, the parent, the library's dependents' record) do not apply there.
+    release: (slug, tag) when the tree is that release's (layer-deps.py library_done): its gate record is read from
+    slug's releases and a refusal names tag (release_gate_record)."""
     repo = pathlib.Path(repo).resolve()
     tmp = None
     try:
         if root is None and sv_version(repo, repo) == t:
-            return sv_done(repo, t, repo, ref or "HEAD", write, base, gates)
+            return sv_done(repo, t, repo, ref or "HEAD", write, base, gates, release)
         if root is not None and sv_version(repo, root) == t:
-            return sv_done(repo, t, pathlib.Path(root), ref or "HEAD", False, base, gates)
+            return sv_done(repo, t, pathlib.Path(root), ref or "HEAD", False, base, gates, release)
         if root is None:
             if checkout_version(repo) == t:
                 root, ref = repo, ref or "HEAD"
@@ -1507,7 +1519,7 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None, base=None
             return [f"{root} is not version branch {t} (no .port/{t}/{BRANCH_PROPS})"]
         files = root_files(repo, root, work)
         mech = mechanical_files(repo, root, t, ref, files)
-        out = gates_problems(repo, root, t, ref, work, files) if gates else []
+        out = gates_problems(repo, root, t, ref, work, files, release) if gates else []
         n_open = len(fp().unreviewed_stubs(rec_dir(root, t)))
         if n_open:
             out.append(f"{n_open} unreviewed stub signal(s) in STUBS.json")
@@ -1556,7 +1568,7 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None, base=None
 SV_NO_BASE = "no review base: run tools/fork-branches.py check-done --base <the commit the change started from>"
 
 
-def sv_done(repo, t, root, ref, write, base=None, gates=True):
+def sv_done(repo, t, root, ref, write, base=None, gates=True, release=None):
     """target_done() for a single-version fork's tree: GATES.md certifying it, STUBS.json reviewed, REVIEW.md's rubric
     over every file changed since the review base, no merge left open, TEST-ITEMS.md, the base's behaviour inventory
     accounted for (INVENTORY-CHECK.json committed as a fresh check), and no pin to a library pre-release that is not
@@ -1565,7 +1577,7 @@ def sv_done(repo, t, root, ref, write, base=None, gates=True):
     ref = git(repo, "rev-parse", ref).stdout.strip()
     base = base or sv_base(root, t)
     files = root_files(repo, root, work)
-    out = gates_problems(repo, root, t, ref, work, files) if gates else []
+    out = gates_problems(repo, root, t, ref, work, files, release) if gates else []
     n_open = len(fp().unreviewed_stubs(rec_dir(root, t)))
     if n_open:
         out.append(f"{n_open} unreviewed stub signal(s) in STUBS.json")
@@ -1740,6 +1752,15 @@ BRANCH_OWNED = (".github/workflows/port-ci.yml", ".github/port-install.json")
 LEDGER_PATH = re.compile(r"^\.port/(?:[^/]+/)?KNOWN-ISSUES\.json$")
 # the weekly plan workflow and its config (tools/weekly-plan.py install) belong to the head branch alone, like the ledger
 HEAD_ONLY = (".github/workflows/weekly-plan.yml", ".github/workflows/weekly-plan-promote.yml", ".github/weekly-plan.json")
+
+
+def branch_owned(repo, *refs):
+    """The files a version branch owns (BRANCH_OWNED), and every Port CI workflow tools/fork-kind.py port_ci_workflows
+    lists at any of `refs` (the version's commit, the parent merged into it): for a repository of several mods each
+    mod's port-ci-<NAME>.yml, rendered per version by `ci` exactly as port-ci.yml is (issue #303) -- kept on a merge,
+    never a cascade decision, re-rendered by ci --run."""
+    fk = fork_kind()
+    return set(BRANCH_OWNED) | {path for r in refs if r for _n, path in fk.port_ci_workflows(repo, r)}
 
 
 def head_only(path):
@@ -2153,8 +2174,8 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
     every .java file the merge changed that both sides had from the rows alone (the parent's equal to its rows over
     the port branch it now carries, t's equal to t's rows over the port branch it carried) is re-made from the port
     branch's new file through t's rows; a file t dropped stays dropped; a conflicting derived file (gradle.properties,
-    mods.toml, a mixin config) is the parent's with t's build keys applied; t's own generated workflow is kept; the
-    append-only records (DECISIONS.md, AUTHORS-REVIEWS.md) are a union. The authors' change to a file the parent does
+    mods.toml, a mixin config) is the parent's with t's build keys applied; t's own generated workflows (port-ci.yml,
+    or each mod's port-ci-<NAME>.yml: branch_owned) are kept; the append-only records (DECISIONS.md, AUTHORS-REVIEWS.md) are a union. The authors' change to a file the parent does
     not carry is carried from port_taken (the port commit t fully took) up, so a change a run did not take is offered
     again; when the parent is already in t only that carry runs.
     resolve=None: any other conflict aborts the merge, and a carried file t changed by hand gets an open REMERGE.json
@@ -2365,7 +2386,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
         resolved.add(f)
         notes.append(f"{f}: " + ("the known-issues ledger" if LEDGER_PATH.match(f) else "the weekly plan's")
                      + f" stays on the head branch, not carried to {t}")
-    for f in BRANCH_OWNED:
+    for f in sorted(branch_owned(repo, pre, parent_ref)):
         if f in changed:
             if blob_at(repo, pre, f) is not None:
                 git(work, "checkout", pre, "--", f)
@@ -4853,7 +4874,7 @@ def sync_shared(repo, targets=None, say=print, ci_modid=None, check=False, json_
         for line in ci_check(repo, todo, kit_version=False):
             if "boots no" in line:
                 say(line.replace("ci-check: WARNING ", "sync-shared: CI not current: ")
-                    + f" -- regenerate: sync-shared --ci <modid>, or ci --repo {repo} --all --modid <modid> --run")
+                    + f" -- regenerate: sync-shared --ci <modid>, or ci --repo {repo} --all{ci_modid_hint(repo, todo)} --run")
     return 0
 
 
@@ -5050,6 +5071,8 @@ def ci_check(repo, versions=None, kit_version=None):
                 w_.append("its workflow boots no " + ", ".join(f"*_{v}.jar" for v in miss) + " although .port/" + t
                           + "/" + ", ".join(f"shipped-expect-{v}.txt" for v in miss) + " expects it (CI green, that jar unchecked)")
             why += [f"{path}: {x}" for x in w_] if name else w_
+        if wfs:
+            why += workflows_not_own(repo, t, ref)       # the head's merged up, or a mod's missing: not t's own (#304)
         if why:
             stale += 1
             out.append(f"fork-branches: ci-check: WARNING {branch_name(t)}: " + "; ".join(why))
@@ -5058,11 +5081,51 @@ def ci_check(repo, versions=None, kit_version=None):
     out.append(f"fork-branches: ci-check: {len(todo)} version branch(es)" + (" and the head branch" if not versions and have
                                                                               else "")
                + f", {stale + len(head_lines)} with an outdated workflow"
-               + (f" -- regenerate: python3 tools/fork-branches.py ci --repo {repo} --all --modid <modid> --run, then push"
-                  if stale else "")
+               + (f" -- regenerate: python3 tools/fork-branches.py ci --repo {repo} --all{ci_modid_hint(repo, todo, have)} "
+                  "--run, then push" if stale else "")
                + (f"{';' if stale else ' --'} the head: python3 tools/fork-branches.py ci --repo {repo} --head --run, then "
                   "push it" if head_lines else ""))
     return out
+
+
+PUSH_BRANCHES = re.compile(r"(?m)^\s+push:[ \t]*\n(?:[ \t]*#[^\n]*\n)*\s+branches:[ \t]*\[([^\]\n]*)\]")
+
+
+def workflows_not_own(repo, t, ref=None):
+    """Why version branch t's Port CI workflows are not the ones `ci` renders for it (issue #304): a workflow whose push
+    trigger names other branches than neoforge-<t> (another branch's, merged up), or -- a version branch of several
+    mods -- a mod's workflow the port branch has and t lacks. Read at `ref` (default t's newest commit). [] when every
+    one is t's own."""
+    ref = ref or fresh_branch(repo, branch_name(t))
+    if not ref:
+        return []
+    fk, out = fork_kind(), []
+    have = fk.port_ci_workflows(repo, ref)
+    for _n, path in have:
+        m = PUSH_BRANCHES.search(fk.workflow_text(repo, path, ref))
+        names = re.findall(r"[^\s\"',]+", m.group(1)) if m else []
+        if m and branch_name(t) not in names:
+            out.append(f"{path}: its push trigger names {', '.join(names) or 'no branch'}, not {branch_name(t)} (another "
+                       "branch's workflow, merged up)")
+    if mod_dirs(repo, ref):
+        port = parse_props(reader_of_ref(repo, ref)(f"{REC}/{t}/{BRANCH_PROPS}")).get("port_branch")
+        port_ref = fresh_branch(repo, port) if port else None
+        want = {p for n, p in (fk.port_ci_workflows(repo, port_ref) if port_ref else []) if n}
+        out += [f"{p}: missing (the port branch {port} has it)" for p in sorted(want - {p for _n, p in have})]
+    return out
+
+
+def several_mods(repo, versions, have=None):
+    """Does a version branch among `versions` hold several mods (mod_dirs at its newest commit)? Then `ci` takes no
+    --modid: each mod's id comes from its folder (ci_mods_args, #296)."""
+    have = have if have is not None else version_branches(repo)
+    return any(mod_dirs(repo, fresh_branch(repo, branch_name(t)) or have.get(t)) for t in versions if t in have)
+
+
+def ci_modid_hint(repo, versions, have=None):
+    """The `ci --all` hint's --modid part: ` --modid <modid>` for a one-mod fork, nothing for a repository of several mods
+    (it must not be given there: issue #305)."""
+    return "" if several_mods(repo, versions, have) else " --modid <modid>"
 
 
 def version_records():
@@ -5996,6 +6059,8 @@ def _check_ci_several_mods(expect):
         expect(len(w14) == 1 and "port-ci-alpha.yml: its workflow pins Port CI kit 9, older than kit 10" in w14[0]
                and "port-ci-zeta.yml: " in w14[0] and "no .github/workflows/port-ci.yml" not in w14[0],
                f"ci-check: every mod's workflow of a version branch: {lines}")
+        expect("ci --repo" in lines[-1] and "--all --run" in lines[-1] and "--modid" not in lines[-1],
+               f"ci-check's fix hint for a repository of several mods: `ci --all` with no --modid (#305): {lines[-1]}")
         g("revert", "--no-edit", "HEAD")
         said.clear()
         rc = ci_head(r, None, run=False, say=said.append, kit_version=10)
@@ -6005,6 +6070,78 @@ def _check_ci_several_mods(expect):
         hl = [l for l in ci_check(r, kit_version=10) if "(the head branch)" in l]
         expect(len(hl) == 1 and "port-ci-alpha.yml: " in hl[0] and "port-ci-zeta.yml: " in hl[0],
                f"ci-check: the head's every mod workflow: {hl}")
+
+
+def _mod_workflow(n, branch, note):
+    """A Port CI workflow of mod `n` of several (port-ci.py --mod-dir's shape, as tools/fork-kind.py port_ci_workflows
+    takes one), triggered on `branch`, marked `note`."""
+    return (f'name: Port CI {n}\non:\n  push:\n    branches: ["{branch}"]\njobs:\n  gates:\n    steps:\n'
+            '      - run: curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" https://example.invalid/port-ci-kit-v9/port-ci-kit-v9.tar.gz\n'
+            f'      - run: python3 .port-tools/tools/ci-gates.py --repo {n} --modid "example{n}" --gatec "launch"\n# {note}\n')
+
+
+def _check_cascade_mod_workflows(expect):
+    """The cascade on a version-branch fork of TWO MODS (issue #303): each version branch's own per-mod Port CI
+    workflow (port-ci-<NAME>.yml, rendered by `ci`) is the version's, exactly as port-ci.yml is -- kept through the
+    merge (an add/add with the head's, and a later change on the head), never a --plan decision; a version that has
+    rendered none yet takes none of the head's (ci --run renders it)."""
+    wfs = [f".github/workflows/port-ci-{n}.yml" for n in ("alpha", "zeta")]
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        mods = {f"{n}/gradle.properties": f"mod_id=example{n}\nminecraft_version=1.21.1\n" for n in ("alpha", "zeta")}
+        _authors(r, g, dict(mods, **{".github/workflows/port-ci-alpha.yml": _mod_workflow("alpha", "neoforge-1.21.1", "head v1"),
+                                     ".github/workflows/port-ci-zeta.yml": _mod_workflow("zeta", "neoforge-1.21.1", "head v1"),
+                                     "gradle.properties": ("mod_id=examplemod\n", "")}), "two mods, a workflow each")
+        expect(mod_dirs(r, "neoforge-1.21.1") == ["alpha", "zeta"]
+               and [p for _n, p in fork_kind().port_ci_workflows(r, "neoforge-1.21.1")] == wfs,
+               f"fixture: the head holds two mods, one Port CI workflow each: {mod_dirs(r, 'neoforge-1.21.1')}")
+        # the round's ci-check fixer rendered 1.21.3's and 1.21.4's own before the cascade (an add/add with the head's);
+        # 1.21.5 has rendered none yet
+        own = {}
+        for t in ("1.21.3", "1.21.4"):
+            w, _w = worktree_for(r, t)
+            own[t] = {p: _mod_workflow(n, branch_name(t), f"own {t}") for n, p in zip(("alpha", "zeta"), wfs)}
+            _hand(w, own[t], f"{t}: its own Port CI workflows (ci --run)")
+        wf_at = lambda t, p: blob_at(r, resolve_branch(r, branch_name(t)), p)
+        head_tip = resolve_branch(r, "neoforge-1.21.1")
+        refs = g("for-each-ref", "--format=%(refname) %(objectname)")
+        pdir = pathlib.Path(d) / "plan"
+        rc, out = _quiet(cascade, r, "port..1.21.5", mode="plan", out_dir=pdir)
+        plan = json.loads((pdir / "CASCADE-PLAN.json").read_text(encoding="utf-8")) if (pdir / "CASCADE-PLAN.json").is_file() else {}
+        raised = [x["file"] for x in plan.get("decisions", []) + plan.get("mechanical", []) if x.get("file", "").startswith(".github/")]
+        expect(rc == 0 and plan and not raised and g("for-each-ref", "--format=%(refname) %(objectname)") == refs,
+               f"cascade --plan: no per-mod workflow is a decision (the version's own, as port-ci.yml): {raised} {out[-600:]}")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none", mode="apply", out_dir=pdir)
+        got = {t: {p: (wf_at(t, p) or b"").decode("utf-8") for p in wfs} for t in ("1.21.3", "1.21.4", "1.21.5")}
+        expect(rc == 0 and got["1.21.3"] == own["1.21.3"] and got["1.21.4"] == own["1.21.4"]
+               and all(wf_at("1.21.5", p) is None for p in wfs)
+               and all(mod_dirs(r, resolve_branch(r, branch_name(t))) == ["alpha", "zeta"] for t in got)
+               and resolve_branch(r, "neoforge-1.21.1") == head_tip,
+               f"cascade --apply: each version keeps its own per-mod workflows (none of the head's): {got} {out[-600:]}")
+        # the head's workflows change (a new kit, a new pin): the versions keep theirs again, plan and apply
+        _authors(r, g, {p: _mod_workflow(n, "neoforge-1.21.1", "head v2") for n, p in zip(("alpha", "zeta"), wfs)},
+                 "the head's workflows re-rendered")
+        rc, out = _quiet(cascade, r, "port..1.21.5", mode="plan", out_dir=pdir)
+        plan = json.loads((pdir / "CASCADE-PLAN.json").read_text(encoding="utf-8")) if (pdir / "CASCADE-PLAN.json").is_file() else {}
+        raised = [x["file"] for x in plan.get("decisions", []) + plan.get("mechanical", []) if x.get("file", "").startswith(".github/")]
+        expect(rc == 0 and plan and not raised, f"--plan after the head's change: no workflow decision: {raised} {out[-600:]}")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none", mode="apply", out_dir=pdir)
+        got = {t: {p: (wf_at(t, p) or b"").decode("utf-8") for p in wfs} for t in ("1.21.3", "1.21.4")}
+        expect(rc == 0 and got["1.21.3"] == own["1.21.3"] and got["1.21.4"] == own["1.21.4"]
+               and all(wf_at("1.21.5", p) is None for p in wfs),
+               f"--apply after the head's change: each version's own kept: {got} {out[-600:]}")
+        # not the version's own (#304): a mod's workflow missing, or the head's carried up by hand; ci-check says so
+        miss = workflows_not_own(r, "1.21.5")
+        expect(workflows_not_own(r, "1.21.3") == [] and len(miss) == 2 and all("missing" in x for x in miss),
+               f"workflows_not_own: 1.21.3's are its own; 1.21.5 lacks both mods' workflows: {miss}")
+        w5, _w = worktree_for(r, "1.21.5")
+        _hand(w5, {p: _mod_workflow(n, "neoforge-1.21.1", "head v2") for n, p in zip(("alpha", "zeta"), wfs)},
+              "1.21.5: the head's workflows copied by hand")
+        merged = workflows_not_own(r, "1.21.5")
+        lines = ci_check(r, ["1.21.5"], kit_version=False)
+        expect(len(merged) == 2 and all("names neoforge-1.21.1, not neoforge-1.21.5" in x for x in merged)
+               and any("WARNING neoforge-1.21.5" in l and "not neoforge-1.21.5" in l for l in lines),
+               f"the head's workflow on a version branch: not its own, and ci-check warns: {merged} {lines}")
 
 
 def _check_ci_check(expect):
@@ -6020,7 +6157,8 @@ def _check_ci_check(expect):
         same = [l for l in ci_check(r, ["1.21.4"], kit_version=7) if "kit" in l and "WARNING" in l]
         expect(not same, f"a workflow on the newest kit (the golden's v7) is not called old: {same}")
         expect(len(w14) == 1 and "kit 7, older than kit 8" in w14[0] and "*_cf.jar" in w14[0]
-               and "neoforge-1.21.3: no .github/workflows/port-ci.yml" in "\n".join(lines) and "--all" in lines[-1],
+               and "neoforge-1.21.3: no .github/workflows/port-ci.yml" in "\n".join(lines)
+               and "--all --modid <modid> --run" in lines[-1],
                f"ci-check names the outdated kit and the missing _cf job: {lines}")
         expect(not [l for l in lines if "from_run/dep_override" in l], f"today's workflow has the reuse inputs: {lines}")
         pre = wf[:wf.index("      from_run:\n")] + wf[wf.index("\npermissions:"):]   # rendered before from_run/dep_override
@@ -6033,6 +6171,16 @@ def _check_ci_check(expect):
         old = [l for l in ci_check(r, ["1.21.4"], kit_version=7) if "neoforge-1.21.4" in l and "WARNING" in l]
         expect(len(old) == 1 and "annotates no jar sha256" in old[0] and "from_run/dep_override" not in old[0],
                f"ci-check names a version branch's workflow rendered before the jar digests: {old}")
+        _hand(w4, {".github/workflows/port-ci.yml": wf}, "1.21.4: CI again")
+        # the golden is the port branch's workflow (push: neoforge-1.21.1): on 1.21.4 it is not the version's own (#304)
+        nown = workflows_not_own(r, "1.21.4")
+        own4 = wf.replace('branches: ["neoforge-1.21.1"]', 'branches: ["neoforge-1.21.4"]')
+        expect(len(nown) == 1 and "names neoforge-1.21.1, not neoforge-1.21.4" in nown[0]
+               and any("not neoforge-1.21.4" in l for l in ci_check(r, ["1.21.4"], kit_version=False))
+               and workflows_not_own(r, "1.21.4", ref=None) == nown,
+               f"a one-mod version branch carrying the head's port-ci.yml: not its own, ci-check says so: {nown}")
+        _hand(w4, {".github/workflows/port-ci.yml": own4}, "1.21.4: its own CI")
+        expect(workflows_not_own(r, "1.21.4") == [], f"its own trigger: nothing said: {workflows_not_own(r, '1.21.4')}")
         _hand(w4, {".github/workflows/port-ci.yml": wf}, "1.21.4: CI again")
         # the release list refused (a 403 from api.github.com, downloads working; weekly round 2026-10-19): the newest kit
         # is probed from the highest one the branches pin (v7), and the fallback is said
@@ -7437,6 +7585,27 @@ def _check_release_gate_record(expect):
             setup([rel(tag, ["examplemod-1.0.jar"])], {})
             why = gates_why()
             expect(any("carries gate summaries" in x for x in why), f"a release with no summary: not done: {why}")
+            # the release a caller asked about (layer-deps.py's library-first check of --port-release o/r@TAG, #305): a
+            # refusal names TAG and what its record lacks, not the last (oldest) release the search read
+            older = "examplemod-0.9-mc1.21.5"
+            no_c = summary(h, "full").replace("| Gate C -- real client, `launch` | PASS | reached title screen |\n", "")
+            old_r = dict(rel(older, ["gates-full.md"]), published_at="2026-10-01T00:00:00Z")
+            setup([rel(tag, ["gates-full.md"]), old_r],
+                  {u("gates-full.md"): no_c, f"https://example.invalid/{older}/gates-full.md": summary(h, "full", "FAIL")})
+            plain = gates_why()
+            asked = [x for x in target_done(r, "1.21.5", release=("owner/examplemod", tag))
+                     if "Gate C" in x or "GATES" in x or "release" in x]
+            expect(any(older in x for x in plain), f"control: with no release named, the last release read is named: {plain}")
+            expect(asked and any(tag in x and "no green Gate C" in x for x in asked) and not any(older in x for x in asked),
+                   f"the release asked about: named, with what its gate record lacks (no Gate C row): {asked}")
+            setup([old_r], {f"https://example.invalid/{older}/gates-full.md": summary(h, "full", "FAIL")})
+            asked = [x for x in target_done(r, "1.21.5", release=("owner/examplemod", tag)) if "release" in x]
+            expect(any(f"no release {tag} for Minecraft 1.21.5" in x for x in asked) and not any(older in x for x in asked),
+                   f"a release asked about that the list lacks: said so, by its tag: {asked}")
+            setup([rel(tag, ["examplemod-1.0.jar"]), old_r], {f"https://example.invalid/{older}/gates-full.md": summary(h, "full", "FAIL")})
+            asked = [x for x in target_done(r, "1.21.5", release=("owner/examplemod", tag)) if "release" in x]
+            expect(any(f"release {tag} carries no gate summaries" in x for x in asked) and not any(older in x for x in asked),
+                   f"a release asked about with no summary: its own reason: {asked}")
             ci_head = lambda c, env: summary(c, env).replace(" for Minecraft 1.21.5", "", 1)   # CI on a version branch
             setup([rel(tag, ["gates-full.md", "gates-minimal.md"])],
                   {u("gates-full.md"): ci_head(h, "full"), u("gates-minimal.md"): ci_head(h, "minimal")})
@@ -8309,6 +8478,7 @@ def self_check():
         _check_check_done_rows(expect)
         _check_ci_check(expect)
         _check_ci_several_mods(expect)
+        _check_cascade_mod_workflows(expect)
         _check_change_reviews(expect)
         _check_release_gate_record(expect)
         _check_ledgered_not_ok(expect)

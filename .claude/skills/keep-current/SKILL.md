@@ -782,10 +782,12 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      none. **On a version branch, the cheapest correct
      sequence** -- one full run (~20 minutes) per version where the 2026-10-19 round ran two or three, every gate still
      green on the exact tree that merges:
-     1. what changes the build goes in first: a library re-pin (`layer-deps.py resolve --port-release`, the fork's
-        `after_repin` commands, the commit, then `fork-branches.py ci` for the workflow -- each mod's, with no
-        `--modid`, on a version branch of several mods) and the plan's ticked dependency bumps (`dep_bumps`, `resolve --bump`)
-        before the version is gated, never after its gates;
+     1. what changes the build goes in first: a library re-pin (`layer-deps.py resolve --port-release`, then
+        `fork-branches.py ci --target <v> --run` for the version's workflow -- each mod's, with no `--modid`, on a
+        version branch of several mods -- then the fork's `after_repin` commands, which so read the version's rendered
+        workflow, then one commit of all of it; `ci --run` also runs with no library release when the version's
+        workflows are not what `ci` renders for it -- stale, the head's merged up, a mod's missing) and the plan's ticked
+        dependency bumps (`dep_bumps`, `resolve --bump`) before the version is gated, never after its gates;
      2. the cascade's `--gates ab` (compile, audits, Gate A/B) green is what the review starts from: the review needs no
         Gate C run before it;
      3. the review, the fixer's fixes of its `not-ok` rows and their re-check (below), committed;
@@ -1000,7 +1002,9 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    --write"` (repeatable, run in order; split like a shell, run without one; stored as the fork's `after_repin`). The
    round runs it in that fork's checkout after every re-pin -- each version branch's `repin` step, and the head's
    `repin-head` job, whose task names it -- and before that re-pin's commit, so the derived files land in the same
-   commit; a non-zero exit stops the re-pin naming the command. It is the repository's own code run in its own
+   commit; on a version branch it runs after `fork-branches.py ci --run` has rendered the version's workflows from the
+   new pin, so it reads the version's, never the head's; a non-zero exit stops the re-pin naming the command, nothing
+   committed. It is the repository's own code run in its own
    checkout, the same trust as its Gradle build. Ask the owner at stop 1 whether such a file exists. Re-running setup
    without it warns and drops it unless `--keep-existing`.
 2. **The round task:** list the scheduled tasks (`list_triggers`) first, then `python3 tools/weekly-plan.py round-task
