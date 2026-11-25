@@ -111,6 +111,13 @@ jobs:
           python-version: '3.12'
       - name: A virtual display and software OpenGL for the boot test
         run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0
+      - name: What the repository has released (full and pre-release, per Minecraft version)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARGS: ${{ matrix.args }}
+        run: |
+          # shellcheck disable=SC2086
+          python3 tools/player-install.py ${ARGS%% *} --list | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Install from the real releases, then boot it
         env:
           GITHUB_TOKEN: ${{ github.token }}
