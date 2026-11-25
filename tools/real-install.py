@@ -65,7 +65,7 @@ adds a local jar under test and `--neoforge [MC=]VERSION` pins NeoForge (no --fo
 is --minecraft-dir, else MINECRAFT_DIR (environment or .env.local), else the platform's default. Standard library only.
 """
 import argparse, datetime, hashlib, importlib.util, io, json, os, pathlib, platform, re, shutil, subprocess, sys
-import tempfile, time, urllib.error, urllib.parse, urllib.request, zipfile
+import tempfile, time, types, urllib.error, urllib.parse, urllib.request, zipfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 UA = "mmvu-real-install"
@@ -1359,8 +1359,30 @@ def client_running(instance, lines=None):
     return None
 
 
+def egl_warning(plat, versions, env=None, find=None):
+    """A warning (or None) when a headless Linux test of a 26.3+ client will run without libEGL: 26.3 opens its
+    window through SDL, which under Xvfb needs SDL_VIDEO_FORCE_EGL=1 (run_once sets it) AND libEGL; without libEGL
+    the boot times out at "Couldn't find matching GLX visual" (CATALOG V103)."""
+    env = os.environ if env is None else env
+    if plat.os_name != "linux" or env.get("DISPLAY"):
+        return None
+    sdl = [v["mc"] for v in versions if v.get("mc") and IP.vkey(v["mc"]) >= IP.vkey("26.3")]
+    if not sdl:
+        return None
+    if find is None:
+        import ctypes.util
+        find = ctypes.util.find_library
+    if find("EGL"):
+        return None
+    return (f"no libEGL found: {', '.join(sdl)} open their window through SDL, which under Xvfb needs it "
+            "(apt-get install -y libegl1 libegl-mesa0), or the boot times out")
+
+
 def do_test(plan, a, plat, log=print):
     mcdir = pathlib.Path(plan["minecraft_dir"])
+    warn = egl_warning(plat, plan["versions"])
+    if warn:
+        log(f"WARNING: {warn}")
     phases = [] if a.boot_only else [p.strip() for p in a.phases.split(",") if p.strip()]
     bad = [p for p in phases if p not in ALL_PHASES]
     if bad:
@@ -1918,6 +1940,16 @@ def self_check():
     chk(FATAL_LOG.search(flite) is None, "a missing flite (narrator) library is not fatal")
     chk(FATAL_LOG.search(flite + "java.lang.UnsatisfiedLinkError: no lwjgl in java.library.path\n") is not None,
         "another UnsatisfiedLinkError after it still is")
+    # #279: a headless 26.3+ test without libEGL is warned about; GLFW-era versions, a display, or libEGL present: no
+    lin, mac = types.SimpleNamespace(os_name="linux"), types.SimpleNamespace(os_name="osx")
+    vs = [{"mc": "1.21.8"}, {"mc": "26.3"}]
+    w = egl_warning(lin, vs, env={}, find=lambda n: None)
+    chk(w is not None and "26.3" in w and "1.21.8" not in w and "libegl1" in w, "a 26.3 Xvfb test without libEGL warns")
+    chk(egl_warning(lin, vs, env={}, find=lambda n: "libEGL.so.1") is None, "libEGL present: no warning")
+    chk(egl_warning(lin, vs, env={"DISPLAY": ":0"}, find=lambda n: None) is None, "a real display: no warning")
+    chk(egl_warning(lin, [{"mc": "26.2"}, {"mc": "1.21.11"}], env={}, find=lambda n: None) is None,
+        "GLFW-era versions only: no warning")
+    chk(egl_warning(mac, vs, env={}, find=lambda n: None) is None, "not Linux: no warning")
     print("self-check:", "OK" if not failed else "FAIL: " + "; ".join(failed))
     return 0 if not failed else 1
 

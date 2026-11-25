@@ -204,7 +204,8 @@ throwaway clone first.
 
 A dependent fork's version T is ported only after the library fork's T is **done** (its list above, the library rule's
 own reason aside) and **released**: the library's version branch cuts its own pre-release (Port CI's `release` on
-`neoforge-T`, tag `<mod>-<ver>-mcT`), and the dependent pins that release's jar by sha256 in `.port/T/branch.properties`
+`neoforge-T`, tag `<mod>-<ver>-mcT`; once the rung's push run is green, dispatch it with `from_run=<that push run's
+id>` so the release publishes that run's jars and gate logs instead of gating the same tree again), and the dependent pins that release's jar by sha256 in `.port/T/branch.properties`
 (`port_jar.<g:a>=<url> <sha256>` beside `substitute.<g:a>=<g:a:ver-mcT>`): `python3 tools/layer-deps.py resolve --repo
 DIR --target T --port-release owner/lib@<tag>` on the dependent's T checkout. **A pin is kept:** every later resolve
 (`fork-port.py`'s setup, a cascade's) keeps each CurseForge/Modrinth pin the block holds as it is, with no lookup; only
@@ -359,11 +360,16 @@ gets an open entry in `.port/<v>/REMERGE.json` holding the authors' diff, and th
 diff. Apply it by hand through the version's rows (the diff is in the port branch's names), commit, and cascade on
 (`cascade <v>..<newest>`). **One invariant decides when an authors' change counts as taken at a version**: its added
 lines, through the version's rows, are in the version's file (in order), or an explicit clear names it
-(`cascade --apply-decisions`, or removing its entry). An entry never closes because its file changed for another
+(`cascade --apply-decisions`, or removing its entry). A version whose file is exactly its parent's file through the
+rows it adds took the change through the parent when the parent changed that file as it took the change (a hand
+resolution spelled in the parent's API) and holds no entry or `keep` answer for it: no entry there. An entry never closes because its file changed for another
 reason, and `port_taken=` (below) moves on only after every change in the range is taken or held by an entry: a merge
 that is undone commits nothing, so the next run offers the change again, and a merge a person makes by hand (keeping
 ours) is caught by the next cascade, which records the change it lacks. With a real conflict as well, the merge is
-undone and the same diffs are printed to apply after the hand merge. Start **one fixer only where it stopped**. A merge the cascade made and did not gate green (red, or stopped for a hand re-apply) stays
+undone and the same diffs are printed to apply after the hand merge. A cascade interrupted during a merge (Ctrl-C, a
+time limit, a fatal error) aborts that merge (`git merge --abort`) and says so, or prints the command that recovers.
+A version's rows are every chain version's `renames.tsv` and `moves.generated.tsv` and every `shared-renames.tsv`
+section any of them holds, so a re-made file never undoes a lower version's shared rename. Start **one fixer only where it stopped**. A merge the cascade made and did not gate green (red, or stopped for a hand re-apply) stays
 on that version's branch and worktree (`build/fork-branches/<v>`); the cascade records it (`mmvu-cascade-ungated.json` in
 the clone's git directory), so the next run gates that version before it calls it up to date, and clears it once green
 (`--gates none` says "NOT gated" and leaves it). Its worktree is reused as the stopped run left it when the only

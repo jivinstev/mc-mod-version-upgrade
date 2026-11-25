@@ -166,7 +166,10 @@ This adds `.github/workflows/port-ci.yml` as a commit of its own. It downloads t
 step 4 on every push. Wait for the run to go green, then release (stop 3): **Actions → Port CI → Run
 workflow → branch `neoforge-<mc>`, release: true**, or `gh workflow run port-ci.yml --ref neoforge-<mc>
 -f release=true`. It publishes the authors' own JARs as a pre-release named `<modid>-<version>-mc<mc>`,
-only if every gate passes. The kit is published when the maintainer merges the change to main, so a change that needs a new kit waits for that merge (never merge it yourself). Give the user the release link; they smoke-test it on their machine.
+only if every gate passes. To release the green push run's jars and gate logs instead of gating the same commit
+again, add `-f from_run=<that push run's id>` (Run workflow: `from_run`): the release job checks that run is a green
+push or pull_request run of this workflow in this repository -- every gates job and the shipped-jars job green -- that
+built exactly this commit's tree, and releases nothing otherwise (then release without `from_run`). The kit is published when the maintainer merges the change to main, so a change that needs a new kit waits for that merge (never merge it yourself). Give the user the release link; they smoke-test it on their machine.
 
 **A GameTest suite longer than Gate B's limit** (1500 s): never add `env: PORT_GRADLE_ARGS` to the workflow by hand
 (the next regeneration drops it). Commit `.port/<mc>/gate-gradle-args.txt` instead, one Gradle argument a line (`#`

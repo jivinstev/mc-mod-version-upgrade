@@ -104,7 +104,7 @@ simulation failing: the plan of the head as it is, with `head_merge.error`. With
 Exit codes: 0 ok; 1 a red branch (cascade); 18 not done (check-done); 2 bad input.
 Standard library only.
 """
-import argparse, collections, datetime, hashlib, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
+import argparse, collections, collections.abc, datetime, hashlib, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TPL = ROOT / "templates/fork-branches/branch.gradle"
@@ -535,7 +535,10 @@ def apply_moves_to_files(paths, rules, mechanical=()):
 
 def chain_table(read, t, chain_):
     """The table a layer's prepare builds for t (fork rows nearest first: renames.tsv, then moves.generated.tsv, of
-    each chain version; then the shared tables), from the .port/<v>/ files `read(path)` returns ("" when absent)."""
+    each chain version; then the shared tables), from the .port/<v>/ files `read(path)` returns ("" when absent).
+    The shared tables are t's shared-renames.tsv, then every section a lower chain version's file holds and t's does
+    not (nearest first): a version's file may hold only the sections above its parent (a branch that took the port
+    branch's content by merge only), and each lower version's shared rows still apply to the code at t (#276)."""
     rows = []
     for v in chain_:
         r = read(f"{REC}/{v}/renames.tsv")
@@ -547,7 +550,20 @@ def chain_table(read, t, chain_):
     s = read(f"{REC}/{t}/shared-renames.tsv")
     if s:
         rows.append(s)
+    rows += [sec.rstrip("\n") + "\n" for sec in chain_shared(read, [v for v in chain_ if v != t],
+                                                              have=shared_sections(s)).values()]
     return "\n".join(rows) + "\n"
+
+
+def chain_shared(read, chain_, have=None):
+    """{'shared <v>': section text} of every shared-renames.tsv section the chain versions' files hold (nearest first,
+    the first copy of a section kept), less the sections named in `have`."""
+    out = {}
+    for v in chain_:
+        for k, sec in shared_sections(read(f"{REC}/{v}/shared-renames.tsv")).items():
+            if k not in out and k not in (have or {}):
+                out[k] = sec
+    return out
 
 
 def shared_sections(text):
@@ -573,8 +589,9 @@ def own_table(read, t, parent):
     m = read(f"{REC}/{t}/moves.generated.tsv")
     if m:
         rows.append(f"# ---- moves {t} (generated)\n" + m)
+    # the parent applies every section of its whole chain (chain_table), not only the ones its own file holds
     mine, theirs = shared_sections(read(f"{REC}/{t}/shared-renames.tsv")), \
-        shared_sections(read(f"{REC}/{parent}/shared-renames.tsv") if parent else "")
+        (chain_shared(read, chain_read(read, parent)) if parent else {})
     rows += [v for k, v in mine.items() if k not in theirs]
     return "\n".join(rows) + "\n"
 
@@ -589,31 +606,80 @@ def drops_of(read, chain_):
     return out
 
 
+# what the rows make of one port-branch file, by (table text, strip, swap, blob id): a blob id names its bytes, so the
+# entry is right in any repository and for any port commit that holds the blob -- each file is converted once per run
+# for each distinct table, however many versions, merges and port commits ask (#281: every file of the port branch
+# was put through the rows again for every merge, minutes per version on a large fork)
+_ROWS_FILE_CACHE = {}
+_BLOB_CACHE = {}
+
+
+class RowsTree(collections.abc.Mapping):
+    """rows_tree()'s result: {path: bytes}, each value converted only when it is read (and kept in _ROWS_FILE_CACHE);
+    the first read fetches the tree's blobs not converted yet in one `git cat-file --batch`."""
+
+    def __init__(self, repo, blobs, key, convert):
+        self._repo, self._blobs, self._key, self._convert = repo, blobs, key, convert
+
+    def _fetch(self, blobs):
+        missing = [b for b in dict.fromkeys(blobs) if b not in _BLOB_CACHE and (self._key, b) not in _ROWS_FILE_CACHE]
+        if missing:
+            _BLOB_CACHE.update(cat_blobs(self._repo, missing))
+
+    def __getitem__(self, path):
+        blob = self._blobs[path]
+        hit = _ROWS_FILE_CACHE.get((self._key, blob))
+        if hit is None:
+            if blob not in _BLOB_CACHE:
+                self._fetch(self._blobs.values())       # one `git cat-file --batch` for the tree, not one per file
+            hit = _ROWS_FILE_CACHE[(self._key, blob)] = self._convert(_BLOB_CACHE[blob])
+        return hit
+
+    def __iter__(self):
+        return iter(self._blobs)
+
+    def __len__(self):
+        return len(self._blobs)
+
+    def items(self):
+        self._fetch(self._blobs.values())
+        return collections.abc.ItemsView(self)
+
+    def values(self):
+        self._fetch(self._blobs.values())
+        return collections.abc.ValuesView(self)
+
+
 def rows_tree(repo, port_ref, read, t, chain_=None, strip=None):
     """{src/<set>/java/<rel>: bytes} -- every .java file of the port branch at `port_ref`, through t's chain table
     (and @OnlyIn stripped when t has strip_onlyin=true), the drops left out: what the rows alone make of the authors'
-    code at t. A version's file equal to this is mechanical (no review row; re-made on a merge)."""
+    code at t. A version's file equal to this is mechanical (no review row; re-made on a merge). A RowsTree: a file is
+    converted when it is read, once per run for each table (_ROWS_FILE_CACHE)."""
     chain_ = chain_ or [t]
-    rules = rules_of(chain_table(read, t, chain_))
+    table = chain_table(read, t, chain_)
+    rules = rules_of(table)
     drops = drops_of(read, chain_)
     tprops = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
     strip = tprops.get("strip_onlyin") == "true" if strip is None else strip
     # a version at 26.1.2 or above over a port branch below it: the entityCutout family named for what the port
     # branch's call meant (CATALOG V60) -- from the port's own text, so it is right whatever the rows did to the names
     swap = cutout_crossing(t, tprops.get("base_minecraft_version"))
-    out = {}
-    for path, data in ref_files(repo, port_ref, "src").items():
-        m = re.match(r"^src/([^/]+)/java/(.+\.java)$", path)
-        if not m or (m.group(1) == "main" and m.group(2) in drops):
-            continue
+
+    def convert(data):
         port_text = data.decode("utf-8", "surrogateescape")
         text = apply_rules(port_text, rules)
         if swap:
             text = cutout_translate(port_text, text)
         if strip:
             text = strip_onlyin_text(text)
-        out[path] = text.encode("utf-8", "surrogateescape")
-    return out
+        return text.encode("utf-8", "surrogateescape")
+    blobs = {}
+    for path, (_mode, blob) in tree_entries(repo, port_ref, "src").items():
+        m = re.match(r"^src/([^/]+)/java/(.+\.java)$", path)
+        if not m or (m.group(1) == "main" and m.group(2) in drops):
+            continue
+        blobs[path] = blob
+    return RowsTree(repo, blobs, (table, bool(strip), bool(swap)), convert)
 
 
 def reader_of_root(root):
@@ -1968,6 +2034,52 @@ def classify(f, t, t_pre, diff, read, budget):
             "their fix, adapted through the rows (the authors' design intent)", None)
 
 
+def kept_by_decision(decisions_text, f, v):
+    """Does .port/DECISIONS.md (its text) log a `keep` answer for file f at version v (the authors' change left out)?"""
+    for line in (decisions_text or "").splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 5 and cells[2] == f"`{f}`" and cells[3] == v and cells[4].startswith("keep"):
+            return True
+    return False
+
+
+def arrived_through_parent(repo, parent_ref, parent_version, port_new, f, body, conv):
+    """#277: did the authors' change to f reach version t through its parent, so t needs no entry for it? Only when
+    every one of these holds (else None -- the entry is opened, as before): t's file `body` is EXACTLY the parent's file
+    put through the rows t adds over it (`conv`, own_conv; a non-Java file: the parent's bytes); the parent holds no
+    entry for f that is not taken, and logs no `keep` answer for it (the change left out on purpose there is not in t
+    either); and the parent's file is not what the parent had before it took port_new (the first commit of its
+    first-parent line without port_new), so the parent changed it when it took the change -- a hand resolution in the
+    parent's own API, which change_taken() cannot read in the authors' spelling. -> the reason, or None."""
+    p_body = blob_at(repo, parent_ref, f)
+    if p_body is None or body is None:
+        return None
+    if body != (conv(p_body) if f.endswith(".java") else p_body):
+        return None
+    rp = reader_of_ref(repo, parent_ref)
+    rules_p, dropped_p = version_rules(rp, parent_version), dropped_deps(rp(f"{REC}/{parent_version}/DEPS.md"))
+    if any(c.get("overlay") == f and entry_status(c, p_body, *rules_p, dropped_p) != "taken"
+           for c in remerge_entries(blob_at(repo, parent_ref, f"{REC}/{parent_version}/REMERGE.json"))):
+        return None
+    if kept_by_decision(rp(f"{REC}/DECISIONS.md"), f, parent_version):
+        return None
+    # the parent's first-parent line, newest first, as far as it holds port_new (descendants are closed upward)
+    holds = set(git(repo, "rev-list", "--ancestry-path", f"{port_new}..{parent_ref}").stdout.split())
+    line = []
+    for c in git(repo, "rev-list", "--first-parent", f"{port_new}..{parent_ref}").stdout.split():
+        if c not in holds:
+            break
+        line.append(c)
+    if not line:
+        return None
+    before = git(repo, "rev-parse", "--verify", "--quiet", f"{line[-1]}^1").stdout.strip()
+    if not before or git(repo, "merge-base", "--is-ancestor", port_new, before).returncode == 0:
+        return None
+    if blob_at(repo, before, f) == p_body:
+        return None
+    return f"{f}: the authors' change reached it through {branch_name(parent_version)}'s file (equal to it through the rows)"
+
+
 def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, say=print, resolve=None, port_tip=None):
     """Merge `parent_ref` into version t's branch checked out at `work` (a clean worktree), with the rows as a tool:
     every .java file the merge changed that both sides had from the rows alone (the parent's equal to its rows over
@@ -2335,6 +2447,12 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
                     and entry_status(old, body, *rules_now, dropped_now) != "taken" \
                     and git(repo, "merge-base", "--is-ancestor", old["from"], port_from).returncode == 0:
                 continue                                # recorded already, over this whole range
+            if parent_version is not None:
+                via = arrived_through_parent(repo, parent_ref, parent_version, port_new, f, body,
+                                             own_conv(rn_, t, parent_version, props))
+                if via:
+                    notes.append(via)
+                    continue                            # #277: taken by the parent (by hand, in its API), carried up
             frm, diff = span(f, port_from)
             extra = {"reason": f"the authors' change is not in {t}'s file (no merge brought it, or a merge kept {t}'s)"}
             if resolve is not None:
@@ -2403,6 +2521,31 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             return True, notes + ["nothing changed"], [], pending, items, mech
         return False, notes + [f"commit failed: {(r.stdout + r.stderr).strip()[-200:]}"], [], pending, items, mech
     return True, notes, [], pending, items, mech
+
+
+def merge_up_guarded(repo, work, t, parent_name, parent_ref, port_name, parent_version, say=print, resolve=None,
+                     port_tip=None):
+    """merge_up(), undone if it is interrupted (Ctrl-C, a time limit's signal, a fatal error) before its commit (#281: a
+    killed --apply left the version's checkout in a conflicted merge): a merge it started is aborted (git merge --abort),
+    so the branch stays where it was; anything else it staged is named with the command that drops it. Re-raised."""
+    pre = git(work, "rev-parse", "HEAD").stdout.strip()
+    try:
+        return merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, say, resolve, port_tip)
+    except BaseException as e:
+        head = git(work, "rev-parse", "HEAD").stdout.strip()
+        if head == pre and git(work, "rev-parse", "-q", "--verify", "MERGE_HEAD").stdout.strip():
+            r = git(work, "merge", "--abort")
+            say(f"fork-branches: cascade INTERRUPTED at {t} ({type(e).__name__}) during its merge: "
+                + (f"the merge was aborted, {branch_name(t)} is at {pre[:12]} as before" if r.returncode == 0 else
+                   f"git merge --abort failed ({(r.stdout + r.stderr).strip()[-200:]}): recover with: "
+                   f"git -C {pathlib.Path(work).as_posix()} merge --abort"))
+        elif head == pre and git(work, "diff", "--cached", "--quiet").returncode:
+            say(f"fork-branches: cascade INTERRUPTED at {t} ({type(e).__name__}) with changes staged and not committed: "
+                f"{branch_name(t)} is at {pre[:12]} as before; drop them with: git -C {pathlib.Path(work).as_posix()} "
+                f"reset --hard {pre[:12]}")
+        else:
+            say(f"fork-branches: cascade INTERRUPTED at {t} ({type(e).__name__}): {branch_name(t)} is at {head[:12]}")
+        raise
 
 
 def worktree_for(repo, t):
@@ -3294,7 +3437,8 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         work, why = worktree_for(repo, t)
         if work is None:
             rows.append((t, "STOPPED", why)); break
-        ok, notes, left, pending, its, mm = merge_up(repo, work, t, pname, pref, port, pv, say, resolve, port_tip=port_tip)
+        ok, notes, left, pending, its, mm = merge_up_guarded(repo, work, t, pname, pref, port, pv, say, resolve,
+                                                             port_tip=port_tip)
         items += its
         mech += mm
         if ok and not pending and not its and "nothing changed" in notes and \
@@ -5915,6 +6059,149 @@ def _check_remake_import(expect):
         git(w4, "merge", "--abort")
 
 
+def _check_shared_chain(expect):
+    """#276: a rung's shared-renames.tsv may hold only the sections above its parent (a branch that carried the port
+    branch's content by merge only): a file the cascade re-makes there from the port branch still goes through every
+    lower rung's shared rows, so it never undoes a lower rung's rename; the rows a rung adds over its parent stay its own
+    sections only (a lower section is not applied twice)."""
+    nf = "src/main/java/com/example/mod/NewShared.java"
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w5, _w = worktree_for(r, "1.21.5")
+        sp = w5 / ".port/1.21.5/shared-renames.tsv"
+        secs = shared_sections(sp.read_text(encoding="utf-8"))
+        own5 = {k: v for k, v in secs.items() if k == "shared 1.21.5"}
+        sp.write_text("".join(own5.values()), encoding="utf-8")
+        git(w5, "commit", "-qam", "1.21.5: its shared table holds only its own section", check=True)
+        read5 = reader_of_root(w5)
+        own = own_table(read5, "1.21.5", "1.21.4")
+        expect("shared 1.21.3" in secs and "shared 1.21.3" not in own5 and "old.Shared" in chain_table(read5, "1.21.5", chain(w5, "1.21.5"))
+               and "old.Shared" not in own,
+               f"the chain table takes a lower rung's shared section from that rung's own file; the rows 1.21.5 adds do "
+               f"not: {sorted(secs)} {own[:300]!r}")
+        _authors(r, g, {nf: "package com.example.mod;\nimport old.Shared;\nclass NewShared { Shared s; }\n"},
+                 "authors: a new file on the 1.21.3 shared library's renamed class")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+        got = {t: ref_files(r, resolve_branch(r, branch_name(t))).get(nf, b"") for t in ("1.21.3", "1.21.4", "1.21.5")}
+        expect(rc == 0 and all(b"import new.Shared;" in v and b"old.Shared" not in v for v in got.values())
+               and "re-made from" in out,
+               f"#276: the new file re-made on every rung through every lower rung's shared rows: {got} {out[-400:]}")
+
+
+def _check_rows_cache_and_interrupt(expect):
+    """#281: rows_tree converts a file only when it is read, once per table (the same bytes, read lazily or all at once,
+    with the cache cold or warm); an --apply interrupted during its merge leaves no merge behind (aborted, said)."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        tip = resolve_branch(r, "neoforge-1.21.1")
+        w5, _w = worktree_for(r, "1.21.5")
+        read5 = reader_of_root(w5)
+        _ROWS_FILE_CACHE.clear()
+        lazy = rows_tree(r, tip, read5, "1.21.5", chain(w5, "1.21.5"))
+        one = sorted(lazy)[0]
+        first, cached = lazy.get(one), len(_ROWS_FILE_CACHE)
+        whole = dict(lazy.items())
+        _ROWS_FILE_CACHE.clear()
+        again = dict(rows_tree(r, tip, read5, "1.21.5", chain(w5, "1.21.5")).items())
+        table = chain_table(read5, "1.21.5", chain(w5, "1.21.5"))
+        eager = {p_: apply_rules(data.decode("utf-8", "surrogateescape"), rules_of(table)).encode("utf-8", "surrogateescape")
+                 for p_, data in ref_files(r, tip, "src").items() if p_ in whole}
+        eager = {p_: strip_onlyin_text(v.decode("utf-8", "surrogateescape")).encode("utf-8", "surrogateescape")
+                 for p_, v in eager.items()}
+        expect(cached == 1 and len(whole) > 1 and whole[one] == first and whole == again == eager
+               and len(_ROWS_FILE_CACHE) == len(whole),
+               f"rows_tree: one file read converts one file; every file, warm or cold, is what the rows make of it: "
+               f"{cached} {sorted(whole)} {[p_ for p_ in whole if whole[p_] != eager.get(p_)]}")
+        _authors(r, g, {"src/main/java/com/example/mod/Plain.java": "package com.example.mod;\nclass Plain { int a; }\n"},
+                 "authors: Plain")
+        pre = {t: resolve_branch(r, branch_name(t)) for t in ("1.21.3", "1.21.4", "1.21.5")}
+        real = globals()["rows_tree"]
+
+        def boom(*a, **k):
+            raise KeyboardInterrupt
+        globals()["rows_tree"] = boom
+        out, hit = "", False
+        try:
+            import contextlib, io
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cascade(r, "port..1.21.5", "none", mode="apply", out_dir=pathlib.Path(d) / "plan")
+        except KeyboardInterrupt:
+            hit = True
+        finally:
+            globals()["rows_tree"] = real
+            out = buf.getvalue()
+        w3, _w = worktree_for(r, "1.21.3")
+        expect(hit and "cascade INTERRUPTED at 1.21.3" in out and "the merge was aborted" in out
+               and not git(w3, "rev-parse", "-q", "--verify", "MERGE_HEAD").stdout.strip()
+               and not git(w3, "status", "--porcelain", "--untracked-files=no").stdout.strip()
+               and {t: resolve_branch(r, branch_name(t)) for t in pre} == pre,
+               f"#281: an --apply interrupted during its merge: aborted, the branches where they were, said: {hit} {out[-500:]}")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+        expect(rc == 0, f"after the interruption the cascade runs again as usual: {out[-300:]}")
+
+
+def _check_remerge_through_parent(expect):
+    """#277: a lower rung resolved a conflict by hand (the authors' change taken, spelled in its own API): a rung above
+    whose file is exactly the parent's file put through the rows it adds over the parent got the change through the
+    parent, so no REMERGE.json entry is opened there. A rung whose file really lacks the change (a merge kept its own)
+    still gets its entry -- exact equality only."""
+    def body(a):
+        return ("package com.example.mod;\nclass Srv%s {\n    int top;\n    void a() { %s}\n    int p1;\n    int p2;\n"
+                "    int p3;\n    int pad;\n}\n" % a)
+    xs, ys = "src/main/java/com/example/mod/SrvX.java", "src/main/java/com/example/mod/SrvY.java"
+    zs = "src/main/java/com/example/mod/SrvZ.java"
+    ents = lambda r, t: {c.get("overlay"): c for c in remerge_entries(
+        ref_files(r, resolve_branch(r, branch_name(t))).get(f".port/{t}/REMERGE.json", b""))}
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        _authors(r, g, {xs: body(("X", "")), ys: body(("Y", "")), zs: body(("Z", ""))}, "authors: SrvX, SrvY, SrvZ")
+        rc0, out0 = _quiet(cascade, r, "port..1.21.5", "none")
+        w3, _w = worktree_for(r, "1.21.3")
+        _hand(w3, {f: ("void a() { }", "void a() { local(); }") for f in (xs, ys, zs)},
+              "1.21.3: its own line in a()")
+        rc1, out1 = _quiet(cascade, r, "1.21.3..1.21.5", "none")
+        # the authors change the same line: a conflict at 1.21.3, resolved there by hand in 1.21.3's API
+        _authors(r, g, {f: ("void a() { }", "void a() { int s = p.getServer(); x.oldCall(); }") for f in (xs, ys, zs)},
+                 "authors: a() asks for the server")
+        rc2, out2 = _quiet(cascade, r, "port..1.21.3", "none")
+        w3, _w = worktree_for(r, "1.21.3")
+        git(w3, "merge", "--no-ff", "--no-commit", "neoforge-1.21.1")
+        for f, n in ((xs, "X"), (ys, "Y")):
+            (w3 / f).write_text(body((n, "local(); int s = serverOf(p); x.newCall(); ")), encoding="utf-8")
+        # (c): SrvZ kept as 1.21.3 had it (a `keep` answer there): the change is left out on purpose at 1.21.3
+        (w3 / zs).write_text(body(("Z", "local(); ")), encoding="utf-8")
+        append_decisions(w3, [{"id": "c0ffee000000", "file": zs, "version": "1.21.3", "choice": "keep", "by": "owner",
+                               "reasoning": "ours stays"}])
+        bp = w3 / ".port/1.21.3/branch.properties"
+        bp.write_bytes(set_props_text(read_file(bp), {"port_taken": resolve_branch(r, "neoforge-1.21.1")}).encode("utf-8"))
+        git(w3, "add", "-A", check=True); git(w3, "commit", "-qm", "1.21.3: the authors' change by hand", check=True)
+        # (b): 1.21.4 takes 1.21.3 by a hand merge that keeps 1.21.4's SrvY (and is then put through the rows for SrvX)
+        w4, _w = worktree_for(r, "1.21.4")
+        git(w4, "merge", "--no-ff", "--no-commit", "neoforge-1.21.3")
+        _quiet(remake, w4, "1.21.4")
+        git(w4, "checkout", "HEAD", "--", ys, check=True)
+        git(w4, "commit", "-qm", "1.21.4: merge 1.21.3, our SrvY kept", check=True)
+        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none", mode="apply", out_dir=pathlib.Path(d) / "plan")
+        e3, e4, e5 = ents(r, "1.21.3"), ents(r, "1.21.4"), ents(r, "1.21.5")
+        f4 = ref_files(r, resolve_branch(r, "neoforge-1.21.4"))
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        expect(rc0 == 0 and rc1 == 0 and rc2 == 1 and b"serverOf(p); x.newerCall();" in f4.get(xs, b"")
+               and b"serverOf(p); x.newerCall();" in f5.get(xs, b""),
+               f"control: the hand resolution reaches 1.21.4 and 1.21.5 through their rows: {f4.get(xs)!r} {f5.get(xs)!r} "
+               f"{out0[-200:]} {out1[-200:]} {out2[-200:]}")
+        expect(xs not in e3 and xs not in e4 and xs not in e5,
+               f"#277 (a): the change arrived through the parent: no entry above the rung that resolved it: "
+               f"{[(t, sorted(e)) for t, e in (('1.21.3', e3), ('1.21.4', e4), ('1.21.5', e5))]} {e5.get(xs, {}).get('reason')} {out[-3000:]}")
+        expect(b"serverOf" not in f4.get(ys, b"") and ys in e4
+               and "the authors' change is not in 1.21.4's file" in e4[ys].get("reason", ""),
+               f"#277 (b): 1.21.4's SrvY really lacks the change (its merge kept its own): its entry is still opened: "
+               f"{f4.get(ys)!r} {sorted(e4)} {e4.get(ys, {}).get('reason')}")
+        expect(b"getServer" not in f4.get(zs, b"") and zs in e4 and zs in e5,
+               f"#277 (c): SrvZ, kept without the change at 1.21.3 and carried up equal through the rows: still an entry "
+               f"above (a change left out below is not taken by the parent): {f4.get(zs)!r} {sorted(e4)} {sorted(e5)}")
+
+
 def _check_remake(expect):
     """remake: a merge into a version branch made by hand with plain `git merge` (a version-boundary conflict) gets the
     rows' step the cascade's merge applies -- the rows-only files re-made from the port branch through the version's
@@ -7816,6 +8103,9 @@ def self_check():
         _check_stage_checkout(expect)
         _check_remake(expect)
         _check_remake_import(expect)
+        _check_shared_chain(expect)
+        _check_remerge_through_parent(expect)
+        _check_rows_cache_and_interrupt(expect)
         _check_rows_through_merge(expect)
         _check_cutout(expect)
         _check_origin_sync(expect)
