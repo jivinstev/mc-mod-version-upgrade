@@ -102,6 +102,11 @@ class _FatalLog:
 
 FATAL_LOG = _FatalLog()
 STDERR_BAD = re.compile(r"\b[\w.$]*(?:Exception|Error)\b(?!\s*=)")
+# An exception NeoForge prints and survives: its config writer saves `<name>.new.tmp.toml` and renames it over the file,
+# and on macOS a second save can lose the race for the temporary (NoSuchFileException on it); the config is written by
+# the other save and the game goes on to the title screen. Seen on clean macOS runners, about one boot in three. A boot
+# with only this is still judged on everything else (the title screen, the loaded mods).
+STDERR_BENIGN = re.compile(r"NoSuchFileException: \S*[/\\]config[/\\][\w.-]+\.new\.tmp\.toml")
 BRANCH = re.compile(r"neoforge-(\d+\.\d+(?:\.\d+)?)$")
 
 
@@ -1236,7 +1241,7 @@ def judge_boot(log_text, stderr_text, crashed, modids):
     """-> (verdict, detail) for a boot test from what the run left behind."""
     if crashed:
         return "FAIL", "crash report: " + crashed
-    bad = [l.strip() for l in stderr_text.splitlines() if STDERR_BAD.search(l)]
+    bad = [l.strip() for l in stderr_text.splitlines() if STDERR_BAD.search(l) and not STDERR_BENIGN.search(l)]
     if bad:
         return "FAIL", "stderr: " + bad[0][:300]
     f = FATAL_LOG.search(log_text)
@@ -1267,7 +1272,7 @@ def judge_phase(log_text, stderr_text, crashed):
     m = marker(log_text)
     if m:
         return m[0], m[1][:300]
-    bad = [l.strip() for l in stderr_text.splitlines() if STDERR_BAD.search(l)]
+    bad = [l.strip() for l in stderr_text.splitlines() if STDERR_BAD.search(l) and not STDERR_BENIGN.search(l)]
     if bad:
         return "FAIL", "stderr: " + bad[0][:300]
     f = FATAL_LOG.search(log_text)
@@ -1977,6 +1982,16 @@ def self_check():
     bad = fetch_all_parallel(list(range(40)), f, jobs=8)
     chk(sorted(seen) == list(range(40)) and sorted(i for i, _ in bad) == [3, 10, 17, 24, 31, 38] and 1 < peak[0] <= 8,
         f"fetch_all_parallel: all tried, failures per item, at most `jobs` at once (peak {peak[0]})")
+    # NeoForge's config-save race on macOS (NoSuchFileException on a .new.tmp.toml) is not a failed boot by itself; the
+    # title screen is still required, and any other exception still fails
+    race = "java.nio.file.NoSuchFileException: /Users/x/mc/instances/a/config/neoforge-local.new.tmp.toml\n"
+    title = "Sound engine started\nCreated: 1024x1024x4 minecraft:textures/atlas/blocks.png-atlas\n"
+    v_ok = judge_boot(title, race, None, [])[0]
+    v_no_title = judge_boot("", race, None, [])[0]
+    v_other = judge_boot(title, race + "java.lang.IllegalStateException: boom\n", None, [])[0]
+    chk(v_ok != "FAIL" and v_no_title == "TIMEOUT" and v_other == "FAIL",
+        f"the config-save race alone does not fail a boot; no title screen or another exception still does: "
+        f"{v_ok} {v_no_title} {v_other}")
     print("self-check:", "OK" if not failed else "FAIL: " + "; ".join(failed))
     return 0 if not failed else 1
 
