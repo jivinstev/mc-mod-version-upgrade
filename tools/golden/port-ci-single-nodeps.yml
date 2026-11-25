@@ -182,9 +182,11 @@ jobs:
             mv -f "$tmp/candidate.jar" "$dir/$a-$v.jar"
             [ -f "$dir/$a-$v.pom" ] || echo "<project><modelVersion>4.0.0</modelVersion><groupId>$g</groupId><artifactId>$a</artifactId><version>$v</version><packaging>jar</packaging></project>" > "$dir/$a-$v.pom"
             echo "Dependent gate: $g:$a:$v is $asset from $from (sha256 $sha), not the pinned jar" >> "$GITHUB_STEP_SUMMARY"
+            ga="${ga:+$ga,}$g:$a"
             n=$((n+1))
           done
           [ "$n" -gt 0 ] || { echo "::error::dep_override names no entry"; exit 1; }
+          echo "PORT_CI_DEP_OVERRIDE=$ga" >> "$GITHUB_ENV"
       - name: Build and gates
         run: |
           git rev-parse "HEAD^{tree}" > "$RUNNER_TEMP/built-tree.txt"   # the tree this run built: a from_run release checks it
