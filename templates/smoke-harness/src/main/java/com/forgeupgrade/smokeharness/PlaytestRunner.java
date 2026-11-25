@@ -2522,8 +2522,21 @@ final class PlaytestRunner {
             }
         }
 
-        /** A click on a screen at (x, y) GUI coordinates through its mouseClicked/mouseReleased, whatever their shape. */
+        /** The left mouse button's number on THIS version, read from the game: 0 under GLFW (1.21.x .. 26.2), 1 under
+         *  26.3's SDL3, whose AbstractWidget.isValidClickButton accepts only button() == 1 -- a hard-coded 0 makes every
+         *  vanilla widget drop the click silently. Read at run time, so no other version's constant is ever inlined. */
+        static int leftButton() {
+            try {
+                return InputConstants.class.getField("MOUSE_BUTTON_LEFT").getInt(null);
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+
+        /** A click on a screen at (x, y) GUI coordinates through its mouseClicked/mouseReleased, whatever their shape,
+         *  with this version's left mouse button. */
         static String clickScreen(Screen screen, double x, double y) throws Exception {
+            int left = leftButton();
             for (String n : new String[]{"mouseClicked", "mouseReleased"}) {
                 Method use = null;
                 for (Method m : screen.getClass().getMethods()) {
@@ -2534,15 +2547,15 @@ final class PlaytestRunner {
                 }
                 if (use == null) throw new IllegalStateException("no " + n + " on " + screen.getClass().getSimpleName());
                 Class<?>[] p = use.getParameterTypes();
-                if (p.length == 3 && p[0] == double.class) use.invoke(screen, x, y, 0);
+                if (p.length == 3 && p[0] == double.class) use.invoke(screen, x, y, left);
                 else {
                     Object[] args = new Object[p.length];
-                    args[0] = build(p[0], new ArrayDeque<>(List.of(x, y, 0.0, 0.0)));
+                    args[0] = build(p[0], new ArrayDeque<>(List.of(x, y, (double) left, 0.0)));   // x, y, button, modifiers
                     for (int i = 1; i < p.length; i++) args[i] = R.defaultValue(p[i]);
                     use.invoke(screen, args);
                 }
             }
-            return "mouseClicked + mouseReleased";
+            return "mouseClicked + mouseReleased, button " + left;
         }
 
         /** Build a value of type t (a record/value class of numbers, possibly nested) from the numbers in order. */

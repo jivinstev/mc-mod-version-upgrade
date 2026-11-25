@@ -102,6 +102,18 @@ give @s minecraft:oak_planks 8
 @assert execute if items entity @s container.* minecraft:oak_planks[count=4]
 gamemode creative
 
+@step a vanilla screen's button
+# Escape with no screen open is the pause menu; its "Options..." button opens the options screen. A widget accepts
+# only the version's own left mouse button (0 under GLFW, 1 under 26.3's SDL3), so this pins @click button on every one
+@key key.keyboard.escape
+@expect screen PauseScreen within 3s
+@click button "Options"
+@expect screen OptionsScreen within 3s
+@key key.keyboard.escape
+@expect screen PauseScreen within 3s
+@key key.keyboard.escape
+@expect screen none within 3s
+
 @step repeat, for each entity, until it is gone
 # two held-still husks (they do not burn by day); each gets strikes until it is dead -- {it} is its UUID
 item replace entity @s weapon.mainhand with minecraft:netherite_sword
