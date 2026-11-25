@@ -96,24 +96,25 @@ def is_owned(repo, ref="HEAD", config=PUBLISH_CONFIG):
     """Is this repository the mod author's own -- its publishing config (PUBLISH_CONFIG, or `config`: one mod's,
     publish_config) committed at ref says `"own_mod": true` -- rather than a port of somebody else's mod? Read from git,
     never the working tree: an uncommitted edit says nothing. No config, an unreadable one, or anything but the JSON
-    value true: not owned. Asked of the whole repository (the default config) when it has no PUBLISH_CONFIG but one
-    config per mod (`.github/port-publish-<mod>.json`, a repository of several mods): owned when every one says so."""
-    def owned(path):
-        r = git(repo, "show", f"{ref}:{path}")
-        if r.returncode != 0:
-            return None
-        try:
-            cfg = json.loads(r.stdout)
-        except ValueError:
-            return False
-        return isinstance(cfg, dict) and cfg.get("own_mod") is True
-    one = owned(config)
-    if one is not None or config != PUBLISH_CONFIG:
-        return bool(one)
-    per = [p_ for p_ in git(repo, "ls-tree", "--name-only", ref, ".github/").stdout.split()
-           if re.match(r"^\.github/port-publish-[\w.-]+\.json$", p_)]
-    return bool(per) and all(owned(p_) for p_ in sorted(per))
+    value true: not owned."""
+    r = git(repo, "show", f"{ref}:{config}")
+    if r.returncode != 0:
+        return False
+    try:
+        cfg = json.loads(r.stdout)
+    except ValueError:
+        return False
+    return isinstance(cfg, dict) and cfg.get("own_mod") is True
 
+
+def all_mods_owned(repo, ref="HEAD"):
+    """A repository of several mods with no PUBLISH_CONFIG: is every per-mod config (`.github/port-publish-<mod>.json`)
+    owned, and is there at least one? What `detect` prints as owned=yes for it; is_owned keeps asking one config."""
+    if git(repo, "show", f"{ref}:{PUBLISH_CONFIG}").returncode == 0:
+        return False
+    per = sorted(p_ for p_ in git(repo, "ls-tree", "--name-only", ref, ".github/").stdout.split()
+                 if re.match(r"^\.github/port-publish-[\w.-]+\.json$", p_))
+    return bool(per) and all(is_owned(repo, ref, p_) for p_ in per)
 
 def mod_dirs(repo, ref="HEAD"):
     """A repository of several separate mods: its top-level folders whose own gradle.properties names a mod_id, sorted
@@ -202,7 +203,7 @@ def cmd_detect(a):
     kind, versions, legacy = detect(repo)
     mods = mod_dirs(repo)
     print(f"kind={kind}" + (f" versions={','.join(versions)}" if versions else "")
-          + (f" legacy_layer={','.join(legacy)}" if legacy else "") + (" owned=yes" if is_owned(repo) else "")
+          + (f" legacy_layer={','.join(legacy)}" if legacy else "") + (" owned=yes" if is_owned(repo) or all_mods_owned(repo) else "")
           + (f" mods={','.join(mods)}" if mods else ""))
     if legacy:
         print(f"fork-kind: {', '.join(legacy)} still carr{'ies' if len(legacy) == 1 else 'y'} the removed .multiversion/ "
@@ -310,16 +311,22 @@ def self_check():
         w("alpha/gradle.properties", "mod_id = examplealpha\nmod_version=0.2.0\n"); w("docs/README.md", "x\n")
         g("add", "-A"); g("commit", "-qm", "two mods")
         expect(mod_dirs(r) == ["alpha", "zeta"], f"two mod folders, the shared and docs folders not: {mod_dirs(r)}")
-        expect(not is_owned(r), "no publishing config at all: not owned")
+        expect(not is_owned(r) and not all_mods_owned(r), "no publishing config at all: not owned")
         w(".github/port-publish-alpha.json", '{"schema": 1, "own_mod": true}\n'); g("add", "-A"); g("commit", "-qm", "a")
-        expect(is_owned(r), "every per-mod config (one) says own_mod: owned")
+        expect(all_mods_owned(r) and not is_owned(r), "every per-mod config (one) says own_mod: all mods owned; the "
+                                                      "repository's own config (none) still is not")
         w(".github/port-publish-zeta.json", '{"schema": 1, "permission": "https://example.invalid/agreed"}\n')
         g("add", "-A"); g("commit", "-qm", "z")
-        expect(not is_owned(r), "one per-mod config is a port's: not owned")
+        expect(not all_mods_owned(r), "one per-mod config is a port's: not every mod owned")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = cmd_detect(argparse.Namespace(repo=str(r)))
         expect(rc == 0 and buf.getvalue() == "kind=single-version mods=alpha,zeta\n", f"detect names the mods: {buf.getvalue()!r}")
+        w(".github/port-publish-zeta.json", '{"schema": 1, "own_mod": true}\n'); g("add", "-A"); g("commit", "-qm", "z2")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_detect(argparse.Namespace(repo=str(r)))
+        expect(buf.getvalue() == "kind=single-version owned=yes mods=alpha,zeta\n", f"every mod owned: {buf.getvalue()!r}")
         w("gradle.properties", "mod_id=examplemod\n"); g("add", "-A"); g("commit", "-qm", "one mod at the root")
         expect(mod_dirs(r) == [], "a root mod_id: the one-mod layout, whatever the folders hold")
     expect(mc_key("1.21.11") > mc_key("1.21.8") and mc_key("26.1.2") > mc_key("1.21.11"), "versions sort as numbers")
