@@ -499,6 +499,8 @@ def is_version_branch(repo, mc):
 #   owner/repo#RUN_ID/ARTIFACT/asset.jar=group:artifact:version@sha256   a jar in an Actions artifact of a workflow run of
 #                                                                   that (public) repository, read with the run's token
 # Each is validated strictly, downloaded and sha256-checked; an entry whose coordinates no pinned jar has is an error.
+# The later steps get PORT_CI_DEP_OVERRIDE=group:artifact[,group:artifact...], the coordinates it replaced, so a build
+# that checks its pinned jar's sha256 itself can accept exactly those (and say so) on this run only.
 # Off (the step skipped) when the input is empty; a run with it never releases (the release job refuses, and a from_run
 # release takes no workflow_dispatch run). The input reaches the script only through env, and the download URL is
 # assembled from shell variables, so no tool that reads a workflow's pins (pinned_releases, port-offer.py,
@@ -560,9 +562,12 @@ DEP_OVERRIDE_STEP = r"""
             mv -f "$tmp/candidate.jar" "$dir/$a-$v.jar"
             [ -f "$dir/$a-$v.pom" ] || echo "<project><modelVersion>4.0.0</modelVersion><groupId>$g</groupId><artifactId>$a</artifactId><version>$v</version><packaging>jar</packaging></project>" > "$dir/$a-$v.pom"
             echo "Dependent gate: $g:$a:$v is $asset from $from (sha256 $sha), not the pinned jar" >> "$GITHUB_STEP_SUMMARY"
+            ga="${ga:+$ga,}$g:$a"
             n=$((n+1))
           done
-          [ "$n" -gt 0 ] || { echo "::error::dep_override names no entry"; exit 1; }""".rstrip("\n")
+          [ "$n" -gt 0 ] || { echo "::error::dep_override names no entry"; exit 1; }
+          echo "PORT_CI_DEP_OVERRIDE=$ga" >> "$GITHUB_ENV"
+""".rstrip("\n")
 
 # The release job's condition on the shipped job, with --variant-jar: it must succeed, or be skipped by from_run.
 RELEASE_SHIPPED_IF = " && (needs.shipped.result == 'success' || (inputs.from_run && needs.shipped.result == 'skipped'))"
@@ -1931,7 +1936,8 @@ def reuse_check():
             with zipfile.ZipFile(src / "jars.zip", "w") as z:
                 z.writestr("lib-1.1-rc1_mr.jar", cand); z.writestr("lib-1.1-rc1-sources.jar", b"x")
             env = dict(os.environ, HOME=home.as_posix(), RUNNER_TEMP=tmp.as_posix(), SRC=src.as_posix(),
-                       CALLS=(d / "calls.txt").as_posix(), GITHUB_STEP_SUMMARY=(d / "summary.md").as_posix(), DEP_OVERRIDE=entry)
+                       CALLS=(d / "calls.txt").as_posix(), GITHUB_STEP_SUMMARY=(d / "summary.md").as_posix(),
+                       GITHUB_ENV=(d / "env").as_posix(), DEP_OVERRIDE=entry)
             r = subprocess.run([BASH, "-c", prelude + step], cwd=d, env=env, capture_output=True, text=True,
                                encoding="utf-8", errors="replace")
             calls = (d / "calls.txt").read_text(encoding="utf-8").splitlines() if (d / "calls.txt").exists() else []
@@ -1942,6 +1948,8 @@ def reuse_check():
             if rc_want == 0:
                 good &= "<artifactId>lib</artifactId>" in (m2 / "lib-1.0.pom").read_text(encoding="utf-8")
                 good &= "Dependent gate: com.example.lib:lib:1.0" in (d / "summary.md").read_text(encoding="utf-8")
+                # the later steps learn which coordinates it replaced (a build checking its own pin's sha256 reads it)
+                good &= (d / "env").read_text(encoding="utf-8").splitlines() == ["PORT_CI_DEP_OVERRIDE=com.example.lib:lib"]
             if case == "an artifact the token cannot read":
                 good &= "the run's token could not read o/private's artifacts" in r.stdout + r.stderr
             if not good:

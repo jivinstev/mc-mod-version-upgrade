@@ -140,7 +140,9 @@ version was set up). Some fixes, checks and savings still reach
   "owner/repo@tag/asset.jar=group:artifact:version@sha256"` (a release asset) or
   `"owner/repo#RUN_ID/ARTIFACT/asset.jar=group:artifact:version@sha256"` (a jar in another repository's run artifact),
   space-separated, is the dependent gate: every gates leg and the shipped-jar job build against that candidate in
-  place of the pinned jar with the same coordinates, and such a run never releases. A workflow rendered before these
+  place of the pinned jar with the same coordinates, and such a run never releases; its later steps get
+  `PORT_CI_DEP_OVERRIDE=group:artifact[,...]`, the coordinates it replaced, so a build that checks its own pin's
+  sha256 can accept exactly those on that run. A workflow rendered before these
   two inputs is reported stale by `port-ci.py check` and `fork-branches.py ci-check`, like an older kit. Once a person
   has played it, `port-ci.py promote` makes it a full Release that records who played it; the newest full Release
   is the fork's official baseline.
