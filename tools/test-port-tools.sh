@@ -1732,6 +1732,49 @@ pat, rep = row[3:].split("\t")
 f = lambda t: re.sub(pat, rep, t)
 sys.exit(0 if f("if (level.isClientSide) {") == "if (level.isClientSide()) {" and f("level.isClientSide()") == "level.isClientSide()" else 1)
 PY
+# #261: a plain row renaming a class by its fully qualified name also renames the simple-name uses in a file that
+# imports it EXACTLY (both engine copies), never a wildcard import, a longer name, a qualified `x.Old`, or a name the
+# table already rows; and end to end through the single-version port path's prepare-sources.py command line
+python3 - "$T" <<'PY' && ok "rename engine: a row renaming a class's qualified name renames its simple-name uses after an exact import (both copies, the single-version CLI); not a wildcard import, a longer or qualified name, or a name with its own row" || bad "rename engine: a renamed class's simple-name uses do not follow its import, or something else was renamed"
+import importlib.util, pathlib, subprocess, sys
+T = pathlib.Path(sys.argv[1]) / "implied-renames"
+ok = True
+row = "net.minecraft.world.inventory.ClickType\tnet.minecraft.world.inventory.ContainerInput\n"
+src = ("import net.minecraft.world.inventory.ClickType;\nclass A {\n    ClickType t = ClickType.PICKUP;\n    Object o = new ClickType();\n"
+       "    MyClickType m;\n    String s = \"ClickTypes\";\n    void f(x.ClickType q) { }\n}\n")
+want = src.replace("inventory.ClickType;", "inventory.ContainerInput;").replace("ClickType t = ClickType.PICKUP",
+       "ContainerInput t = ContainerInput.PICKUP").replace("new ClickType()", "new ContainerInput()")
+for copy in ("fork-layer", "multi-version"):
+    s = importlib.util.spec_from_file_location("ps_" + copy.replace("-", "_"), f"templates/{copy}/tools/prepare-sources.py")
+    ps = importlib.util.module_from_spec(s); s.loader.exec_module(ps)
+    def run(text, rows):
+        tok, _rx = ps.split_rules(rows)
+        pat, table = ps.build_pattern(tok)
+        imp = ps.implied_renames(text, table)
+        return ps.apply_implied(pat.sub(lambda m: table[m.group(1)], text), imp)[0]
+    fq = [("net.minecraft.world.inventory.ClickType", "net.minecraft.world.inventory.ContainerInput", False)]
+    ok &= run(src, fq) == want
+    wild = src.replace("import net.minecraft.world.inventory.ClickType;", "import net.minecraft.world.inventory.*;")
+    ok &= run(wild, fq) == wild                                       # a wildcard import: nothing implied
+    own = fq + [("ClickType", "SomethingElse", False)]
+    ok &= "SomethingElse t = SomethingElse.PICKUP" in run(src, own)    # the table's own row for the simple name decides
+    moved = [("a.b.Thing", "c.d.Thing", False)]
+    ok &= run("import a.b.Thing;\nclass B { Thing t; }\n", moved) == "import c.d.Thing;\nclass B { Thing t; }\n"
+    ok &= run("class C { ClickType t; }\n", fq) == "class C { ClickType t; }\n"   # no import: not this class
+    if not ok:
+        print("engine copy", copy, "failed"); break
+# the single-version route end to end: the port path's prepare-sources.py over a source tree
+(T / "src/com/example/mod").mkdir(parents=True, exist_ok=True)
+(T / "src/com/example/mod/A.java").write_text("package com.example.mod;\n" + src, encoding="utf-8")
+(T / "renames.tsv").write_text(row, encoding="utf-8")
+r = subprocess.run([sys.executable, "templates/multi-version/tools/prepare-sources.py", "--src", str(T / "src"), "--renames",
+                    str(T / "renames.tsv"), "--out", str(T / "out")], capture_output=True, text=True, encoding="utf-8")
+got = (T / "out/com/example/mod/A.java").read_text(encoding="utf-8") if (T / "out/com/example/mod/A.java").is_file() else ""
+ok &= r.returncode == 0 and got == "package com.example.mod;\n" + want
+if not ok:
+    print(r.stdout[-300:], r.stderr[-300:], repr(got))
+sys.exit(0 if ok else 1)
+PY
 # 1.21.9 (CATALOG M89, V85): the chunk-cache sends are renamed, and minecraft:chain is iron_chain -- without clipping a longer name
 python3 - <<'PY' && ok "shared rows: getChunkSource().broadcast/broadcastAndSend become sendToTrackingPlayers(AndSelf); Blocks.CHAIN and \"minecraft:chain\" become iron_chain, CHAIN_COMMAND_BLOCK and chain_command_block untouched" || bad "a 1.21.9 broadcast or chain row is wrong"
 import importlib.util, sys

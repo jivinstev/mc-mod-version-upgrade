@@ -421,9 +421,10 @@ def _rules_of(table_text):
     return regexes, pattern, table
 
 
-def apply_rules(text, rules):
+def apply_rules(text, rules, implied=None):
     """`text` rewritten exactly as prepare-sources.py rewrites an authors' file: regex/member rules first, in table
-    order, then the type-token sweep; CRLF kept."""
+    order, then the type-token sweep, then the simple names that follow a renamed import (prepare-sources'
+    implied_renames: `implied`, else read from this text); CRLF kept."""
     regexes, pattern, table = rules
     crlf = "\r\n" in text
     if crlf:
@@ -433,7 +434,10 @@ def apply_rules(text, rules):
     for rx, repl, _ex in regexes:
         text = rx.sub(repl, text)
     if pattern is not None:
+        if implied is None:
+            implied = ps.implied_renames(text, table)
         text = pattern.sub(lambda m: table[m.group(1)], text)
+        text = ps.apply_implied(text, implied)[0]
     text = ps.unguard(text)
     return text.replace("\n", "\r\n") if crlf else text
 
@@ -502,7 +506,14 @@ def apply_rules_code(text, rules):
     its old package stays as written). String literals are code here, as for apply_rules()."""
     ps = _ps()
     text = ps.guard_overloads(text)          # the whole file's declarations decide (a piece may not hold them)
-    return ps.unguard("".join(piece if comment else apply_rules(piece, rules) for comment, piece in java_segments(text)))
+    # the whole file's imports decide which simple names follow a renamed class (a piece may not hold the import);
+    # read after the regex rules, as apply_rules reads it
+    regexes, pattern, table = rules
+    pre = text
+    for rx, repl, _ex in regexes:
+        pre = rx.sub(repl, pre)
+    implied = ps.implied_renames(pre, table) if pattern is not None else {}
+    return ps.unguard("".join(piece if comment else apply_rules(piece, rules, implied) for comment, piece in java_segments(text)))
 
 
 def apply_moves_to_files(paths, rules, mechanical=()):
@@ -5855,6 +5866,35 @@ def _check_stage_checkout(expect):
         expect(w7 is None and why, f"a named branch that does not resolve: none, with why: {why}")
 
 
+def _check_remake_import(expect):
+    """#261: a version's own row renaming a class by its fully qualified name (`com.example.lib.Clicks` ->
+    `com.example.lib.Inputs`, as 26.x renamed ClickType to ContainerInput) reaches the class's simple-name uses after
+    its import -- a static member, a type, a `new` -- when remake carries new code from the version below; a class of
+    another name that merely ends the same, and a qualified `x.Clicks`, are left alone."""
+    use = "src/main/java/com/example/mod/Uses.java"
+    src = ("package com.example.mod;\nimport com.example.lib.Clicks;\nclass Uses {\n    Clicks c = Clicks.PICKUP;\n"
+           "    Object o = new Clicks();\n    MyClicks m;\n    void f(x.Clicks q) { }\n}\n")
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        rc0, out0 = _quiet(cascade, r, "port..1.21.4", "none")
+        w4, _w = worktree_for(r, "1.21.4")
+        rn = w4 / REC / "1.21.4" / "renames.tsv"
+        rn.write_text(rn.read_text(encoding="utf-8").rstrip("\n") + "\ncom.example.lib.Clicks\tcom.example.lib.Inputs\n",
+                      encoding="utf-8")
+        git(w4, "commit", "-qam", "1.21.4: Clicks is Inputs", check=True)
+        w3, _w = worktree_for(r, "1.21.3")
+        _hand(w3, {use: src}, "1.21.3: Uses")
+        git(w4, "merge", "--no-ff", "--no-commit", "neoforge-1.21.3")
+        before = (w4 / use).read_text(encoding="utf-8")
+        rc, said = _quiet(remake, w4, "1.21.4")
+        got = (w4 / use).read_text(encoding="utf-8")
+        want = src.replace("import com.example.lib.Clicks;", "import com.example.lib.Inputs;").replace(
+            "Clicks c = Clicks.PICKUP", "Inputs c = Inputs.PICKUP").replace("new Clicks()", "new Inputs()")
+        expect(rc0 == 0 and "Clicks.PICKUP" in before and rc == 0 and got == want,
+               f"remake: a renamed class's simple-name uses follow its import: {got!r} (before remake {before!r}) {said[-300:]}")
+        git(w4, "merge", "--abort")
+
+
 def _check_remake(expect):
     """remake: a merge into a version branch made by hand with plain `git merge` (a version-boundary conflict) gets the
     rows' step the cascade's merge applies -- the rows-only files re-made from the port branch through the version's
@@ -7743,6 +7783,7 @@ def self_check():
         _check_stopped_worktree(expect)
         _check_stage_checkout(expect)
         _check_remake(expect)
+        _check_remake_import(expect)
         _check_rows_through_merge(expect)
         _check_cutout(expect)
         _check_origin_sync(expect)
