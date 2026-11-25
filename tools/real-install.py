@@ -80,9 +80,27 @@ ALL_PHASES = PHASES + ("census",)
 MARKER = re.compile(r"SMOKEHARNESS_BOOT_TEST: (PASS|FAIL)\b\s*[-—:]*\s*(.*)")
 TITLE_SOUND = re.compile(r"Sound engine started")
 TITLE_ATLAS = re.compile(r"Created: \d+x\d+x\d+ minecraft:textures/atlas/")
-FATAL_LOG = re.compile(r"Missing or unsupported mandatory dependencies|ModLoadingException|LoadingFailedException|"
-                       r"Duplicate mod|---- Minecraft Crash Report ----|ResolutionException|"
-                       r"Failed to find a primary monitor|UnsatisfiedLinkError")
+_FATAL = re.compile(r"Missing or unsupported mandatory dependencies|ModLoadingException|LoadingFailedException|"
+                    r"Duplicate mod|---- Minecraft Crash Report ----|ResolutionException|"
+                    r"Failed to find a primary monitor|UnsatisfiedLinkError")
+# A line that matches _FATAL but never stops the game: the narrator's text-to-speech library (flite) missing on a Linux
+# machine. Minecraft logs the UnsatisfiedLinkError, turns the narrator off and carries on to the title screen; a
+# runner or a player's Linux box without libflite would otherwise fail (and stop) every boot test.
+_BENIGN = re.compile(r"flite|text2speech|[Nn]arrator")
+
+
+class _FatalLog:
+    """FATAL_LOG.search(text): the first _FATAL match on a line that is not _BENIGN (None when there is none)."""
+    def search(self, text):
+        for m in _FATAL.finditer(text or ""):
+            start = text.rfind("\n", 0, m.start()) + 1
+            end = text.find("\n", m.end())
+            if not _BENIGN.search(text[start:end if end >= 0 else len(text)]):
+                return m
+        return None
+
+
+FATAL_LOG = _FatalLog()
 STDERR_BAD = re.compile(r"\b[\w.$]*(?:Exception|Error)\b(?!\s*=)")
 BRANCH = re.compile(r"neoforge-(\d+\.\d+(?:\.\d+)?)$")
 
@@ -1894,6 +1912,12 @@ def self_check():
             "a client already on the instance is found")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    # the narrator's missing flite library is not a failed boot; any other UnsatisfiedLinkError still is
+    flite = ("[Render thread/ERROR] [mojang/NarratorWindows]: Error while loading the narrator\n"
+             "Caused by: java.lang.UnsatisfiedLinkError: Unable to load library 'flite':\n")
+    chk(FATAL_LOG.search(flite) is None, "a missing flite (narrator) library is not fatal")
+    chk(FATAL_LOG.search(flite + "java.lang.UnsatisfiedLinkError: no lwjgl in java.library.path\n") is not None,
+        "another UnsatisfiedLinkError after it still is")
     print("self-check:", "OK" if not failed else "FAIL: " + "; ".join(failed))
     return 0 if not failed else 1
 
