@@ -580,7 +580,7 @@ def multimod_check():
         r = pathlib.Path(d).resolve()
         g = lambda *a: subprocess.run(["git", "-C", str(r), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
                                       capture_output=True, text=True, encoding="utf-8")
-        g("init", "-q"); g("config", "core.autocrlf", "false")
+        g("init", "-q", "-b", "work"); g("config", "core.autocrlf", "false")   # never the parent branch: macOS git names it main
         m = r / "alpha"
         (m / "src/main/java/com/example/mod/mixin").mkdir(parents=True)
         (m / "src/main/resources").mkdir(parents=True)
