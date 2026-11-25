@@ -9,7 +9,7 @@ Wednesday. Both are made only by the keep-current skill's setup, which runs `ins
                                          [--ledger-issues REPO=N[,N]] [--depends-on REPO=REPO[,REPO]]
                                          [--replace-task NAME ...] [--trailer "K: V" ...]
                                          [--migrator-repo OWNER/REPO] [--migrator-sha SHA] [--default-branch-too]
-                                         [--keep-existing] [--no-commit] [--print]
+                                         [--release-bump FILE:KEY] [--keep-existing] [--no-commit] [--print]
     python3 tools/weekly-plan.py round-task (--repo DIR | --config FILE) [--existing NAME ...] [--migrator-repo O/R]
     python3 tools/weekly-plan.py fetch    --config FILE --repo DIR --work DIR      # the workflow's steps, in order
     python3 tools/weekly-plan.py cascade  --work DIR
@@ -26,6 +26,12 @@ the GitHub API) -- unless the first fork is OWNED, the author's own mod: its pub
 (tools/fork-kind.py is_owned), or, with no such record yet, GitHub says the repository is not a fork. There are no
 outside authors, so its upstream is its own repository at its default branch (its development line flows into the head; a head that IS the default branch
 simply has nothing new). Only the first fork's repository gets the workflow and the config; the dependents get nothing.
+
+--release-bump FILE:KEY (an owned first fork only, e.g. gradle.properties:mod_version): each take of the default branch
+is a new version. When the round takes it and the default branch names no version past the head's, the round first
+opens a PR on the default branch that moves KEY in FILE to the next patch (1.0.10 -> 1.0.11), merges it once CI is green
+(merge-fork-prs, else the owner is asked), and the head takes that merge commit. A version a person already bumped past
+the head's is taken as it is. The plan shows the version the take ships. Stored as the fork's `release_bump`.
 
 `.github/weekly-plan.json` on the first fork's head branch is the fork set's ONLY source for the round: per fork its
 head, role (library / dependent), the authors' upstream URL and branch, `depends_on` (a dependent: the library unless
@@ -264,6 +270,71 @@ def parse_fork(spec):
     return {"repo": m.group(1), "head": m.group(2), "upstream": m.group(3), "upstream_branch": m.group(4)}
 
 
+# An OWNED fork's release bump (install --release-bump FILE:KEY): the head takes its own default branch, and the round
+# first moves the version in FILE past the head's when the default branch has not -- so every take is a new version
+DOTTED_RE = re.compile(r"^\d+(?:\.\d+)*$")
+
+
+def parse_release_bump(spec):
+    """--release-bump FILE:KEY -> {"file", "key"}: a properties-style file of the repository and the key naming the
+    mod's version in it (gradle.properties:mod_version)."""
+    file_, sep, key = (spec or "").strip().rpartition(":")
+    if not sep or not file_ or not re.match(r"^[\w.-]+$", key) or file_.startswith("/") or ".." in file_.split("/"):
+        raise Fail(f"--release-bump {spec!r}: FILE:KEY, a file of the repository and the version's key in it "
+                   "(gradle.properties:mod_version)")
+    return {"file": file_, "key": key}
+
+
+def prop_value(text, key):
+    """KEY's value in properties-style text (the first `key=value` or `key: value` line), or None."""
+    rx = re.compile(r"^\s*" + re.escape(key) + r"\s*[=:]\s*(\S+)\s*$")
+    for line in (text or "").splitlines():
+        m = rx.match(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def set_prop(text, key, value):
+    """The text with KEY's first line set to value (its spacing and line ending kept); Fail when KEY has no line."""
+    rx = re.compile(r"^(\s*" + re.escape(key) + r"\s*[=:]\s*)\S+(\s*)$", re.M)
+    out, n = rx.subn(lambda m: m.group(1) + value + m.group(2), text, count=1)
+    if not n:
+        raise Fail(f"release bump: no `{key}=` line to set")
+    return out
+
+
+def version_key(v):
+    if not v or not DOTTED_RE.match(v):
+        raise Fail(f"release bump: {v!r} is not a dotted-number version (1.0.10)")
+    return tuple(int(x) for x in v.split("."))
+
+
+def bump_to(head_v, up_v):
+    """The version the default branch moves to before the head takes it, or None. None when the default branch already
+    names a version past the head's (a person bumped it); else the patch after the higher of the two (1.0.10 ->
+    1.0.11): a take never ships the version the head already released."""
+    hk, uk = version_key(head_v), version_key(up_v)
+    if uk > hk:
+        return None
+    parts = (up_v if uk >= hk else head_v).split(".")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return ".".join(parts)
+
+
+def version_bump(d, rb, head_commit, upstream_commit):
+    """The plan's view of an owned fork's release bump: {"file", "key", "head", "upstream", "to"} read at the two
+    commits (git only); "error" in place of the versions when either cannot be read."""
+    out = dict(rb)
+    try:
+        hv = prop_value(git(d, "show", f"{head_commit}:{rb['file']}").stdout, rb["key"])
+        uv = prop_value(git(d, "show", f"{upstream_commit}:{rb['file']}").stdout, rb["key"])
+        out.update(head=hv, upstream=uv, to=bump_to(hv, uv))
+    except Fail as e:
+        out["error"] = str(e)
+    return out
+
+
 def resolve_upstreams(forks, repo_info, owned=()):
     """A fork named without its authors' upstream: the GitHub fork parent, at the parent's default branch. An OWNED
     repository (in `owned`) has no outside authors: its upstream is itself, at its own default branch."""
@@ -436,6 +507,7 @@ def install(a, say=print, repo_info=None):
     k = ki()
     info = repo_info or (lambda s: k.gh_api(f"/repos/{s}"))
     resolve_upstreams(forks, info, {forks[0]["repo"]} if _first_is_own(repo, forks[0]["repo"], info) else set())
+    rbump = release_bump_of(a, repo, forks[0])
     owner_login = forks[0]["repo"].split("/")[0]
     otype = a.owner_type
     old, warns = None, []
@@ -477,6 +549,16 @@ def install(a, say=print, repo_info=None):
         for w in warns + more:
             print(f"weekly-plan: warning: {w}", file=sys.stderr)
     cfg = build(flags, allow)
+    old_rb = ((old or {}).get("forks") or [{}])[0].get("release_bump") if isinstance(old, dict) else None
+    if not rbump and old_rb:         # like the per-fork values: kept with --keep-existing, else warned about
+        if a.keep_existing:
+            rbump = old_rb
+        else:
+            print(f"weekly-plan: warning: the existing {CONFIG} has release_bump {old_rb['file']}:{old_rb['key']}, "
+                  f"which this run drops: re-pass --release-bump {old_rb['file']}:{old_rb['key']}, or rerun with "
+                  "--keep-existing", file=sys.stderr)
+    if rbump:
+        cfg["forks"][0]["release_bump"] = rbump
     cfg_text = json.dumps(cfg, indent=2, sort_keys=True) + "\n"
     if a.print:
         say(wf, end="")
@@ -533,6 +615,34 @@ def install(a, say=print, repo_info=None):
     say("weekly-plan: allow: " + (", ".join(cfg["allow"]) if cfg["allow"] else
         "none (the round asks the owner on the plan issue before each push, pre-release and merge)"))
     return 0
+
+
+def release_bump_of(a, repo, first):
+    """install --release-bump FILE:KEY for the first fork: only an OWNED one taking its own repository's branch (its
+    default branch flows into its head; a port's authors are never bumped), and FILE at the head names KEY as a
+    dotted-number version. -> {"file", "key"} or None."""
+    if not getattr(a, "release_bump", None):
+        return None
+    rb = parse_release_bump(a.release_bump)
+    own = first.get("upstream_source") == "own repository (owned)" or (
+        norm_repo_url(first.get("upstream") or "") == f"github.com/{first['repo']}".lower())
+    if not own:
+        raise Fail(f"--release-bump: {first['repo']} takes {first.get('upstream')}, not its own repository: only an "
+                   "owned fork's own default branch is bumped")
+    if first.get("upstream_branch") == first["head"]:
+        raise Fail(f"--release-bump: {first['repo']}'s upstream branch is its head {first['head']}: there is nothing "
+                   "to take, so nothing to bump")
+    f = repo / rb["file"]
+    if not f.is_file():
+        raise Fail(f"--release-bump: {rb['file']} is not a file of {repo.as_posix()}")
+    version_key(prop_value(f.read_text(encoding="utf-8"), rb["key"]))
+    return rb
+
+
+def norm_repo_url(u):
+    """github.com/owner/repo, lower case, of an https or ssh GitHub URL ('' otherwise)."""
+    m = re.search(r"github\.com[/:]([\w.-]+/[\w.-]+?)(?:\.git)?/?$", (u or "").strip())
+    return f"github.com/{m.group(1)}".lower() if m else ""
 
 
 def migrator_repo():
@@ -716,9 +826,10 @@ def step_fetch(config, repo, work, now=None, clone=None):
                 git(d, "checkout", "-q", "-B", f["head"], hc, check=True)
             else:
                 merged = True
+        vb = {"version_bump": version_bump(d, f["release_bump"], hc, uc)} if f.get("release_bump") and commits else {}
         forks.append(dict(f, clone=str(d.resolve()), head_ref=ref, head_commit=hc, upstream_commit=uc,
                           new_commits=commits, new_count=len(commits), authors_merged=merged, merge_conflicts=conflicts,
-                          **({"merge_error": err} if err else {})))
+                          **({"merge_error": err} if err else {}), **vb))
         print(f"weekly-plan: {f['repo']}: {len(commits)} new commit(s) from {f['upstream']} {f['upstream_branch']} "
               f"at {uc[:12]}" + (f"; merging them conflicts in {', '.join(conflicts[:6])}" if conflicts else ""))
     inp = {"schema": 1, "repo": cfg["forks"][0]["repo"], "now": now.isoformat(timespec="seconds"), "week": week,
@@ -1296,6 +1407,49 @@ def self_check():
         bad.append("owned names another repository: this non-fork named without its upstream is still refused")
     except Fail:
         pass
+    # RELEASE BUMP (an owned fork, --release-bump FILE:KEY): the patch after the head's version unless the default
+    # branch already names a higher one; the properties line is set in place; a port is never bumped
+    expect(bump_to("1.0.10", "1.0.10") == "1.0.11" and bump_to("1.0.10", "1.0.9") == "1.0.11"
+           and bump_to("1.0.10", "1.1.0") is None and bump_to("1.0.9", "1.0.10") is None and bump_to("2", "2") == "3",
+           "release bump: the next patch unless a person already bumped past the head")
+    for bad_v in ("1.0.10-beta", "", None):
+        try:
+            bump_to("1.0.10", bad_v); bad.append(f"release bump: {bad_v!r} is refused, not guessed")
+        except Fail:
+            pass
+    props = "# the mod\nmod_id = examplemod\nmod_version = 1.0.10\nmod_versioning=x\n"
+    expect(prop_value(props, "mod_version") == "1.0.10" and prop_value(props, "missing") is None
+           and set_prop(props, "mod_version", "1.0.11") == props.replace("1.0.10", "1.0.11"),
+           f"release bump: the key read and set in place, spacing kept: {set_prop(props, 'mod_version', '1.0.11')!r}")
+    expect(parse_release_bump("gradle.properties:mod_version") == {"file": "gradle.properties", "key": "mod_version"},
+           "--release-bump FILE:KEY parsed")
+    for spec in ("mod_version", ":k", "/etc/x:k", "../x:k", "f:bad key"):
+        try:
+            parse_release_bump(spec); bad.append(f"--release-bump {spec!r} is refused")
+        except Fail:
+            pass
+    with tempfile.TemporaryDirectory() as td:
+        rp = pathlib.Path(td)
+        (rp / "gradle.properties").write_text(props, encoding="utf-8")
+        ns = lambda spec: argparse.Namespace(release_bump=spec)
+        own_f = {"repo": "o/mod", "head": "neoforge-1.21.8", "upstream": "https://github.com/o/mod.git",
+                 "upstream_branch": "main", "upstream_source": "own repository (owned)"}
+        expect(release_bump_of(ns("gradle.properties:mod_version"), rp, own_f) == {"file": "gradle.properties",
+                                                                                 "key": "mod_version"}
+               and release_bump_of(ns(None), rp, own_f) is None
+               and release_bump_of(ns("gradle.properties:mod_version"), rp,
+                                   dict(own_f, upstream_source=None)) is not None,
+               "--release-bump: an owned fork taking its own default branch (by record or by URL)")
+        for why, f_, spec in (("a port's authors", dict(own_f, upstream="https://github.com/a/lib.git",
+                                                         upstream_source="github fork parent"), "gradle.properties:mod_version"),
+                              ("the head as its own upstream", dict(own_f, upstream_branch="neoforge-1.21.8"),
+                               "gradle.properties:mod_version"),
+                              ("a missing file", own_f, "nope.properties:mod_version"),
+                              ("a key with no version", own_f, "gradle.properties:mod_id")):
+            try:
+                release_bump_of(ns(spec), rp, f_); bad.append(f"--release-bump refuses {why}")
+            except Fail:
+                pass
     # no setting by hand: with no own_mod record yet, GitHub's own answer decides (not a fork: own; a fork or no answer: a port)
     with tempfile.TemporaryDirectory() as td:
         subprocess.run(["git", "init", "-q", td], check=True)
@@ -1856,6 +2010,9 @@ def build_parser():
     p.add_argument("--trailer", action="append", metavar='"KEY: VALUE"', help="a line added to the end of the commit message")
     p.add_argument("--migrator-repo", help="this repository on GitHub (default: its origin)")
     p.add_argument("--migrator-sha", help="the commit the workflow pins (default: origin/main)")
+    p.add_argument("--release-bump", metavar="FILE:KEY",
+                   help="an owned fork: bump KEY in FILE (gradle.properties:mod_version) on the default branch before "
+                        "the round takes it, when it names no version past the head's")
     p.add_argument("--default-branch-too", action="store_true",
                    help="also commit the workflow to the default branch when that is not the head branch")
     p.add_argument("--keep-existing", action="store_true",

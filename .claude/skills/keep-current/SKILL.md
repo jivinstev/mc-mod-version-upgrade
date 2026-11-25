@@ -929,6 +929,7 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
            [--allow push-version-branches --allow pre-release --allow merge-fork-prs] \
            [--ledger-issues <owner/dep>=12,15] [--depends-on <owner/dep>=<owner/lib>] \
            [--replace-task "<old task name>"] \
+           [--release-bump <file>:<key>] \
            [--default-branch-too] [--keep-existing] [--trailer "<Key>: <value>" ...]
 
    One `--fork` per fork, the library first (a fork alone: one). A `--fork` without `=URL#BRANCH` takes the authors'
@@ -948,6 +949,15 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    is not the repository's default branch (GitHub runs a schedule only from the default branch): ask the user to make
    the head branch the default, or rerun with `--default-branch-too`, which commits the same workflow file to the
    default branch too. Push what it names. The other forks must be public (the workflow reads them without a token).
+   **An owned first fork** (the author's own mod: its upstream is its own default branch) can make every take a new
+   version: `--release-bump gradle.properties:mod_version` (the file and the key naming the mod's version; refused for
+   a port, for a head that is its own upstream, and for a key with no dotted-number version). Ask the owner at stop 1.
+   With it, a round that takes the default branch first checks whether that branch names a version past the head's;
+   when it does not, the driver opens a PR on the default branch moving only that line to the next patch (1.0.10 ->
+   1.0.11), merges it once its CI is green -- the `bump` step needs `merge-fork-prs` and the fork's `automerge`, else
+   it is asked on the plan issue like any merge -- and the head takes that merge commit, so the head's release names
+   the new version. A version a person already bumped past the head's is taken as it is. The plan shows, under the
+   authors' box, the version the take ships. Re-running setup without it warns and drops it unless `--keep-existing`.
 2. **The round task:** list the scheduled tasks (`list_triggers`) first, then `python3 tools/weekly-plan.py round-task
    --repo <library checkout> --existing "<name>" ...` with every name the listing returned: the round runs on
    `tools/round.py` for every fork set (`--version-branches`, which older setups pass, is accepted and changes nothing).
