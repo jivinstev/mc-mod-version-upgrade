@@ -258,6 +258,18 @@ def resolve(src, repo, mods, a, ask, log=print):
     if not tl:
         raise Refuse(f"{repo}: no releases tagged <mod>-<version>-mc<minecraft> -- nothing to install")
     series = sorted({t[1] for t in tl})
+    want_mc = a.mc
+    if a.release:
+        # --release names one release: its tag fixes the mod and the Minecraft version, so the NeoForge and the
+        # vanilla files are that release's (with --yes the default would otherwise be the newest version)
+        hit = next((t for t in tl if t[0]["tag_name"] == a.release), None)
+        if not hit:
+            raise Refuse(f"{repo} has no release {a.release}")
+        if mods and mods != [hit[1]]:
+            raise Refuse(f"{a.release} is a release of {hit[1]}, not of {', '.join(mods)}")
+        if a.mc and a.mc != hit[3]:
+            raise Refuse(f"{a.release} is for Minecraft {hit[3]}, not {a.mc}")
+        mods, want_mc = [hit[1]], hit[3]
     if mods:
         unknown = [m for m in mods if m not in series]
         if unknown:
@@ -279,10 +291,10 @@ def resolve(src, repo, mods, a, ask, log=print):
         full = all(vs[m][mc]["full"] for m in mods)
         tags = ", ".join(vs[m][mc]["full" if full else "pre"]["tag_name"] for m in mods)
         return f"Minecraft {mc}  -- {'' if full else 'pre-release only: '}{tags}"
-    if a.mc:
-        if a.mc not in common:
-            raise Refuse(f"no release for Minecraft {a.mc} (released for: {', '.join(common)})")
-        mc = a.mc
+    if want_mc:
+        if want_mc not in common:
+            raise Refuse(f"no release for Minecraft {want_mc} (released for: {', '.join(common)})")
+        mc = want_mc
     else:
         full_mcs = [mc for mc in common if all(vs[m][mc]["full"] for m in mods)]
         default = (full_mcs or common)[-1]
@@ -778,6 +790,21 @@ def self_check():
         f"26.3 --pre: the pre-release and the newest stable NeoForge of 26.3 at or above the jar's floor: {p['neoforge']}")
     p = resolve(src, "o/core", None, A("o/core", pre=True, mc="1.21.8"), ask, q)
     chk(p["jars"][0]["tag"] == "examplecore-1.0.10-mc1.21.8", "--pre takes the newest release, full or not")
+    # --release: the tag fixes the Minecraft version (not the newest), and the mod; a pre-release needs no --pre
+    p = resolve(src, "o/core", None, A("o/core", release="examplecore-1.0.10-mc26.3"), ask, q)
+    chk(p["mc"] == "26.3" and p["jars"][0]["tag"] == "examplecore-1.0.10-mc26.3",
+        f"--release of a 26.3 tag installs for 26.3, not the newest full version: {p['mc']} {p['jars'][0]['tag']}")
+    for kw, want in ((dict(release="examplecore-1.0.10-mc26.3", mc="1.21.8"), "not 1.21.8"),
+                     (dict(release="examplecore-9.9-mc1.21.8"), "has no release")):
+        try:
+            resolve(src, "o/core", None, A("o/core", **kw), ask, q); chk(False, f"--release {kw} must refuse")
+        except Refuse as e:
+            chk(want in str(e), f"--release {kw} refused: {e}")
+    try:
+        resolve(src, "o/core", ["other"], A("o/core", release="examplecore-1.0.9-mc1.21.8"), ask, q)
+        chk(False, "--release of another mod must refuse")
+    except Refuse as e:
+        chk("not of other" in str(e), f"--release of another mod refused: {e}")
     # worlds: several mods -- --yes refuses without :mod; :isle pulls core from its core.lock, sha from SHA256SUMS
     try:
         resolve(src, "o/worlds", None, A("o/worlds"), ask, q); chk(False, "several mods with --yes must refuse")
