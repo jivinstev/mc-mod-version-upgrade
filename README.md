@@ -68,6 +68,13 @@ tree. Then:
   `port-ci.py promote --mod NAME` dispatches that mod's workflow; `port-ci.py args --file`
   with that workflow reads its options back. `--variant-jar` and `--dep-jar-variant` are not
   supported with `--mod-dir` yet. Without `--mod-dir`, the workflow is unchanged.
+  `python3 tools/fork-kind.py detect` names such a repository's mods (`mods=<folder>,...`: top-level folders whose own
+  `gradle.properties` names a `mod_id`, none at the root), and calls it owned when every per-mod publish config says
+  `own_mod`. The weekly round (`round.py`) treats its per-mod workflows as one fork: its head's gates run each mod's
+  `ci-gates.py` on that mod's folder; every mod's workflow must carry the gate-of-record inputs; a version's release
+  dispatches each mod's workflow and records one tag per mod (`tags`); a library's pre-merge dependent gate dispatches
+  each of the dependent's mod workflows that pins the library, with `dep_override`, committing nothing. The version
+  branches' own gates (`fork-port.py`, `cascade --gates ab`) do not yet run per mod (#274).
 - **Two classes of gate run** (opt-in): a fork whose whole GameTest suite outlasts the kit's Gate B limit (1500 s)
   commits `.port/<mc>/gate-gradle-args.txt`, one Gradle argument a line (`#` comments; an option with a value in its
   one-word form, e.g. `-Pshard=ci`), on every kind of fork (a version branch reads its own version's file, a

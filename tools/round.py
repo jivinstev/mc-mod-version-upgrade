@@ -783,8 +783,7 @@ def ledger_readers(cfg, F):
         pins.append(("the weekly plan's pinned tools", cfg["migrator_sha"], str(cfg.get("migrator_repo") or "").lower()))
     texts = []
     for br in [F["head"]] + [f"neoforge-{v}" for v in (F.get("ladder") or F.get("versions") or [])]:
-        r = git(F["dir"], "show", f"origin/{br}:.github/workflows/port-ci.yml")
-        texts.append(r.stdout if r.returncode == 0 else "")
+        texts += [wf_text(F["dir"], p_, f"origin/{br}") for _n, p_ in port_ci_wfs(F["dir"], f"origin/{br}")] or [""]
     for k in mod("pc").pinned_kits(texts):
         repos = sorted({m.group(1).lower() for t in texts for m in KIT_URL.finditer(t) if m.group(2) == str(k)}) or [""]
         pins += [(f"Port CI kit v{k}", f"port-ci-kit-v{k}", rp) for rp in repos]
@@ -2166,6 +2165,30 @@ def sv_ci_check(st, it, log):
 
 
 PORT_CI_WF = ".github/workflows/port-ci.yml"
+MOD_WF_RE = re.compile(r"^\.github/workflows/port-ci-([\w.-]+)\.yml$")
+
+
+def port_ci_wfs(d, ref=None):
+    """The fork's Port CI workflows, at git ref (else in the working tree at d): [(name, path)] -- [("", PORT_CI_WF)]
+    for a one-mod repository; for a repository of several mods (port-ci.py --mod-dir: one workflow per mod, no
+    PORT_CI_WF) each `port-ci-<name>.yml`, sorted by name; [] when there is none."""
+    if ref:
+        files = git(d, "ls-tree", "--name-only", ref, ".github/workflows/").stdout.split()
+    else:
+        wd = pathlib.Path(d) / ".github" / "workflows"
+        files = sorted(f".github/workflows/{f.name}" for f in wd.glob("*.yml")) if wd.is_dir() else []
+    if PORT_CI_WF in files:
+        return [("", PORT_CI_WF)]
+    return sorted((m.group(1), f) for f in files for m in [MOD_WF_RE.match(f)] if m)
+
+
+def wf_text(d, path, ref=None):
+    """A workflow's text at ref (else the working tree); "" when absent."""
+    if ref:
+        r = git(d, "show", f"{ref}:{path}")
+        return r.stdout if r.returncode == 0 else ""
+    f = pathlib.Path(d) / path
+    return f.read_text(encoding="utf-8") if f.is_file() else ""
 
 
 def regen_workflow(st, it, d, log):
@@ -2567,24 +2590,32 @@ def t_repin(st, it, log):
 
 
 def sv_gate_cmds(d, upstream_commit=None, base_ref=None, gatec=None):
-    wf = pathlib.Path(d) / ".github/workflows/port-ci.yml"
-    if not wf.is_file():
+    """ci-gates.py full and minimal for the checkout d, as its Port CI workflow runs them (its --modid, its --gatec unless
+    given). A repository of several mods (port_ci_wfs: one workflow per mod) gets each mod's pair, run on that mod's
+    folder (the workflow's --mod-dir) with its own summaries, build/round-gates-<name>-<env>.md; a one-mod repository's
+    commands are as they always were."""
+    wfs = port_ci_wfs(d)
+    if not wfs:
         raise StepError("no .github/workflows/port-ci.yml on the work branch: the gates' --modid cannot be read")
-    text = wf.read_text(encoding="utf-8")
-    args = mod("pc").recover_args(text)
-    modid = args[args.index("--modid") + 1] if "--modid" in args else None
-    if not modid:
-        raise StepError("the Port CI workflow names no --modid")
-    gatec = gatec if gatec is not None else (re.search(r'--gatec "?([\w,]+)"?', text) or [None, "launch,spawn,battle,gauntlet"])[1]
     base = ["--base", upstream_commit] if upstream_commit and git(d, "cat-file", "-e", f"{upstream_commit}^{{commit}}").returncode == 0 else []
     if not base and base_ref and git(d, "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}").returncode == 0:
         base = ["--base", base_ref]         # a dependent gate's worktree: its workflow's own --base
     out = []
-    for env in ("full", "minimal"):
-        out.append([sys.executable, TOOLS / "ci-gates.py", "--repo", d, "--modid", modid, *base, "--gatec", gatec,
-                    "--env", env, "--summary", pathlib.Path(d) / "build" / f"round-gates-{env}.md"])
+    for name, path in wfs:
+        text = wf_text(d, path)
+        args = mod("pc").recover_args(text)
+        modid = args[args.index("--modid") + 1] if "--modid" in args else None
+        if not modid:
+            raise StepError(f"the Port CI workflow {path} names no --modid")
+        g_ = gatec if gatec is not None else (re.search(r'--gatec "?([\w,]+)"?', text) or [None, "launch,spawn,battle,gauntlet"])[1]
+        repo = pathlib.Path(d) / args[args.index("--mod-dir") + 1] if name and "--mod-dir" in args else d
+        if name and repo == d:
+            raise StepError(f"{path} names no --mod-dir: which folder does this mod build from?")
+        for env in ("full", "minimal"):
+            out.append([sys.executable, TOOLS / "ci-gates.py", "--repo", repo, "--modid", modid, *base, "--gatec", g_,
+                        "--env", env, "--summary",
+                        pathlib.Path(d) / "build" / (f"round-gates-{name}-{env}.md" if name else f"round-gates-{env}.md")])
     return out
-
 
 RECORD_MD = re.compile(r"^\.port/(?:[^/]+/)?[^/]+\.md$")
 
@@ -2987,9 +3018,9 @@ def ci_record(d=None, text=None):
     version's gate of record (Gate C there, three environments in parallel; the release it builds carries the gate
     summaries the done check reads), the library's dependent gate is the dependent's CI against the candidate jar, and
     the release reuses the PR run's jars. A workflow rendered before that keeps the local full gates."""
-    if text is None:
-        f = pathlib.Path(d) / PORT_CI_WF
-        text = f.read_text(encoding="utf-8") if f.is_file() else ""
+    if text is None:                # every Port CI workflow of the checkout (one per mod in a repository of several)
+        texts = [wf_text(d, p_) for _n, p_ in port_ci_wfs(d)]
+        return bool(texts) and all(all(x in t for x in CI_RECORD_INPUTS) for t in texts)
     return all(x in text for x in CI_RECORD_INPUTS)
 
 
@@ -3072,10 +3103,15 @@ def depgate_ci(st, it, dep, v, log):
     lib_slug, dep_slug = it["fork"], it["extra"]["dependent"]
     br = f"neoforge-{v}" if dep["kind"] == "branches" and v in dep.get("versions", []) else dep["head"]
     git(dep["dir"], "fetch", "-q", "origin", br, check=True)
-    wf = git(dep["dir"], "show", f"origin/{br}:{PORT_CI_WF}").stdout
-    if not ci_record(text=wf):
+    # each of the dependent's Port CI workflows (one per mod in a repository of several) that pins this library is
+    # dispatched against the candidate, one after another; every one must carry dep_override
+    wfs = [(n_, p_, wf_text(dep["dir"], p_, f"origin/{br}")) for n_, p_ in port_ci_wfs(dep["dir"], f"origin/{br}")]
+    if not wfs or not all(ci_record(text=t_) for _n, _p, t_ in wfs):
         return None                         # the dependent's workflow predates dep_override: the local dependent gate
-    pins = {ga: p for ga, p in mod("ld").port_deps(wf).items() if p["repo"].lower() == lib_slug.lower()}
+    per = [(n_, p_, {ga: p for ga, p in mod("ld").port_deps(t_).items() if p["repo"].lower() == lib_slug.lower()})
+           for n_, p_, t_ in wfs]
+    per = [x for x in per if x[2]]
+    pins = {ga: p for _n, _p, ps in per for ga, p in ps.items()}
     if not pins:
         raise StepError(f"{br} of {dep_slug}: its Port CI workflow pins no release of {lib_slug}: nothing to gate "
                         "against the candidate jar")
@@ -3092,12 +3128,23 @@ def depgate_ci(st, it, dep, v, log):
                         f"here ({e}): the local dependent gate runs instead")
             return None
         digests = {j.name: hashlib.sha256(j.read_bytes()).hexdigest() for j in jars}
-    entries = []
+    entry = {}
     for ga, p in sorted(pins.items()):
         jar, why = candidate_jar([pathlib.Path(n) for n in sorted(digests)], p["asset"], v)
         if not jar:
             raise StepError(f"{lib_slug} run {run_id}'s jars: {why} (the asset {dep_slug} pins): which is the candidate?")
-        entries.append(f"{lib_slug}#{run_id}/{art}/{jar.name}={ga}:{p['version']}@{digests[jar.name]}")
+        entry[ga] = f"{lib_slug}#{run_id}/{art}/{jar.name}={ga}:{p['version']}@{digests[jar.name]}"
+    if len(per) > 1 or per[0][0]:           # several mods: each mod's workflow, its own pins, one after another
+        texts = []
+        for n_, p_, ps in per:
+            ok, text = depgate_dispatch(st, it, dep_slug, br, run_id, p_, [entry[ga] for ga in sorted(ps)], log, key=n_)
+            if not ok:
+                raise StepError(f"{dep_slug} {v} ({n_}): its CI against {lib_slug}'s candidate jar (run {run_id}) is NOT "
+                                f"green ({text}): a blocking finding on the library version, which does not merge")
+            texts.append(f"{n_}: {text}")
+        return (f"{dep_slug} {v}: every mod's CI green against {lib_slug}'s candidate jar (PR run {run_id})",
+                {"evidence": "; ".join(texts)[:600], "candidate_run": run_id})
+    entries = [entry[ga] for ga in sorted(entry)]
     since = it["result"].get("dispatched_at")
     if since and it["result"].get("dispatched_for") not in (None, run_id):
         # a new candidate (a fixer changed the library and its PR's CI ran again): gate that one, never the old run's
@@ -3123,6 +3170,28 @@ def depgate_ci(st, it, dep, v, log):
                         "a blocking finding on the library version, which does not merge")
     return (f"{dep_slug} {v}: its CI green against {lib_slug}'s candidate jar (PR run {run_id})",
             {"evidence": text[:600], "candidate_run": run_id})
+
+
+def depgate_dispatch(st, it, dep_slug, br, run_id, path, entries, log, key):
+    """One mod's Port CI workflow of a dependent of several mods, dispatched against the candidate (depgate_ci): the same
+    once-only marks as the one-mod route, kept per mod (`dispatched_at:<key>`), and its run found by its workflow
+    path. -> (ok, text)."""
+    k = lambda x: f"{x}:{key}"
+    since = it["result"].get(k("dispatched_at"))
+    if since and it["result"].get(k("dispatched_for")) not in (None, run_id):
+        since = None                        # a new candidate: gate that one, never the old run's verdict
+    if not since:
+        since = now()
+        with State.tx(st.path) as s2:       # written before the POST: a restart waits for this run, never dispatches twice
+            s2.item(it["id"])["result"].update({k("dispatched_at"): since, k("dispatched_for"): run_id})
+        gh(f"repos/{dep_slug}/actions/workflows/{path.rsplit('/', 1)[-1]}/dispatches", "POST",
+           {"ref": br, "inputs": {"dep_override": " ".join(entries)}})
+    ok, text = wait_runs(dep_slug, None, log, event="workflow_dispatch", branch=br, since=since, first=True, path=path)
+    if not ok and not text.startswith("still running"):
+        with State.tx(st.path) as s2:
+            for x in ("dispatched_at", "dispatched_for"):
+                s2.item(it["id"])["result"].pop(k(x), None)
+    return ok, text
 
 
 def candidate_jar(jars, asset, v):
@@ -3373,7 +3442,8 @@ def t_pr(st, it, log):
     return f"#{n} ({work} -> {base})", {"pr": n, "sha": sha, "work": work}
 
 
-def wait_runs(slug, sha, log, event=None, branch=None, since=None, appear=900, limit=6 * 3600, want=1, first=False):
+def wait_runs(slug, sha, log, event=None, branch=None, since=None, appear=900, limit=6 * 3600, want=1, first=False,
+              path=None):
     """ONE blocking wait for the Actions runs of a commit: until at least `want` (matching event/branch/created after
     `since`) have appeared and all are completed. first: only the earliest such run -- the one the round dispatched
     itself, `since` being stamped just before its POST; a later dispatch on the same commit (the owner promoting or
@@ -3384,7 +3454,8 @@ def wait_runs(slug, sha, log, event=None, branch=None, since=None, appear=900, l
         q_ = f"head_sha={sha}" if sha else f"branch={branch}&event={event}"   # no sha: the run the round dispatched
         runs = gh(f"repos/{slug}/actions/runs?{q_}&per_page=50").get("workflow_runs", [])
         runs = [r for r in runs if (not event or r.get("event") == event) and (not branch or r.get("head_branch") == branch)
-                and (not since or (r.get("created_at") or "") >= since)]
+                and (not since or (r.get("created_at") or "") >= since)
+                and (not path or (r.get("path") or "").endswith(path))]
         if first:
             runs = sorted(runs, key=lambda r: (r.get("created_at") or "", r.get("id") or 0))[:1]
         el = time.monotonic() - t0
@@ -3513,62 +3584,92 @@ TAG_RE = r"-mc{v}(?:-r\d+)?$"
 
 
 def t_release(st, it, log):
+    """The version's pre-release: Port CI dispatched with release=true on the version's branch at the merge, awaited,
+    and the release it cut found by tag. A repository of several mods (port_ci_wfs: one Port CI workflow per mod) has
+    each mod's workflow dispatched and awaited the same way, one after another, each mod's release found by its own
+    tag prefix `<name>-`; the result's `tag` is the first mod's and `tags` names every mod's."""
     slug, v = it["fork"], it["version"]
     mg = seg_item(st, it, "merge")["result"]
     if mg.get("skipped"):
         return "nothing merged: no release", {"skipped": True, "tag": None}
     base = base_of(st, it)
-    since = it["result"].get("dispatched_at")
-    if not since:
-        marker = it["result"].get("dispatching_at")
-        found = marker and [r for r in gh(f"repos/{slug}/actions/runs?head_sha={mg['merge_sha']}&per_page=50")
-                            .get("workflow_runs", []) if r.get("event") == "workflow_dispatch"
-                            and r.get("head_branch") == base and (r.get("created_at") or "") >= marker]
-        if marker and found:
-            since = marker                  # a dispatch an interrupted run sent: wait for it, never dispatch twice
-        else:
-            since = now()
-            with State.tx(st.path) as s2:   # written before the POST: a restart looks the run up first
-                s2.item(it["id"])["result"]["dispatching_at"] = since
-            inputs = {"release": "true"}
-            reuse = reuse_run(st, it)
-            if reuse:
-                inputs["from_run"] = str(reuse)
-            gh(f"repos/{slug}/actions/workflows/port-ci.yml/dispatches", "POST", {"ref": base, "inputs": inputs})
-            with State.tx(st.path) as s2:
-                s2.item(it["id"])["result"]["from_run"] = reuse
-            it["result"]["from_run"] = reuse
-        with State.tx(st.path) as s2:
-            s2.item(it["id"])["result"]["dispatched_at"] = since
-    ok, text = wait_runs(slug, mg["merge_sha"], log, event="workflow_dispatch", branch=base, since=since, first=True)
-    if not ok and not text.startswith(("no Actions run appeared", "still running")):
-        # it finished red: a retry or fixer dispatches a new run (one still running is never dispatched twice)
-        with State.tx(st.path) as s2:
-            for k in ("dispatched_at", "dispatching_at"):
-                s2.item(it["id"])["result"].pop(k, None)
-    if release_waits_push(st, it) and push_run_needed(st, it):   # the merge's push run, awaited with the release run
+    wfs = port_ci_wfs(st.fork(slug)["dir"], mg["merge_sha"]) or [("", PORT_CI_WF)]
+    tags = {}
+    for name, path in wfs:
+        tags[name] = release_one(st, it, log, slug, v, base, mg, name, path)
+    if wfs[0][0] and release_waits_push(st, it):     # several mods: the merge's push run, awaited once
         ok2, text2 = wait_runs(slug, mg["merge_sha"], log, event="push", branch=base)
         if not ok2:
-            raise StepError(f"the merge's push run on {base} is red ({text2}): it blocks the pre-release's promotion")
-    if not ok:
-        raise StepError(f"the release run on {base}: {text}")
-    rx = re.compile(TAG_RE.format(v=re.escape(v)))
-    # published_at is when the release was made; created_at is the tagged commit's time, which precedes the dispatch
-    rel = [r for r in gh(f"repos/{slug}/releases?per_page=30") if rx.search(r.get("tag_name", ""))
-           and (r.get("published_at") or r.get("created_at") or "") >= since[:19]]
-    if not rel:
-        raise StepError(f"the release run is green but no release tagged *-mc{v} was created after {since}")
-    # the newest cut: the list is not in release order (and a base tag can still be listed first), so the release
-    # published last, and of those the highest -rN, is the one this run made -- the tag every re-pin uses
-    rn = lambda t: int((re.search(r"-r(\d+)$", t) or [0, 1])[1])
-    tag = max(rel, key=lambda r: ((r.get("published_at") or r.get("created_at") or ""), rn(r["tag_name"])))["tag_name"]
+            raise StepError(f"the merge's push run on {base} is red ({text2}): it blocks the pre-releases' promotion")
+    if len(wfs) == 1 and not wfs[0][0]:
+        tag = tags[""]
+        res = {"tag": tag}
+    else:
+        tag = ", ".join(tags[n] for n, _p in wfs)
+        res = {"tag": tags[wfs[0][0]], "tags": dict(tags)}
     P = st.data["plan"]
     pr = seg_item(st, it, "pr")["result"]
     with contextlib.suppress(Exception):
         gh(f"repos/{P['repo']}/issues/{P['issue']}/comments", "POST",
            {"body": f"Round progress: {slug} {v} -- gates and review done, PR #{pr['pr']} merged, pre-release `{tag}`."})
-    return f"pre-release {tag}", {"tag": tag}
+    return f"pre-release {tag}", res
 
+
+def release_one(st, it, log, slug, v, base, mg, name, path):
+    """One Port CI workflow's release at the merge (t_release): dispatched once (a restart finds the run it sent and
+    never dispatches twice), awaited, and its new release found -> its tag. name "" is a one-mod repository's
+    PORT_CI_WF, whose state keys and tag pattern are as they always were; a mod's keys carry `:<name>` and its tag must
+    start `<name>-`."""
+    key = (lambda k: k) if not name else (lambda k: f"{k}:{name}")
+    wf_file = path.rsplit("/", 1)[-1]
+    since = it["result"].get(key("dispatched_at"))
+    if not since:
+        marker = it["result"].get(key("dispatching_at"))
+        found = marker and [r for r in gh(f"repos/{slug}/actions/runs?head_sha={mg['merge_sha']}&per_page=50")
+                            .get("workflow_runs", []) if r.get("event") == "workflow_dispatch"
+                            and r.get("head_branch") == base and (r.get("created_at") or "") >= marker
+                            and (not name or (r.get("path") or "").endswith(path))]
+        if marker and found:
+            since = marker                  # a dispatch an interrupted run sent: wait for it, never dispatch twice
+        else:
+            since = now()
+            with State.tx(st.path) as s2:   # written before the POST: a restart looks the run up first
+                s2.item(it["id"])["result"][key("dispatching_at")] = since
+            inputs = {"release": "true"}
+            reuse = reuse_run(st, it) if not name else None     # a mod's own run: built again (no from_run yet)
+            if reuse:
+                inputs["from_run"] = str(reuse)
+            gh(f"repos/{slug}/actions/workflows/{wf_file}/dispatches", "POST", {"ref": base, "inputs": inputs})
+            with State.tx(st.path) as s2:
+                s2.item(it["id"])["result"][key("from_run")] = reuse
+            it["result"][key("from_run")] = reuse
+        with State.tx(st.path) as s2:
+            s2.item(it["id"])["result"][key("dispatched_at")] = since
+    ok, text = wait_runs(slug, mg["merge_sha"], log, event="workflow_dispatch", branch=base, since=since, first=True,
+                         **({"path": path} if name else {}))
+    if not ok and not text.startswith(("no Actions run appeared", "still running")):
+        # it finished red: a retry or fixer dispatches a new run (one still running is never dispatched twice)
+        with State.tx(st.path) as s2:
+            for k in ("dispatched_at", "dispatching_at"):
+                s2.item(it["id"])["result"].pop(key(k), None)
+    if not name and release_waits_push(st, it) and push_run_needed(st, it):   # the merge's push run, awaited with it
+        ok2, text2 = wait_runs(slug, mg["merge_sha"], log, event="push", branch=base)
+        if not ok2:
+            raise StepError(f"the merge's push run on {base} is red ({text2}): it blocks the pre-release's promotion")
+    if not ok:
+        raise StepError(f"the release run on {base}" + (f" ({wf_file})" if name else "") + f": {text}")
+    rx = re.compile(TAG_RE.format(v=re.escape(v)))
+    # published_at is when the release was made; created_at is the tagged commit's time, which precedes the dispatch
+    rel = [r for r in gh(f"repos/{slug}/releases?per_page=30") if rx.search(r.get("tag_name", ""))
+           and (not name or r.get("tag_name", "").startswith(f"{name}-"))
+           and (r.get("published_at") or r.get("created_at") or "") >= since[:19]]
+    if not rel:
+        raise StepError(f"the release run is green but no release tagged {name + '-' if name else ''}*-mc{v} was "
+                        f"created after {since}")
+    # the newest cut: the list is not in release order (and a base tag can still be listed first), so the release
+    # published last, and of those the highest -rN, is the one this run made -- the tag every re-pin uses
+    rn = lambda t: int((re.search(r"-r(\d+)$", t) or [0, 1])[1])
+    return max(rel, key=lambda r: ((r.get("published_at") or r.get("created_at") or ""), rn(r["tag_name"])))["tag_name"]
 
 def t_librecord(st, it, log):
     dep, lib = st.fork(it["fork"]), st.fork(it["extra"]["library"])
@@ -5763,6 +5864,147 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
     return not bad
 
 
+def self_check_multimod(expect):
+    """A repository of SEVERAL MODS (#274): its Port CI workflows are one per mod (port_ci_wfs), the gate of record
+    only when every one carries the ci_record inputs, and its version's release dispatches each mod's workflow and
+    finds each mod's own tag; a one-mod repository's workflow list and release are as before."""
+    G = globals()
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td)
+        d = tmp / "multi"
+        git(tmp, "init", "-q", "-b", "neoforge-1.21.10", str(d), check=True)
+        wfd = d / ".github" / "workflows"
+        wfd.mkdir(parents=True)
+        full = "\n".join(f"      {x}:" for x in CI_RECORD_INPUTS) + "\n" + (
+            "          curl -fsSL https://github.com/o/m/releases/download/port-ci-kit-v9/port-ci-kit-v9.tar.gz\n"
+            f'          echo "{"a" * 64}  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -\n')
+        for n_ in ("zeta", "alpha"):
+            (wfd / f"port-ci-{n_}.yml").write_text(f"name: Port CI {n_}\n" + full, encoding="utf-8")
+        (wfd / "ci.yml").write_text("name: CI\n", encoding="utf-8")
+        git(d, "add", "-A"); git(d, "commit", "-qm", "two mods", check=True)
+        sha = git(d, "rev-parse", "HEAD").stdout.strip()
+        want_wfs = [("alpha", ".github/workflows/port-ci-alpha.yml"), ("zeta", ".github/workflows/port-ci-zeta.yml")]
+        expect(port_ci_wfs(d) == want_wfs and port_ci_wfs(d, "HEAD") == want_wfs and ci_record(d),
+               f"several mods: one workflow per mod, sorted; the gate of record: {port_ci_wfs(d, 'HEAD')}")
+        (wfd / "port-ci-zeta.yml").write_text("name: Port CI zeta\n", encoding="utf-8")
+        expect(not ci_record(d), "several mods: one workflow without the ci_record inputs: not the gate of record")
+        one = tmp / "one"
+        (one / ".github" / "workflows").mkdir(parents=True)
+        (one / PORT_CI_WF).write_text(full, encoding="utf-8")
+        (one / ".github/workflows/port-ci-extra.yml").write_text("x\n", encoding="utf-8")
+        expect(port_ci_wfs(one) == [("", PORT_CI_WF)] and port_ci_wfs(tmp / "none") == [],
+               "one mod: PORT_CI_WF alone, whatever else is there; no workflow: none")
+        # the gates: each mod's full and minimal pair, run on its own folder with its own summaries
+        for n_ in ("zeta", "alpha"):
+            (wfd / f"port-ci-{n_}.yml").write_text(
+                f'name: Port CI {n_}\n' + full + f'          python3 .port-tools/tools/ci-gates.py --repo {n_} --modid '
+                f'"example{n_}" --base "origin/main" \\\n            --gatec "launch,spawn" --env "x"\n', encoding="utf-8")
+        cmds = sv_gate_cmds(d)
+        got = [(pathlib.Path(c[c.index("--repo") + 1]).name, c[c.index("--modid") + 1], c[c.index("--env") + 1],
+                pathlib.Path(c[c.index("--summary") + 1]).name, c[c.index("--gatec") + 1]) for c in cmds]
+        expect(got == [("alpha", "examplealpha", "full", "round-gates-alpha-full.md", "launch,spawn"),
+                       ("alpha", "examplealpha", "minimal", "round-gates-alpha-minimal.md", "launch,spawn"),
+                       ("zeta", "examplezeta", "full", "round-gates-zeta-full.md", "launch,spawn"),
+                       ("zeta", "examplezeta", "minimal", "round-gates-zeta-minimal.md", "launch,spawn")]
+               and [c[c.index("--gatec") + 1] for c in sv_gate_cmds(d, gatec="")] == [""] * 4,
+               f"several mods: each mod's gates on its own folder, its own summaries: {got}")
+        (one / PORT_CI_WF).write_text(full + '          python3 .port-tools/tools/ci-gates.py --repo . --modid "examplemod" '
+                                      '--base "origin/main" \\\n            --gatec "launch" --env "x"\n', encoding="utf-8")
+        c1 = sv_gate_cmds(one)
+        expect(len(c1) == 2 and c1[0][c1[0].index("--repo") + 1] == one and c1[0][c1[0].index("--modid") + 1] == "examplemod"
+               and pathlib.Path(c1[1][c1[1].index("--summary") + 1]).name == "round-gates-minimal.md",
+               f"one mod: the pair as before, on the checkout: {c1}")
+        # the release: each mod's workflow dispatched once, each mod's newest tag found by its prefix
+        sp = tmp / "STATE.json"
+        data = {"round_dir": str(tmp), "plan": {"repo": "o/multi", "issue": 3},
+                "forks": {"o/multi": {"dir": str(d), "name": "multi", "kind": "branches", "base": "1.21.8",
+                                      "head": "main", "versions": ["1.21.10"]}},
+                "items": [{"id": "multi@1.21.10:merge", "fork": "o/multi", "version": "1.21.10", "step": "merge",
+                           "result": {"merge_sha": sha}},
+                          {"id": "multi@1.21.10:pr", "fork": "o/multi", "version": "1.21.10", "step": "pr",
+                           "result": {"pr": 9}},
+                          {"id": "multi@1.21.10:release", "fork": "o/multi", "version": "1.21.10", "step": "release",
+                           "result": {}}]}
+        sp.write_text(json.dumps(data), encoding="utf-8")
+        calls, waited = [], []
+
+        def fake_gh(path, method="GET", data=None):
+            calls.append((method, path))
+            if "/releases" in path:
+                return [{"tag_name": "alpha-0.2.0-mc1.21.10", "published_at": "2999-01-01T00:00:00Z"},
+                        {"tag_name": "zeta-0.1.0-mc1.21.10", "published_at": "2999-01-01T00:00:01Z"},
+                        {"tag_name": "zeta-0.0.9-mc1.21.10", "published_at": "2000-01-01T00:00:00Z"},
+                        {"tag_name": "alpha-0.2.0-mc1.21.11", "published_at": "2999-01-01T00:00:00Z"}]
+            return {}
+        keep = {k: G[k] for k in ("gh", "wait_runs")}
+        try:
+            G["gh"] = fake_gh
+            G["wait_runs"] = lambda *a_, **k_: (waited.append((k_.get("event"), k_.get("path"))), (True, "green"))[1]
+            st = State(sp, json.loads(sp.read_text(encoding="utf-8")))
+            note, res = t_release(st, st.item("multi@1.21.10:release"), str(tmp / "log"))
+            posts = [c[1] for c in calls if c[0] == "POST" and "dispatches" in c[1]]
+            saved = json.loads(sp.read_text(encoding="utf-8"))["items"][2]["result"]
+            expect(res == {"tag": "alpha-0.2.0-mc1.21.10", "tags": {"alpha": "alpha-0.2.0-mc1.21.10",
+                                                                    "zeta": "zeta-0.1.0-mc1.21.10"}}
+                   and posts == ["repos/o/multi/actions/workflows/port-ci-alpha.yml/dispatches",
+                                 "repos/o/multi/actions/workflows/port-ci-zeta.yml/dispatches"]
+                   and ("workflow_dispatch", ".github/workflows/port-ci-alpha.yml") in waited
+                   and ("workflow_dispatch", ".github/workflows/port-ci-zeta.yml") in waited
+                   and "dispatched_at:alpha" in saved and "dispatched_at:zeta" in saved and "dispatched_at" not in saved,
+                   f"several mods: each mod's workflow dispatched and its own tag found: {note} {res} {posts} {waited} {saved}")
+            calls.clear()
+            st = State(sp, json.loads(sp.read_text(encoding="utf-8")))
+            t_release(st, st.item("multi@1.21.10:release"), str(tmp / "log"))
+            expect(not [c for c in calls if c[0] == "POST" and "dispatches" in c[1]],
+                   "several mods: a restart after the dispatches waits for them, never dispatches twice")
+        finally:
+            G.update(keep)
+        # the library's dependent gate on CI: each of the dependent's mod workflows that pins the library is dispatched
+        # with dep_override naming the candidate, one after another, each found by its own path; nothing is committed
+        dbare, dd = tmp / "dep.git", tmp / "dep"
+        git(tmp, "init", "-q", "--bare", str(dbare), check=True)
+        git(tmp, "init", "-q", "-b", "neoforge-1.21.10", str(dd), check=True)
+        (dd / ".github" / "workflows").mkdir(parents=True)
+        for n_ in ("alpha", "zeta"):
+            (dd / f".github/workflows/port-ci-{n_}.yml").write_text(f"pins o/lib {n_}\n" + full, encoding="utf-8")
+        git(dd, "add", "-A"); git(dd, "commit", "-qm", "two mods pin the library", check=True)
+        git(dd, "remote", "add", "origin", dbare.as_posix()); git(dd, "push", "-q", "origin", "neoforge-1.21.10", check=True)
+        pinned_before = git(dd, "rev-parse", "HEAD").stdout.strip()
+        sp2 = tmp / "STATE2.json"
+        sp2.write_text(json.dumps({"round_dir": str(tmp), "plan": {"repo": "o/lib", "issue": 3},
+                                   "forks": {"o/lib": {"dir": str(tmp), "name": "lib", "kind": "branches"}},
+                                   "items": [{"id": "lib@1.21.10:ci", "fork": "o/lib", "version": "1.21.10", "step": "ci",
+                                              "result": {"run_id": 77}},
+                                             {"id": "lib@1.21.10:depgate:o/dep", "fork": "o/lib", "version": "1.21.10",
+                                              "step": "depgate", "extra": {"dependent": "o/dep"}, "result": {}}]}),
+                       encoding="utf-8")
+        calls2, waited2 = [], []
+        ld = mod("ld")
+        keep2 = {k: G[k] for k in ("gh", "wait_runs", "run_jar_digests")}
+        keep_pd = ld.port_deps
+        try:
+            ld.port_deps = lambda t_: ({"com.example:lib": {"repo": "o/lib", "asset": "lib-1.0-mc1.21.10.jar",
+                                                            "version": "1.0"}} if "pins o/lib" in t_ else {})
+            G["run_jar_digests"] = lambda slug, rid: {"lib-1.1-mc1.21.10.jar": "e" * 64}
+            G["gh"] = lambda path, method="GET", data=None: calls2.append((method, path, data)) or {}
+            G["wait_runs"] = lambda *a_, **k_: (waited2.append(k_.get("path")), (True, "green"))[1]
+            st2 = State(sp2, json.loads(sp2.read_text(encoding="utf-8")))
+            dep_ = {"dir": str(dd), "kind": "branches", "versions": ["1.21.10"], "head": "main"}
+            note2, res2 = depgate_ci(st2, st2.item("lib@1.21.10:depgate:o/dep"), dep_, "1.21.10", str(tmp / "log"))
+            posts2 = [(c_[1], c_[2]["inputs"]["dep_override"]) for c_ in calls2 if c_[0] == "POST"]
+            expect(posts2 == [(f"repos/o/dep/actions/workflows/port-ci-{n_}.yml/dispatches",
+                               "o/lib#77/jars/lib-1.1-mc1.21.10.jar=com.example:lib:1.0@" + "e" * 64)
+                              for n_ in ("alpha", "zeta")]
+                   and waited2 == [".github/workflows/port-ci-alpha.yml", ".github/workflows/port-ci-zeta.yml"]
+                   and "every mod's CI green" in note2 and res2["candidate_run"] == 77
+                   and git(dd, "rev-parse", "HEAD").stdout.strip() == pinned_before
+                   and git(dbare, "rev-parse", "neoforge-1.21.10").stdout.strip() == pinned_before,
+                   f"several mods: each mod's CI against the candidate, its pin untouched: {note2} {posts2} {waited2}")
+        finally:
+            G.update(keep2)
+            ld.port_deps = keep_pd
+
+
 def self_check_bump(expect):
     """An OWNED fork's release bump (weekly-plan.py install --release-bump): the queue puts `bump` between setup and the
     authors' take only when the fork has one; the step needs merge-fork-prs and the fork's automerge; on a local origin
@@ -5900,6 +6142,7 @@ def self_check():
         rc = fn(*a_, out=buf.append)
         return rc, "\n".join(buf)
     self_check_bump(expect)
+    self_check_multimod(expect)
     # a version branch's gate run fixes nothing (weekly round 2026-10-21: a gate re-run with the default budget started
     # the file loop and rewrote unrelated files); the single-version route's commands (sv_gate_cmds) are not this one
     gc_ = [str(x) for x in gate_run_cmd("co", "1.21.4", "measure", "frozen.json", "--allow-undone-library")]
