@@ -60,13 +60,17 @@ effect give @e[tag=playtest] minecraft:fire_resistance infinite 0 true
 
 @step fight
 # two zombies that move and fight back (no NoAI), one 6 blocks out and one 9 behind it: @fight walks to the nearest,
-# swings at full charge, then the next, and never steps out of the 21x21 box around him
+# swings at full charge, then the next, and never steps out of the 21x21 box around him. In SURVIVAL: mobs ignore a
+# creative player, so in creative the zombies wander instead of coming at him and one can leave the box (measured: one
+# 21 blocks out at the 60 s limit on 1.21.3). Resistance 4 keeps him alive; creative again after the step.
+gamemode survival
 summon minecraft:zombie ~ ~ ~6 {Tags:["fight"]}
 summon minecraft:zombie ~3 ~ ~9 {Tags:["fight"]}
 effect give @e[tag=fight] minecraft:fire_resistance infinite 0 true
 effect give @s minecraft:resistance 600 4 true
 @fight @e[tag=fight] within 60s inside ~-10 ~-10 ~10 ~10
 @assert execute unless entity @e[tag=fight]
+gamemode creative
 
 @step inventory
 @key key.inventory
