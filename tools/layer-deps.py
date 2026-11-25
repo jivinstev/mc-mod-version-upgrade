@@ -837,7 +837,7 @@ def gates_at_tag(repo, tag, target):
         return [f"{repo} has no tag {tag}"]
     with tempfile.TemporaryDirectory() as t:
         root = fb.export(d, c, pathlib.Path(t) / "tree")
-        return fb.gates_problems(d, root, target, c, False, fb.root_files(d, root, False))
+        return fb.gates_problems(d, root, target, c, False, fb.root_files(d, root, False), (repo, tag))
 
 
 def library_prerelease(repo, tag, target, get=None, gates=None):
@@ -877,7 +877,8 @@ def library_done_branch_release(repo, tag, target):
         return False, f"{repo} has no tag {tag}", []
     with tempfile.TemporaryDirectory() as t:
         root = fb.export(d, c, pathlib.Path(t) / "tree")
-        why = _library_first(fb.target_done(d, target, root=root, ref=c))
+        # (repo, tag): the gate record is THIS release's, and a refusal names it and what it lacks (issue #305)
+        why = _library_first(fb.target_done(d, target, root=root, ref=c, release=(repo, tag)))
     if why:
         return False, f"its {target} at {tag} is not done: {_reasons(why)}", []
     return True, f"version branch {fb.branch_name(target)} done at {tag}", [f"release {tag} ({c[:12]})"]
@@ -2102,11 +2103,58 @@ def self_check():
     _check_pins_and_bumps(expect)
     _check_install_pins(expect)
     _check_several_mods(expect)
+    _check_library_first_names_tag(expect)
     if bad:
         print("layer-deps self-check: FAIL\n  " + "\n  ".join(bad))
         return 1
     print("layer-deps self-check: OK")
     return 0
+
+
+def _check_library_first_names_tag(expect):
+    """The library-first refusal of `--port-release owner/repo@TAG` (library_done_branch_release, issue #305): it names
+    TAG and what TAG's gate record lacks -- never the oldest release its search of the library's releases read last."""
+    global _fb
+    fb_once = _fb()
+    keep_fb, keep_env = _fb, {k: os.environ.get(k) for k in (GIT_URL_ENV, CACHE_ENV)}
+    with tempfile.TemporaryDirectory() as td:
+        r, _g, _run = fb_once._migrated_fixture(td)          # a version-branch library: neoforge-1.21.1 .. 1.21.5
+        w, _w = fb_once.worktree_for(r, "1.21.5")
+        gm = w / ".port/1.21.5/GATES.md"
+        if gm.is_file():
+            gm.unlink()
+            fb_once.git(w, "commit", "-qam", "1.21.5: its gate record is the release's", check=True)
+        h = fb_once.git(w, "rev-parse", "--short", "HEAD").stdout.strip()
+        tag, older = "examplelib-1.1-mc1.21.5", "examplelib-1.0-mc1.21.5"
+        fb_once.git(r, "tag", tag, "neoforge-1.21.5", check=True)
+        head = (f"Gates for `examplelib` at `{h}` for Minecraft 1.21.5 (full environment) -- run by CI\n\n"
+                "| check | result | detail |\n|---|---|---|\n| Gate A -- mixin-config integrity | PASS | 1 test(s) |\n")
+        files = {f"https://example.invalid/{tag}/gates-full.md": head,                     # no Gate C row at all
+                 f"https://example.invalid/{older}/gates-full.md": head + "| Gate C -- real client, `launch` | FAIL | x |\n"}
+        rel = lambda t_, when: {"tag_name": t_, "published_at": when, "assets": [
+            {"name": "gates-full.md", "browser_download_url": f"https://example.invalid/{t_}/gates-full.md"}]}
+
+        def read(url, accept=None):
+            if url not in files:
+                raise OSError(f"HTTP Error 404 for {url}")
+            return files[url].encode("utf-8")
+        fb_once.gh_read = read
+        fb_once.RELEASES["owner/examplelib"] = [rel(tag, "2026-11-20T00:00:00Z"), rel(older, "2026-10-01T00:00:00Z")]
+        os.environ[GIT_URL_ENV] = str(r)                # a local clone stands for github.com/owner/examplelib
+        os.environ[CACHE_ENV] = str(pathlib.Path(td) / "cache")
+        _fb = lambda: fb_once                           # noqa: E731 -- the one module instance the stubs live in
+        try:
+            done, why, _n = library_done_branch_release("owner/examplelib", tag, "1.21.5")
+        finally:
+            _fb = keep_fb
+            for k, v in keep_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        expect(not done and f"at {tag} is not done" in why and f"{tag}'s gates-full.md" in why
+               and "no green Gate C" in why and older not in why,
+               f"--port-release owner/examplelib@{tag} refused: names {tag} and its missing Gate C row, not {older}: {why}")
 
 
 def _check_pins_and_bumps(expect):

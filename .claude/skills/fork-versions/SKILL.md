@@ -264,7 +264,9 @@ push of only those runs no full Port CI; `branch.properties`, the rows, STUBS.js
 expectations still run it, as do every pull request, tag and dispatched release. Only where the checkout holds
 `.port/<mc>/branch.properties` (port-ci.py renders it there; a single-version fork's `.port/<mc>/shipped-expect-*.txt`
 does not count): a single-version fork's workflow is byte-for-byte what it was. `ci-check` names a version branch whose
-workflow lacks it, and counts the head in its summary.
+workflow lacks it, and counts the head in its summary. It also names a version branch whose workflow is not its own --
+a push trigger naming another branch (the head's, merged up), or, with several mods, a mod's workflow the port branch
+has and it lacks -- and its fix line says `ci --all` with no `--modid` for a repository of several mods.
 
 ## Run the tool; handle only the residue
 

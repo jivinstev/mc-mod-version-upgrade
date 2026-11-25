@@ -1456,6 +1456,8 @@ def job_text(st, it, fixing=False):
                   + (f" Its log is {log} (read only its tail and any RESIDUE.md / GATES-RED.md it names)." if log else ""),
                   "", UNTRUSTED, "", FENCE + "text", *fence_safe(it.get("note", "")[-900:]), FENCE]
         hint = FIX_HINT.get(it["step"] + ("-head" if it["step"] == "depgate" and not is_vb(st, it) else ""), "")
+        if it["step"] == "ci-check" and F:
+            hint = ci_check_hint(F)
         lines += [f"Find and fix the cause on {where(st, it)[0]}, commit, leave the checkout clean, and stop: the driver "
                   "runs the step again after you.", hint, "",
                   "Acceptance: the cause is fixed and committed (or, when it needs the owner, RESULT: blocked naming "
@@ -1465,6 +1467,24 @@ def job_text(st, it, fixing=False):
     lines += answer_lines(it, fixing)
     lines += ["", *job_rules(st, it), "", summary_rule(summary)]
     return "\n".join(x for x in lines if x is not None) + "\n"
+
+
+CI_SEVERAL_MODS = (" A repository of several mods: no --modid -- `ci` renders each mod's port-ci-<NAME>.yml, its mod id "
+                   "read from the mod's folder.")
+
+
+def several_mods(F):
+    """Does fork F hold several mods (fork-branches.py mod_dirs at its head branch, else in its clone's tree)?"""
+    fb, d = mod("fb"), F["dir"]
+    ref = fb.fresh_branch(d, F["head"]) if F.get("head") else None
+    return bool(fb.mod_dirs(d, ref) if ref else fb.mod_dirs(d))
+
+
+def ci_check_hint(F):
+    """The ci-check fixer's hint for fork F: FIX_HINT's, without --modid for a repository of several mods (it must not
+    be given there: each mod's id comes from its folder, issue #305)."""
+    h = FIX_HINT["ci-check"]
+    return h.replace(" --modid ID", "") + CI_SEVERAL_MODS if several_mods(F) else h
 
 
 def answer_lines(it, fixing=False):
@@ -6210,6 +6230,18 @@ def self_check_repin_several(expect):
                    and c and sorted(git(d, "show", "--name-only", "--format=", c).stdout.split())
                    == [".github/workflows/port-ci-alpha.yml", ".github/workflows/port-ci-zeta.yml"],
                    f"regen_workflow: each mod's workflow from its own options, the kit to the newest, one commit: {cmds} {c}")
+            # the ci-check fixer's hint (#305): a repository of several mods is told `ci --all` with no --modid; a one-mod
+            # fork keeps --modid ID
+            hint_ = ci_check_hint(F)
+            expect("--all --run" in hint_ and "--modid ID" not in hint_ and "several mods" in hint_,
+                   f"the ci-check fixer's hint for a repository of several mods drops --modid: {hint_}")
+            one_ = tmp / "one"
+            git(tmp, "init", "-q", "-b", "neoforge-1.21.1", str(one_), check=True)
+            (one_ / "gradle.properties").write_text("mod_id=examplemod\n", encoding="utf-8")
+            git(one_, "add", "-A"); git(one_, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "one")
+            hint1 = ci_check_hint(dict(F, dir=str(one_), name="one"))
+            expect(hint1 == FIX_HINT["ci-check"] and "--all --modid ID --run" in hint1,
+                   f"a one-mod fork's ci-check hint is as it was (--modid ID): {hint1}")
             # the pins every mod's workflow installs, before a job on the head
             got = []
             G["guarded_pin"] = lambda ga, ver, val: (got.append(ga), (True, f"{ga} fake"))[1]
