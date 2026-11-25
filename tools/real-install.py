@@ -214,6 +214,23 @@ def download_to(url, dest, sha1=None, sha256=None, get=None):
     return len(data)
 
 
+FETCH_JOBS = 16      # downloads at a time: thousands of small asset files, one at a time, took 35-40 minutes (#309)
+
+
+def fetch_all_parallel(items, fetch, jobs=FETCH_JOBS):
+    """fetch(item) for every item, `jobs` at a time. -> [(item, exception)] for the ones that failed (every item is
+    tried; download_to never leaves a partial file at its destination, so a failure leaves nothing half-written)."""
+    from concurrent.futures import ThreadPoolExecutor
+    def one(item):
+        try:
+            fetch(item)
+            return None
+        except Exception as e:      # noqa: BLE001 -- reported per file by the caller
+            return (item, e)
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        return [r for r in pool.map(one, items) if r]
+
+
 class Sources:
     """Everything plan() reads from the network or the disk, so the self-check can swap in fixtures."""
     def __init__(self, cache_dir):
@@ -506,15 +523,15 @@ def install_runtime(mcdir, component, src, plat, log):
     for path, e in files:
         if e.get("type") == "directory":
             (base / path).mkdir(parents=True, exist_ok=True)
-    n = 0
+    todo = [(base / path, e["downloads"]["raw"]) for path, e in files if e.get("type") == "file"
+            and not ((base / path).is_file() and (base / path).stat().st_size == e["downloads"]["raw"]["size"])]
+    bad = fetch_all_parallel(todo, lambda t: download_to(t[1]["url"], t[0], sha1=t[1]["sha1"]))
+    if bad:
+        raise ValueError(f"{len(bad)} {component} file(s) failed, e.g. {bad[0][0][0]}: {bad[0][1]}")
+    n = len(todo)
     for path, e in files:
-        if e.get("type") == "file":
-            raw = e["downloads"]["raw"]
-            d = base / path
-            if not (d.is_file() and d.stat().st_size == raw["size"]):
-                download_to(raw["url"], d, sha1=raw["sha1"]); n += 1
-            if e.get("executable") and plat.os_name != "windows":
-                d.chmod(0o755)
+        if e.get("type") == "file" and e.get("executable") and plat.os_name != "windows":
+            (base / path).chmod(0o755)
     for path, e in files:
         if e.get("type") == "link" and plat.os_name != "windows":
             d = base / path
@@ -1070,12 +1087,8 @@ def do_install(plan, a, src, plat, log=print):
         elif need:
             log(f"  {'would fetch' if a.dry_run else 'fetching'} {len(need)} Minecraft file(s), {mb(sum(x[4] for x in need))}")
             if not a.dry_run:
-                bad = []
-                for kind, url, rel, s1, _size in need:
-                    try:
-                        download_to(url, mcdir / rel, sha1=s1)
-                    except Exception as e:
-                        bad.append(f"{kind} {rel}: {e}")
+                bad = [f"{it[0]} {it[2]}: {e}" for it, e in
+                       fetch_all_parallel(need, lambda it: download_to(it[1], mcdir / it[2], sha1=it[3]))]
                 if bad:
                     problems += [f"{v['mc']}: {b}" for b in bad[:10]]; continue
         if not java_exe(mcdir, v["java_component"], plat):
@@ -1950,6 +1963,20 @@ def self_check():
     chk(egl_warning(lin, [{"mc": "26.2"}, {"mc": "1.21.11"}], env={}, find=lambda n: None) is None,
         "GLFW-era versions only: no warning")
     chk(egl_warning(mac, vs, env={}, find=lambda n: None) is None, "not Linux: no warning")
+    # #309: downloads run in parallel, every item is tried, failures come back per item
+    import threading
+    seen, lock, peak, cur = [], threading.Lock(), [0], [0]
+    def f(i):
+        with lock:
+            cur[0] += 1; peak[0] = max(peak[0], cur[0])
+        time.sleep(0.02)
+        with lock:
+            cur[0] -= 1; seen.append(i)
+        if i % 7 == 3:
+            raise ValueError(f"no {i}")
+    bad = fetch_all_parallel(list(range(40)), f, jobs=8)
+    chk(sorted(seen) == list(range(40)) and sorted(i for i, _ in bad) == [3, 10, 17, 24, 31, 38] and 1 < peak[0] <= 8,
+        f"fetch_all_parallel: all tried, failures per item, at most `jobs` at once (peak {peak[0]})")
     print("self-check:", "OK" if not failed else "FAIL: " + "; ".join(failed))
     return 0 if not failed else 1
 
