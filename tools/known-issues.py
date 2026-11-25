@@ -1030,11 +1030,15 @@ def render_plan(inp):
             what = ("the authors' new commits" if not un else "the authors' code the head already has" if not n else
                     "the authors' new commits and the code the head already has")
             lines.append(f"- [{'x' if take else ' '}] Take {what} this round <!-- authors:{repo} default -->")
-            vb = f.get("version_bump") if n else None
-            if vb:                   # an owned fork's release bump (weekly-plan.py install --release-bump)
+            vbs = f.get("version_bump") if n else None
+            # an owned fork's release bump (weekly-plan.py install --release-bump): one dict, or a list in a
+            # repository of several mods (one per mod's version file)
+            for vb in ([vbs] if isinstance(vbs, dict) else vbs or []):
                 where_ = f"`{vb['key']}` in `{vb['file']}`"
                 lines.append("  " + (f"The release bump could not read {where_} ({md(vb['error'])}): the round reads it "
                                      "again before it takes anything." if vb.get("error") else
+                                     f"`{vb['file']}` stays `{vb['upstream']}`: the take changes nothing of that mod."
+                                     if vb.get("unchanged") else
                                      f"Taking it ships version `{vb['to']}`: the round first moves {where_} from "
                                      f"`{vb['upstream']}` to `{vb['to']}` on `{f['upstream_branch']}` (a PR, merged once CI "
                                      "is green), then takes that commit." if vb.get("to") else
@@ -2887,6 +2891,13 @@ def plan_untaken_check(expect, cli):
     rb_ = [render_plan(json.loads(json.dumps(dict(vb_, forks=[dict(vb_["forks"][0], version_bump=dict(bump, **x))]))))
            for x in ({}, {"upstream": "1.1.0", "to": None}, {"error": "no line"})]
     fb_ = read_plan({"number": 3, "body": rb_[0]["body"]}, [], lambda w: True, "2026-10-21T16:00:00+00:00")
+    several = [dict(bump, file="alpha/gradle.properties", to="1.0.11"),
+               dict(bump, file="zeta/gradle.properties", to=None, unchanged=True)]
+    rs_ = render_plan(json.loads(json.dumps(dict(vb_, forks=[dict(vb_["forks"][0], version_bump=several)]))))["body"]
+    fs_ = read_plan({"number": 3, "body": rs_}, [], lambda w: True, "2026-10-21T16:00:00+00:00")
+    expect("moves `mod_version` in `alpha/gradle.properties` from `1.0.10` to `1.0.11`" in rs_
+           and "`zeta/gradle.properties` stays `1.0.10`: the take changes nothing of that mod." in rs_ and h(fs_) == h(fr),
+           f"several mods' bumps: a line each, the unchanged mod's says so; the frozen input unchanged")
     expect("Taking it ships version `1.0.11`: the round first moves `mod_version` in `gradle.properties` from `1.0.10` "
            "to `1.0.11` on `main`" in rb_[0]["body"] and "ships version `1.1.0`, which `main` already names" in rb_[1]["body"]
            and "could not read `mod_version`" in rb_[2]["body"] and h(fb_) == h(fr),

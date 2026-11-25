@@ -2275,23 +2275,42 @@ def t_bump(st, it, log):
     if not up:
         raise StepError("the frozen plan names no upstream_commit for this fork: nothing exact to bump")
     git(d, "fetch", "-q", "origin", ub, F["head"], check=True)
-    try:
-        hv = wp.prop_value(git(d, "show", f"origin/{F['head']}:{rb['file']}").stdout, rb["key"])
-        uv = wp.prop_value(git(d, "show", f"{up}:{rb['file']}").stdout, rb["key"])
-        to = wp.bump_to(hv, uv)
-    except wp.Fail as e:
-        raise StepError(f"{rb['file']}:{rb['key']}: {e}")
-    if not to:
-        return f"{ub} already names {uv} (the head has {hv}): taken as it is, no bump", {"skipped": True, "version": uv}
+    rbs = wp.bumps_of(rb)
+    # a repository of several mods: one bump per mod's version file, each only when the take changes that mod's
+    # folder or a shared path (weekly-plan.py bump_applies); every bump of the round goes in one PR
+    scope = wp.take_scope(d, f"origin/{F['head']}", up) if len(rbs) > 1 or any("/" in b["file"] for b in rbs) else None
+    moves, kept = [], []
+    for b in rbs:
+        try:
+            hv = wp.prop_value(git(d, "show", f"origin/{F['head']}:{b['file']}").stdout, b["key"])
+            uv = wp.prop_value(git(d, "show", f"{up}:{b['file']}").stdout, b["key"])
+            to = wp.bump_to(hv, uv)
+        except wp.Fail as e:
+            raise StepError(f"{b['file']}:{b['key']}: {e}")
+        if to and scope and not wp.bump_applies(b["file"], *scope):
+            kept.append(f"{b['file']} stays {uv} (the take changes nothing of that mod)")
+        elif to:
+            moves.append((b, hv, uv, to))
+        else:
+            kept.append(f"{b['file']} already names {uv} (the head has {hv})")
+    if not moves:
+        one = len(rbs) == 1 and not scope
+        return (f"{ub} already names {uv} (the head has {hv}): taken as it is, no bump" if one else
+                "no bump: " + "; ".join(kept)), dict({"skipped": True}, **({"version": uv} if one else {}))
     work, owner = x["branch"], slug.split("/")[0]
-    msg = f"Version {to}: the weekly round's release of {F['head']} ({st.data['date']})"
+    to = moves[0][3] if len(rbs) == 1 else None
+    msg = (f"Version {to}" if to else "Versions " + ", ".join(f"{b['file'].split('/', 1)[0]} {t}" for b, _, _, t in moves)
+           ) + f": the weekly round's release of {F['head']} ({st.data['date']})"
+    versions = {b["file"]: t for b, _, _, t in moves}
+    said = "; ".join(f"{b['file']} {u} -> {t}" for b, _, u, t in moves)
     have = gh(f"repos/{slug}/pulls?state=all&head={owner}:{work}&base={ub}")
     open_ = [p_ for p_ in have if p_.get("state") == "open"]
     done = [p_ for p_ in have if p_.get("merged_at") and p_.get("title") == msg]
     if done:                         # a resume after the merge
         p_ = done[0]
-        return (f"#{p_['number']} already merged: {ub} moves {uv} -> {to}",
-                {"pr": p_["number"], "merge_sha": p_.get("merge_commit_sha"), "version": to})
+        return (f"#{p_['number']} already merged: {ub} moves {said}",
+                dict({"pr": p_["number"], "merge_sha": p_.get("merge_commit_sha")},
+                     **({"version": to} if to else {"versions": versions})))
     if open_:
         n, sha = open_[0]["number"], (open_[0].get("head") or {}).get("sha")
     else:
@@ -2299,14 +2318,15 @@ def t_bump(st, it, log):
         git(d, "worktree", "remove", "--force", str(wt))
         git(d, "worktree", "add", "-q", "--detach", str(wt), up, check=True)
         try:
-            f_ = wt / rb["file"]
-            with open(f_, encoding="utf-8", newline="") as fh:
-                text = fh.read()
-            with open(f_, "w", encoding="utf-8", newline="") as fh:
-                fh.write(wp.set_prop(text, rb["key"], to))
-            sha = commit_paths(wt, [rb["file"]], msg)
+            for b, _, _, t in moves:
+                f_ = wt / b["file"]
+                with open(f_, encoding="utf-8", newline="") as fh:
+                    text = fh.read()
+                with open(f_, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(wp.set_prop(text, b["key"], t))
+            sha = commit_paths(wt, [b["file"] for b, _, _, _ in moves], msg)
             if not sha:
-                raise StepError(f"setting {rb['key']}={to} in {rb['file']} changed nothing")
+                raise StepError(f"setting {said} changed nothing")
             r = git(wt, "push", "-q", "origin", f"{sha}:refs/heads/{work}")
             if r.returncode:
                 raise StepError(f"push {work}: {(r.stderr or r.stdout).strip()[-300:]}")
@@ -2315,8 +2335,11 @@ def t_bump(st, it, log):
         n = gh(f"repos/{slug}/pulls", "POST", {
             "title": msg, "head": work, "base": ub,
             "body": (f"The weekly round takes `{ub}` into `{F['head']}` this week, and `{ub}` names no version past "
-                     f"the head's ({rb['file']}: `{rb['key']}={uv}`, the head has `{hv}`), so the take ships `{to}`. "
-                     "Only the version line changes. Opened and merged by the keep-current round once CI is green; "
+                     "the head's, so the take ships a new one:\n\n"
+                     + "".join(f"- `{b['file']}`: `{b['key']}={u}` -> `{t}` (the head has `{h_}`)\n"
+                               for b, h_, u, t in moves)
+                     + "".join(f"- {k}\n" for k in kept)
+                     + "\nOnly the version lines change. Opened and merged by the keep-current round once CI is green; "
                      "the head then takes this merge.")})["number"]
     ok, text = wait_runs(slug, sha, log, event="pull_request")
     if not ok:
@@ -2327,7 +2350,8 @@ def t_bump(st, it, log):
     m = gh(f"repos/{slug}/pulls/{n}/merge", "PUT", {"merge_method": "merge", "sha": sha})
     if not m.get("sha"):
         raise StepError(f"the version PR #{n} was not merged: {m}")
-    return f"#{n} merged ({m['sha'][:12]}): {ub} moves {uv} -> {to}", {"pr": n, "merge_sha": m["sha"], "version": to}
+    return f"#{n} merged ({m['sha'][:12]}): {ub} moves {said}", dict({"pr": n, "merge_sha": m["sha"]},
+                                                                      **({"version": to} if to else {"versions": versions}))
 
 
 def t_upstream(st, it, log):
@@ -6178,6 +6202,42 @@ def self_check_bump(expect):
             note2, res2 = t_bump(st, it2, str(tmp / "log"))
             expect(res2 == {"skipped": True, "version": "1.1.0"} and not calls,
                    f"release bump: a default branch already past the head is taken as it is: {note2} {res2} {calls}")
+            # several mods: one bump per mod's version file, only the mod the take changes moves, in one PR
+            (d / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx1G\n", encoding="utf-8")
+            for m_ in ("alpha", "zeta"):
+                (d / m_).mkdir()
+                (d / m_ / "gradle.properties").write_text(f"mod_id=example{m_}\nmod_version=0.1.0\n", encoding="utf-8")
+            git(d, "add", "-A"); git(d, "commit", "-qm", "two mods", check=True)
+            git(d, "push", "-q", "origin", "neoforge-1.21.8", check=True)
+            git(d, "checkout", "-q", "main")
+            git(d, "merge", "-q", "--no-edit", "-X", "theirs", "neoforge-1.21.8", check=True)
+            git(d, "push", "-q", "origin", "main:neoforge-1.21.8", check=True)       # the head has all of main so far
+            (d / "alpha" / "A.java").write_text("class A {}\n", encoding="utf-8")
+            git(d, "add", "-A"); git(d, "commit", "-qm", "alpha only", check=True)
+            up3 = git(d, "rev-parse", "HEAD").stdout.strip()
+            git(d, "push", "-q", "origin", "main", check=True)
+            git(d, "checkout", "-q", "neoforge-1.21.8")
+            git(d, "reset", "-q", "--hard", f"{up3}^")
+            calls.clear()
+            rbs = [{"file": "alpha/gradle.properties", "key": "mod_version"},
+                   {"file": "zeta/gradle.properties", "key": "mod_version"}]
+            it3 = dict(it, extra=dict(it["extra"], upstream_commit=up3, release_bump=rbs,
+                                      branch="keep-current/2026-12-02-versions"), result={})
+            note3, res3 = t_bump(st, it3, str(tmp / "log"))
+            p3 = git(bare, "rev-parse", "keep-current/2026-12-02-versions").stdout.strip()
+            post3 = [c for c in calls if c[0] == "POST"]
+            expect(res3.get("versions") == {"alpha/gradle.properties": "0.1.1"} and "version" not in res3
+                   and git(bare, "diff", "--name-only", up3, p3).stdout.split() == ["alpha/gradle.properties"]
+                   and post3 and post3[0][2]["title"].startswith("Versions alpha 0.1.1:")
+                   and "zeta/gradle.properties stays 0.1.0" in post3[0][2]["body"],
+                   f"several mods: the changed mod's version moves, the other's stays, one PR: {note3} {res3} {post3}")
+            calls.clear()
+            (d / "zeta" / "gradle.properties").write_text("mod_id=examplezeta\nmod_version=0.1.0\n", encoding="utf-8")
+            it4 = dict(it3, extra=dict(it3["extra"], upstream_commit=git(d, "rev-parse", "neoforge-1.21.8").stdout.strip()),
+                       result={})
+            note4, res4 = t_bump(st, it4, str(tmp / "log"))
+            expect(res4 == {"skipped": True} and not [c for c in calls if c[0] != "GET"],
+                   f"several mods: a take changing no mod bumps none: {note4} {res4}")
         finally:
             G.update(keep)
 
