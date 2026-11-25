@@ -7135,3 +7135,26 @@ conflicts only where a hand edit meets a real upstream change (57 of ~1,000 chan
 correctness depends on the receiver's TYPE (`x.getServer()` on an Entity vs on an event, `getName()` on a
 GameProfile) is applied only where the compiler flagged it, which a regex row cannot do. ~100 errors → 0 in two
 rounds plus ~25 by hand. Same idea as `fork-branches.py remake`, for a branch whose base is not a fork-layer branch.
+
+**X180. A rename row written with a RECEIVER NAME (`p.getServer()`) misses the same call on every other receiver, and
+`member:` is not the cure when the name survives on another type.** **Pattern:** a version removed an instance method
+from one type (here `ServerPlayer.getServer()`, gone at 1.21.9; `p.level().getServer()` replaces it), and the port's
+row was written from the call sites it had: `p.getServer()` → `p.level().getServer()` · **Symptom:** a later commit
+calls `player.getServer()`; the rows let it through, a cascade or remake carries it up, and it surfaces only as a
+compile error on the rung. One more row (`player.getServer()` → `player.level().getServer()`) fixed it.
+· **Why `member:` is the wrong generalisation here:** a `member:getServer` row matches after ANY dot, so it is
+receiver-agnostic, but it is also TYPE-BLIND: it would rewrite `level.getServer()` and `event.getServer()` too, where
+the method still exists, into calls that do not compile (or worse, that compile and mean something else). `member:` is
+right only when NO type the mod calls the name on keeps it (check the target version's classes, not memory); `#? only-if
+<regex>` (X173) narrows it to files that mention the type, which is still type-blind inside such a file. No text row can
+see a receiver's static type -- a field inherited from a superclass, a call chain (`ctx.getPlayer().getServer()`), a
+lambda parameter with an inferred type -- so a "row per declared type" would be silently partial, which is worse than
+the compile error it replaces.
+· **Fix:** keep receiver rows, and write one per receiver the code actually uses, from a scan rather than from the
+first call site: `grep -rnoE '\b[A-Za-z_][A-Za-z0-9_]*\.getServer\(\)' src/main/java | sort | uniq -c`, then keep the
+receivers whose declared type is the one that lost the method. Use the receiver anchor X40 gives (`(?<![\w])`, so
+`this.x.player.getServer()` is reached). What a new commit adds is still caught by the compile gate, and a rewrite that
+depends on the receiver's type belongs to a caret-precise fix at the compiler's error column (X179), not to a row. When
+the same removed method fails again on a new receiver, add that receiver's row in the same change and note the
+method here.
+· **Scan:** `grep -rnoE '\b\w+\.<removedMethod>\(' src/main/java | awk -F: '{print $NF}' | sort | uniq -c`
