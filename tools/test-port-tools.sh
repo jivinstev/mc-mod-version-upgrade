@@ -779,7 +779,22 @@ f.write_text("# the ci shard on Port CI\n\n  -Pshard=ci  \n   # indented comment
 want("single-version: the version's own file", pg.gate_gradle_args_file(sv) == f)
 want("comments and blanks ignored, file order kept", pg.gate_gradle_args(sv) == ["-Pshard=ci", "--exclude-task=javadoc"])
 (sv / ".port/1.21.4").mkdir()
-want("another version's file is not this version's", pg.gate_gradle_args_file(sv, "1.21.4") is None)
+want("a higher version with no file of its own inherits the nearest lower one's", pg.gate_gradle_args_file(sv, "1.21.4") == f)
+(sv / ".port/1.21.10").mkdir()
+(sv / ".port/1.21.10/gate-gradle-args.txt").write_text("-Pshard=late\n", encoding="utf-8")
+want("a HIGHER version's file is never read for a lower one", pg.gate_gradle_args_file(sv, "1.21.1") == f
+     and pg.gate_gradle_args_file(sv, "1.21.4") == f)
+want("the NEAREST lower one wins", pg.gate_gradle_args(sv, "1.21.11") == ["-Pshard=late"])
+(sv / ".port/1.21.4/gate-gradle-args.txt").write_text("# this version gates everything\n", encoding="utf-8")
+want("an empty file of the version's own overrides: no arguments", pg.gate_gradle_args_file(sv, "1.21.4")
+     == sv / ".port/1.21.4/gate-gradle-args.txt" and pg.gate_gradle_args(sv, "1.21.4") == [])
+(sv / ".port/1.21.4/gate-gradle-args.txt").unlink()
+(sv / ".port/1.21.10/gate-gradle-args.txt").unlink()
+# a single-version fork that moved its minecraft_version in place keeps its old directory's arguments
+(sv / "gradle.properties").write_text("minecraft_version=1.21.8\nneo_version=21.8.57\n", encoding="utf-8")
+want("single-version, moved to 1.21.8: inherits .port/1.21.1/", pg.gate_gradle_args_file(sv) == f
+     and pg.gate_gradle_args(sv) == ["-Pshard=ci", "--exclude-task=javadoc"])
+(sv / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.228\n", encoding="utf-8")
 want("an empty file: no arguments", (f.write_text("# nothing yet\n", encoding="utf-8"), pg.gate_gradle_args(sv))[1] == [])
 for text, needle in (("shard\n", "is not a Gradle option"), ("-x javadoc\n", "one argument a line"),
                      ("-Pa=1\ttab\n", "one argument a line")):
@@ -794,7 +809,7 @@ try:
     want("version branch: .port/<PORT_BRANCH_MC>/", pg.gate_gradle_args(vb) == ["-Pshard=ci"])
 finally:
     del os.environ["PORT_BRANCH_MC"]
-want("version branch fixture read as single-version (1.21.1): no file", pg.gate_gradle_args(vb) == [])
+want("version branch fixture read as single-version (1.21.1): no file, and 1.21.4's is never read for it", pg.gate_gradle_args(vb) == [])
 # combined with a PORT_GRADLE_ARGS already set: appended after it, never replacing it; Gradle gets every argument
 cur = "-Dmaven.repo.local=/private/m2\n"
 both = pg.with_gradle_args(cur, ["-Pshard=ci"])
@@ -805,7 +820,7 @@ print("self-check: OK" if ok else "self-check: FAILED " + "; ".join(why))
 PY
 mkdir -p "$T/gate-args"
 out="$(python3 "$T/test-port-tools-gate-args.py" "$T/gate-args" 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "port_gates gate-gradle-args: .port/<mc>/gate-gradle-args.txt read for the version gated (single-version: gradle.properties; version branch: PORT_BRANCH_MC), one option a line with # comments and blanks ignored, a non-option or two words on a line refused with file:line, and appended after a PORT_GRADLE_ARGS already set (a round's -Dmaven.repo.local stays)" \
+grep -q 'self-check: OK' <<<"$out" && ok "port_gates gate-gradle-args: .port/<mc>/gate-gradle-args.txt read for the version gated (single-version: gradle.properties; version branch: PORT_BRANCH_MC), else the nearest lower version's (never a higher one's; an empty own file overrides; a single-version fork that moved its version keeps its old directory's), one option a line with # comments and blanks ignored, a non-option or two words on a line refused with file:line, and appended after a PORT_GRADLE_ARGS already set (a round's -Dmaven.repo.local stays)" \
   || bad "port_gates gate-gradle-args: $out"
 
 # the round's queue diff (part 2's on its own): here to balance the parts (Windows: part 2 holds round.py's self-check)

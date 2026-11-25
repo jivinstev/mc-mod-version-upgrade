@@ -170,7 +170,8 @@ only if every gate passes. The kit is published when the maintainer merges the c
 
 **A GameTest suite longer than Gate B's limit** (1500 s): never add `env: PORT_GRADLE_ARGS` to the workflow by hand
 (the next regeneration drops it). Commit `.port/<mc>/gate-gradle-args.txt` instead, one Gradle argument a line (`#`
-comments), e.g. `-Pshard=ci` for a build that selects a test subset from that property. Port CI's gates job
+comments), e.g. `-Pshard=ci` for a build that selects a test subset from that property. A version with no
+file of its own uses the nearest lower version's (never a higher one's); an empty file of its own gates the whole suite. Port CI's gates job
 (`ci-gates.py --port-ci`, both passes, full and minimal) appends it to every Gradle call and lists it in the gate
 summary; local gate runs (`fork-port.py`, the weekly round) do not read it, so they run the full tier. `port-ci.py`
 and `port-ci.py check` warn about a hand-added `PORT_GRADLE_ARGS` until the file holds it.
