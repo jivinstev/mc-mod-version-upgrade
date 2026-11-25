@@ -315,7 +315,14 @@ jobs:
           Write-Host '--- the same command again with --boot-test: a re-run, then the game booted'
           $argv2 = $argv + @('--boot-test')
           $out = & $boot @argv2 *>&1 | Out-String; $rc = $LASTEXITCODE; Write-Host $out
-          if ($rc -ne 0 -or $out -notmatch 'Boot test: PASS') { throw "boot test: exit $rc" }
+          if ($rc -ne 0 -or $out -notmatch 'Boot test: PASS') {
+            foreach ($f in @(Get-ChildItem -Recurse -File -Include latest.log, stdout*.txt, stderr*.txt, *.log -Path "$R\minecraft\instances", ([IO.Path]::GetTempPath() + 'player-install-boot-*') -ErrorAction SilentlyContinue)) {
+              Write-Host "--- $($f.FullName): the renderer, errors, and the last lines"
+              Get-Content $f.FullName | Select-String -Pattern 'OpenGL|GL_|renderer|llvmpipe|SDL|GLFW|Exception|ERROR|FATAL' | Select-Object -First 40 | ForEach-Object { Write-Host $_.Line }
+              Get-Content $f.FullName -Tail 40 | ForEach-Object { Write-Host $_ }
+            }
+            throw "boot test: exit $rc"
+          }
       - name: keep the game's logs
         if: always()
         uses: actions/upload-artifact@v4
