@@ -144,7 +144,7 @@ PHASE = {"authors": "upstream", "upstream": "upstream", "mergeup": "upstream", "
          "review": "review", "fix": "review", "recheck": "review", "sync": "upstream", "reconcile": "upstream",
          "adopt": "backlog"}
 # the permission (the config's `allow`) a step needs; comments on the plan issue are always allowed
-NEEDS = {"pr": "merge-fork-prs", "merge": "merge-fork-prs", "release": "pre-release", "ledger": "push-version-branches",
+NEEDS = {"pr": "merge-fork-prs", "merge": "merge-fork-prs", "bump": "merge-fork-prs", "release": "pre-release", "ledger": "push-version-branches",
          "librecord": "push-version-branches", "grades": "push-version-branches"}
 AGENT_STEPS = {"authors", "backlog", "review", "fix", "recheck", "decisions", "close", "repin-head", "reconcile", "adopt",
                "lowest"}
@@ -165,7 +165,8 @@ _MODS = {}
 
 def mod(key):
     files = {"fb": "fork-branches.py", "ki": "known-issues.py", "pc": "port-ci.py", "lc": "checkout-lock.py",
-             "fk": "fork-kind.py", "ld": "layer-deps.py", "rp": "round-preflight.py", "cg": "ci-gates.py"}
+             "fk": "fork-kind.py", "ld": "layer-deps.py", "rp": "round-preflight.py", "cg": "ci-gates.py",
+             "wp": "weekly-plan.py"}
     if key not in _MODS:
         sys.dont_write_bytecode = True
         _MODS[key] = load(f"round_{key}", files[key])
@@ -545,6 +546,9 @@ def build_queue(frozen, cfg, forks, date):
             if f.get("take_authors"):
                 up = {"upstream_commit": f.get("upstream_commit"), "upstream": f.get("upstream"),
                       "upstream_branch": f.get("upstream_branch")}
+                rb = next((c.get("release_bump") for c in cfg.get("forks", []) if c.get("repo") == slug), None)
+                if rb:               # an owned fork's release bump: its default branch moved past the head's version first
+                    q.add(slug, base, "bump", extra=dict(up, release_bump=rb, branch=f"keep-current/{date}-version"))
                 if single:           # the authors' merge is mechanical (port-sync.py); its conflicts are a fixer's
                     q.add(slug, base, "upstream", extra=dict(up))
                 q.add(slug, base, "authors", extra=up)
@@ -1677,17 +1681,17 @@ def job_task(st, it):
     if s == "authors" and seg_item(st, it, "upstream"):
         x = it["extra"]
         return [f"The authors' code (the plan's take_authors) is merged into {it['fork']} at {v}: the driver ran "
-                f"port-sync.py on {w} with the frozen upstream commit {x.get('upstream_commit')} (a merge commit; its "
+                f"port-sync.py on {w} with the frozen upstream commit {take_commit(st, it)} (a merge commit; its "
                 "conflicts, if any, were resolved by its fixer). Now keep-current \"Run\" steps 3-5 there: reconcile "
                 "every fix the port carries (step 3: take theirs only when proven, keep or shrink ours), port the new "
                 "code (step 4) to a green compile and Gate A/B (`ci-gates.py --repo " + str(F["dir"]) + " --modid <ID> "
-                f"--base {x.get('upstream_commit')} --gatec none`). Do not run the full gates: the driver runs them "
+                f"--base {take_commit(st, it)} --gatec none`). Do not run the full gates: the driver runs them "
                 f"after the review. {record_step(F, br)}",
                 f"Acceptance: {br} holds the merge and the port, A/B green, committed."]
     if s == "authors":
         x = it["extra"]
         return [f"Take the authors' code (the plan's take_authors) into {it['fork']} at {v}: keep-current \"Run\" steps "
-                f"2-5 on {w}, with the frozen upstream commit {x.get('upstream_commit')} (merge that commit, never the "
+                f"2-5 on {w}, with the frozen upstream commit {take_commit(st, it)} (merge that commit, never the "
                 f"branch tip {x.get('upstream')} {x.get('upstream_branch')}; a merge commit, never a rebase), reconcile "
                 "every fix the port carries (step 3: take theirs only when proven, keep or shrink ours), port the new "
                 "code (step 4) to a green compile and Gate A/B (ci-gates.py with --gatec none). Do not run the full "
@@ -2040,7 +2044,7 @@ def allowed(st, it):
     need = NEEDS.get(it["step"])
     if need and need not in st.data["allow"]:
         return need
-    if it["step"] == "merge" and not st.fork(it["fork"]).get("automerge"):
+    if it["step"] in ("merge", "bump") and not st.fork(it["fork"]).get("automerge"):
         return "merge-fork-prs (the fork's automerge)"
     return None
 
@@ -2224,6 +2228,80 @@ def authors_remote(d, upstream):
     return None
 
 
+def take_commit(st, it):
+    """The commit the head takes this round: the release bump's merge on the default branch when the round made one
+    (an owned fork, weekly-plan.py install --release-bump), else the plan's frozen upstream_commit."""
+    b = seg_item(st, it, "bump")
+    return ((b or {}).get("result") or {}).get("merge_sha") or it["extra"].get("upstream_commit")
+
+
+def t_bump(st, it, log):
+    """An OWNED fork's release bump, before its head takes its own default branch: KEY in FILE (the fork's
+    `release_bump`) is read at the head and at the plan's frozen commit; when the default branch names no version past
+    the head's, a PR on the default branch moves it to the next patch (weekly-plan.py bump_to), its CI green, merged --
+    and the head then takes that merge commit (take_commit). A version a person already bumped is taken as it is. A
+    resume finds this round's PR (open, or merged from this very commit) and carries on from it."""
+    F, x = st.fork(it["fork"]), it["extra"]
+    d, slug, wp = F["dir"], it["fork"], mod("wp")
+    rb, ub, up = x["release_bump"], x.get("upstream_branch") or "main", x.get("upstream_commit")
+    if not up:
+        raise StepError("the frozen plan names no upstream_commit for this fork: nothing exact to bump")
+    git(d, "fetch", "-q", "origin", ub, F["head"], check=True)
+    try:
+        hv = wp.prop_value(git(d, "show", f"origin/{F['head']}:{rb['file']}").stdout, rb["key"])
+        uv = wp.prop_value(git(d, "show", f"{up}:{rb['file']}").stdout, rb["key"])
+        to = wp.bump_to(hv, uv)
+    except wp.Fail as e:
+        raise StepError(f"{rb['file']}:{rb['key']}: {e}")
+    if not to:
+        return f"{ub} already names {uv} (the head has {hv}): taken as it is, no bump", {"skipped": True, "version": uv}
+    work, owner = x["branch"], slug.split("/")[0]
+    msg = f"Version {to}: the weekly round's release of {F['head']} ({st.data['date']})"
+    have = gh(f"repos/{slug}/pulls?state=all&head={owner}:{work}&base={ub}")
+    open_ = [p_ for p_ in have if p_.get("state") == "open"]
+    done = [p_ for p_ in have if p_.get("merged_at") and p_.get("title") == msg]
+    if done:                         # a resume after the merge
+        p_ = done[0]
+        return (f"#{p_['number']} already merged: {ub} moves {uv} -> {to}",
+                {"pr": p_["number"], "merge_sha": p_.get("merge_commit_sha"), "version": to})
+    if open_:
+        n, sha = open_[0]["number"], (open_[0].get("head") or {}).get("sha")
+    else:
+        wt = pathlib.Path(d) / "build" / "round-bump"
+        git(d, "worktree", "remove", "--force", str(wt))
+        git(d, "worktree", "add", "-q", "--detach", str(wt), up, check=True)
+        try:
+            f_ = wt / rb["file"]
+            with open(f_, encoding="utf-8", newline="") as fh:
+                text = fh.read()
+            with open(f_, "w", encoding="utf-8", newline="") as fh:
+                fh.write(wp.set_prop(text, rb["key"], to))
+            sha = commit_paths(wt, [rb["file"]], msg)
+            if not sha:
+                raise StepError(f"setting {rb['key']}={to} in {rb['file']} changed nothing")
+            r = git(wt, "push", "-q", "origin", f"{sha}:refs/heads/{work}")
+            if r.returncode:
+                raise StepError(f"push {work}: {(r.stderr or r.stdout).strip()[-300:]}")
+        finally:
+            git(d, "worktree", "remove", "--force", str(wt))
+        n = gh(f"repos/{slug}/pulls", "POST", {
+            "title": msg, "head": work, "base": ub,
+            "body": (f"The weekly round takes `{ub}` into `{F['head']}` this week, and `{ub}` names no version past "
+                     f"the head's ({rb['file']}: `{rb['key']}={uv}`, the head has `{hv}`), so the take ships `{to}`. "
+                     "Only the version line changes. Opened and merged by the keep-current round once CI is green; "
+                     "the head then takes this merge.")})["number"]
+    ok, text = wait_runs(slug, sha, log, event="pull_request")
+    if not ok:
+        raise StepError(f"the version PR #{n}'s CI: {text}")
+    ok, why = pr_runs_green(slug, sha)
+    if not ok:
+        raise StepError(f"the version PR #{n}'s CI at {sha[:12]} is not green ({why}): not merged")
+    m = gh(f"repos/{slug}/pulls/{n}/merge", "PUT", {"merge_method": "merge", "sha": sha})
+    if not m.get("sha"):
+        raise StepError(f"the version PR #{n} was not merged: {m}")
+    return f"#{n} merged ({m['sha'][:12]}): {ub} moves {uv} -> {to}", {"pr": n, "merge_sha": m["sha"], "version": to}
+
+
 def t_upstream(st, it, log):
     """A single-version fork's authors' merge, the plan's frozen commit exactly: port-sync.py --port <work branch> --base
     <head> --commit <upstream_commit> (the head checked against origin first, a merge commit, never a rebase). A
@@ -2231,7 +2309,8 @@ def t_upstream(st, it, log):
     left to merge."""
     F, x = st.fork(it["fork"]), it["extra"]
     d = F["dir"]
-    if not x.get("upstream_commit"):
+    uc = take_commit(st, it)
+    if not uc:
         raise StepError("the frozen plan names no upstream_commit for this fork: nothing exact to merge")
     remote = authors_remote(d, x.get("upstream") or "")
     if not remote:
@@ -2241,8 +2320,8 @@ def t_upstream(st, it, log):
         git(d, "branch", "-q", F["head"], f"origin/{F['head']}", check=True)
     wb = branch_of(st, it)
     sh(st, it, [sys.executable, TOOLS / "port-sync.py", "--repo", d, "--port", wb, "--base", F["head"],
-                "--upstream", f"{remote}/{x.get('upstream_branch') or 'main'}", "--commit", x["upstream_commit"]], log)
-    return f"{remote} at {x['upstream_commit'][:12]} merged into {wb}", {"merged_head": head(d)}
+                "--upstream", f"{remote}/{x.get('upstream_branch') or 'main'}", "--commit", uc], log)
+    return f"{remote} at {uc[:12]} merged into {wb}", {"merged_head": head(d)}
 
 
 def t_sync(st, it, log):
@@ -2637,7 +2716,7 @@ def t_gates(st, it, log):
                         "dependent at that version. Add its dependent to .github/weekly-plan.json (role library, "
                         "depends_on), or take the mark off")
     au = seg_item(st, it, "authors")
-    up = au["extra"].get("upstream_commit") if au else None
+    up = take_commit(st, au) if au else None
     gated, at = head(d), time.time()
     def pins():
         # the jars the head's Port CI installs before it builds (its workflow's --dep-jar steps) into ~/.m2,
@@ -3787,7 +3866,7 @@ TOOL_IMPL = {"resync": t_resync, "ci-check": t_ci_check, "grades": t_grades, "se
              "records": t_records, "done": t_done,
              "mergeup": t_mergeup,
              "repin": t_repin, "nochange": t_nochange, "reviewref": t_reviewref,
-             "gates": t_gates, "depgate": t_depgate, "freeze": t_freeze, "pr": t_pr, "ci": t_ci, "merge": t_merge,
+             "gates": t_gates, "depgate": t_depgate, "freeze": t_freeze, "pr": t_pr, "ci": t_ci, "merge": t_merge, "bump": t_bump,
              "release": t_release, "librecord": t_librecord, "ledger": t_ledger}
 
 
@@ -5684,6 +5763,114 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
     return not bad
 
 
+def self_check_bump(expect):
+    """An OWNED fork's release bump (weekly-plan.py install --release-bump): the queue puts `bump` between setup and the
+    authors' take only when the fork has one; the step needs merge-fork-prs and the fork's automerge; on a local origin
+    it moves only the version line on a PR branch cut from the frozen commit, and the head then takes the merge; a
+    default branch a person already bumped is taken as it is."""
+    G = globals()
+    fz = {"schema": 1, "issue": 1, "repo": "o/mod", "grades": [], "decisions": [],
+          "forks": [{"repo": "o/mod", "head": "neoforge-1.21.8", "take_authors": True, "upstream_commit": "a" * 40,
+                     "upstream": "https://github.com/o/mod.git", "upstream_branch": "main", "selected": [],
+                     "dep_bumps": [], "fixes": []}]}
+    F = {"o/mod": {"dir": ".", "name": "mod", "kind": "single", "head": "neoforge-1.21.8", "base": "1.21.8", "versions": []}}
+    rb = {"file": "gradle.properties", "key": "mod_version"}
+    steps = lambda cfg: [x["step"] for x in build_queue(fz, cfg, F, "2026-12-02")]
+    with_, without = (steps({"forks": [{"repo": "o/mod", "release_bump": rb}]}), steps({"forks": [{"repo": "o/mod"}]}))
+    expect(with_[:5] == ["ci-check", "setup", "bump", "upstream", "authors"] and "bump" not in without
+           and [x for x in with_ if x != "bump"] == without,
+           f"release bump: `bump` before the take only with release_bump; nothing else moves: {with_} / {without}")
+    fz_off = json.loads(json.dumps(fz)); fz_off["forks"][0]["take_authors"] = False
+    expect("bump" not in [x["step"] for x in build_queue(fz_off, {"forks": [{"repo": "o/mod", "release_bump": rb}]},
+                                                         F, "2026-12-02")],
+           "release bump: no bump when the plan does not take the default branch")
+
+    class _StB:
+        def __init__(self, d, automerge=True, allow=("merge-fork-prs",)):
+            self.d, self.am = d, automerge
+            self.data = {"date": "2026-12-02", "allow": list(allow)}
+            self.items = []
+
+        def fork(self, _):
+            return {"dir": str(self.d), "name": "mod", "kind": "single", "head": "neoforge-1.21.8", "base": "1.21.8",
+                    "versions": [], "automerge": self.am}
+
+        def item(self, iid):
+            for x in self.items:
+                if x["id"] == iid:
+                    return x
+            raise KeyError(iid)
+    bi = {"id": "mod@1.21.8:bump", "fork": "o/mod", "version": "1.21.8", "step": "bump", "result": {}}
+    expect(allowed(_StB(".", allow=()), bi) == "merge-fork-prs"
+           and allowed(_StB(".", automerge=False), bi) == "merge-fork-prs (the fork's automerge)"
+           and allowed(_StB("."), bi) is None, "release bump: it merges a PR, so it needs merge-fork-prs and automerge")
+    keep = {k: G[k] for k in ("gh", "wait_runs", "pr_runs_green")}
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td)
+        bare, d = tmp / "origin.git", tmp / "mod"
+        git(tmp, "init", "-q", "--bare", str(bare), check=True)
+        git(tmp, "init", "-q", "-b", "neoforge-1.21.8", str(d), check=True)
+        git(d, "config", "core.autocrlf", "false")
+        (d / "gradle.properties").write_text("mod_id=examplemod\nmod_version = 1.0.10\n", encoding="utf-8")
+        git(d, "add", "-A"); git(d, "commit", "-qm", "1.0.10", check=True)
+        git(d, "branch", "main"); git(d, "checkout", "-q", "main")
+        (d / "Feature.java").write_text("class Feature {}\n", encoding="utf-8")
+        git(d, "add", "-A"); git(d, "commit", "-qm", "a feature on main", check=True)
+        up = git(d, "rev-parse", "HEAD").stdout.strip()
+        git(d, "remote", "add", "origin", bare.as_posix())
+        git(d, "push", "-q", "origin", "main", "neoforge-1.21.8", check=True)
+        git(d, "checkout", "-q", "neoforge-1.21.8")
+        calls = []
+
+        def fake_gh(path, method="GET", data=None):
+            calls.append((method, path, data))
+            if method == "POST":
+                return {"number": 7}
+            if method == "PUT":
+                return {"sha": "f" * 40}
+            return []
+        try:
+            G["gh"] = fake_gh
+            G["wait_runs"] = lambda *a_, **k_: (True, "green")
+            G["pr_runs_green"] = lambda *a_: (True, "")
+            st = _StB(d)
+            it = dict(bi, extra={"upstream_commit": up, "upstream": bare.as_posix(), "upstream_branch": "main",
+                                 "release_bump": rb, "branch": "keep-current/2026-12-02-version"})
+            au = {"id": "mod@1.21.8:authors", "fork": "o/mod", "version": "1.21.8", "step": "authors",
+                  "extra": {"upstream_commit": up}, "result": {}}
+            st.items = [it, au]
+            note, res = t_bump(st, it, str(tmp / "log"))
+            it["result"] = res
+            pushed = git(d, "rev-parse", "refs/remotes/origin/keep-current/2026-12-02-version").stdout.strip() or \
+                git(bare, "rev-parse", "keep-current/2026-12-02-version").stdout.strip()
+            changed = git(bare, "diff", "--name-only", up, pushed).stdout.split()
+            text = git(bare, "show", f"{pushed}:gradle.properties").stdout
+            post = [c for c in calls if c[0] == "POST"]
+            expect(res.get("version") == "1.0.11" and res.get("merge_sha") == "f" * 40 and changed == ["gradle.properties"]
+                   and "mod_version = 1.0.11" in text and git(bare, "rev-parse", f"{pushed}^").stdout.strip() == up
+                   and post and post[0][2]["base"] == "main" and post[0][2]["title"].startswith("Version 1.0.11:")
+                   and ("PUT", "repos/o/mod/pulls/7/merge", {"merge_method": "merge", "sha": pushed}) in calls,
+                   f"release bump: one version line on a branch from the frozen commit, a PR to main, merged: {note} {res} "
+                   f"{changed} {calls}")
+            expect(take_commit(st, au) == "f" * 40, "release bump: the head takes the bump's merge, not the frozen commit")
+            it["result"] = {"skipped": True, "version": "1.0.10"}
+            expect(take_commit(st, au) == up, "no bump made: the head takes the frozen commit")
+            # a person already bumped main past the head: taken as it is, nothing pushed or opened
+            git(d, "checkout", "-q", "main")
+            (d / "gradle.properties").write_text("mod_id=examplemod\nmod_version = 1.1.0\n", encoding="utf-8")
+            git(d, "commit", "-qam", "1.1.0", check=True)
+            up2 = git(d, "rev-parse", "HEAD").stdout.strip()
+            git(d, "push", "-q", "origin", "main", check=True)
+            git(d, "checkout", "-q", "neoforge-1.21.8")
+            calls.clear()
+            it2 = dict(it, extra=dict(it["extra"], upstream_commit=up2), result={})
+            note2, res2 = t_bump(st, it2, str(tmp / "log"))
+            expect(res2 == {"skipped": True, "version": "1.1.0"} and not calls,
+                   f"release bump: a default branch already past the head is taken as it is: {note2} {res2} {calls}")
+        finally:
+            G.update(keep)
+
+
 def self_check():
     t0 = time.monotonic()
     ok = True
@@ -5712,6 +5899,7 @@ def self_check():
         buf = []
         rc = fn(*a_, out=buf.append)
         return rc, "\n".join(buf)
+    self_check_bump(expect)
     # a version branch's gate run fixes nothing (weekly round 2026-10-21: a gate re-run with the default budget started
     # the file loop and rewrote unrelated files); the single-version route's commands (sv_gate_cmds) are not this one
     gc_ = [str(x) for x in gate_run_cmd("co", "1.21.4", "measure", "frozen.json", "--allow-undone-library")]

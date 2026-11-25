@@ -1030,6 +1030,16 @@ def render_plan(inp):
             what = ("the authors' new commits" if not un else "the authors' code the head already has" if not n else
                     "the authors' new commits and the code the head already has")
             lines.append(f"- [{'x' if take else ' '}] Take {what} this round <!-- authors:{repo} default -->")
+            vb = f.get("version_bump") if n else None
+            if vb:                   # an owned fork's release bump (weekly-plan.py install --release-bump)
+                where_ = f"`{vb['key']}` in `{vb['file']}`"
+                lines.append("  " + (f"The release bump could not read {where_} ({md(vb['error'])}): the round reads it "
+                                     "again before it takes anything." if vb.get("error") else
+                                     f"Taking it ships version `{vb['to']}`: the round first moves {where_} from "
+                                     f"`{vb['upstream']}` to `{vb['to']}` on `{f['upstream_branch']}` (a PR, merged once CI "
+                                     "is green), then takes that commit." if vb.get("to") else
+                                     f"Taking it ships version `{vb['upstream']}`, which `{f['upstream_branch']}` already "
+                                     f"names (the head has `{vb['head']}`): no bump."))
         if n:
             lines += ["", f"`{f['upstream']}` `{f['upstream_branch']}` at `{f['upstream_commit'][:12]}`: {n} new commit(s) "
                       f"the head does not have:", ""]
@@ -2858,6 +2868,17 @@ def plan_untaken_check(expect, cli):
     expect("Could not preview merging" in res["body"] and "Could not preview" not in render_plan(sv0)["body"]
            and (h(res), h(fr), h(render_plan(sv0))) == ("ce1aa9dc5af34a9c", "af5159d1b42a19c3", "9b9ceb2f13e3497b"),
            f"a single-version fork's plan and frozen input are unchanged: {(h(res), h(fr), h(render_plan(sv0)))}")
+    # an OWNED fork's release bump: one line under the authors' box naming the version the take ships; a plan without
+    # one is the pinned plan above, byte for byte, and what the round reads from the issue is unchanged
+    vb_ = json.loads(json.dumps(sv))
+    bump = {"file": "gradle.properties", "key": "mod_version", "head": "1.0.10", "upstream": "1.0.10", "to": "1.0.11"}
+    rb_ = [render_plan(json.loads(json.dumps(dict(vb_, forks=[dict(vb_["forks"][0], version_bump=dict(bump, **x))]))))
+           for x in ({}, {"upstream": "1.1.0", "to": None}, {"error": "no line"})]
+    fb_ = read_plan({"number": 3, "body": rb_[0]["body"]}, [], lambda w: True, "2026-10-21T16:00:00+00:00")
+    expect("Taking it ships version `1.0.11`: the round first moves `mod_version` in `gradle.properties` from `1.0.10` "
+           "to `1.0.11` on `main`" in rb_[0]["body"] and "ships version `1.1.0`, which `main` already names" in rb_[1]["body"]
+           and "could not read `mod_version`" in rb_[2]["body"] and h(fb_) == h(fr),
+           f"the release bump's line: the version a take ships; the frozen input unchanged: {h(fb_)}")
     # B3: a suspected entry unresolved two weeks or more after its mark is marked, listed for the owner and puts
     # [decision needed] in the title; one in its first plan only says (suspected); what the round selects is unchanged
     s1 = json.loads(json.dumps(sv))
