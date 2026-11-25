@@ -61,6 +61,22 @@ SECURITY = [
 BLOCKING_SECURITY = {"pipes a download into a shell", "disables TLS verification", "touches credentials",
                      "recursive delete of / or home", "decodes an embedded blob",
                      "pull_request_target workflow (runs with write access on untrusted code)"}
+# The one download-into-a-shell this repository publishes ON PURPOSE: its own player-install bootstrap (#269, the
+# owner's decision), pinned to a player-install-v<N> release of THIS repository (`vN` and `@TAG@` in its docs and its
+# template). Allowed only when EVERY curl/wget-into-shell on the line is exactly that command -- `curl`, plain
+# -f/-s/-S/-L flags, that one URL, `| bash` or `| sh` -- so a second command, another URL, a lookalike repository, a
+# query string or a wget on the same line still blocks. It is still reported, as ATTENTION, so a reviewer sees it.
+PIPE_SH = re.compile(r"(curl|wget)[^|\n]*\|\s*(ba|z)?sh\b")
+OWN_BOOTSTRAP = re.compile(r"curl\s+(?:-[fsSL]+\s+)*https://github\.com/jivinstev/mc-mod-version-upgrade/releases/"
+                           r"download/(?:player-install-v(?:\d+|N)|@TAG@)/install\.sh\s*\|\s*(?:ba)?sh")
+
+
+def own_bootstrap_only(text):
+    """Is every download-into-a-shell on this line exactly this repository's pinned player-install bootstrap?"""
+    hits = list(PIPE_SH.finditer(text))
+    return bool(hits) and all(OWN_BOOTSTRAP.fullmatch(h.group(0)) for h in hits)
+
+
 ENTRY_START = re.compile(r"^(?:[A-Z]{1,2}\d+[a-z]?\.\s|\d{1,3}[a-z]?\.\s+\*\*|\*\*[A-Z]{1,2}\d+[a-z]?\.|- \*\*[A-Z]{1,2}\d+)")
 
 
@@ -230,6 +246,10 @@ def main():
             continue  # a comment cannot execute; flagging prose that DESCRIBES a risk is noise
         for rx, what in SECURITY:
             if re.search(rx, text):
+                if what == "pipes a download into a shell" and own_bootstrap_only(text):
+                    f("ATTENTION", "security", "pipes this repository's own pinned player-install bootstrap into a shell "
+                      "(the one allowed form)", f"{path}: {text.strip()[:140]}")
+                    continue
                 f("BLOCKING" if what in BLOCKING_SECURITY else "ATTENTION", "security", what,
                   f"{path}: {text.strip()[:140]}")
 

@@ -71,7 +71,7 @@ class Refuse(Exception):
 
 # ── asking ────────────────────────────────────────────────────────────────────────────────────────────────────────
 class Ask:
-    """Questions on the terminal -- /dev/tty when stdin is the bootstrap's pipe (`curl ... | bash`). With --yes,
+    """Questions on the terminal -- /dev/tty when stdin is the bootstrap's pipe (the one-line install). With --yes,
     every question takes its default and none is shown."""
     def __init__(self, yes, inp=None, out=print):
         self.yes, self.out, self._inp = yes, out, inp
@@ -576,7 +576,7 @@ def boot_test(src, plat, mcdir, vid, comp, target, modids, log=print):
 # ── the release bundle ────────────────────────────────────────────────────────────────────────────────────────────
 BUNDLE = ("tools/player-install.py", "tools/real-install.py", "tools/install-port.py", "tools/find-minecraft.py",
           "tools/port-manifest.py", "tools/fork-kind.py")
-BOOTSTRAPS = ("player-install/install.sh", "player-install/install.ps1")
+BOOTSTRAPS = ("player-install/install.sh", "player-install/install.ps1", "player-install/RELEASE-NOTES.md")
 
 
 def bundle(out, tag, root=HERE.parent):
@@ -603,7 +603,8 @@ def bundle(out, tag, root=HERE.parent):
         name = rel.rsplit("/", 1)[1]
         with open(out / name, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        sums[name] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if name != "RELEASE-NOTES.md":
+            sums[name] = hashlib.sha256(text.encode("utf-8")).hexdigest()
     with open(out / "SHA256SUMS", "w", encoding="utf-8", newline="\n") as f:
         f.write("".join(f"{v}  {k}\n" for k, v in sorted(sums.items())))
     return sums

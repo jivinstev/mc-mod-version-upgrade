@@ -159,20 +159,6 @@ jobs:
             echo "$TAG exists already: a player-install release is never replaced (READMEs name it)"; exit 1
           fi
           python3 tools/player-install.py --bundle dist --tag "$TAG"
-          {
-            echo "**Player install ${TAG#player-install-}**: one command to install a repository's mod, its dependencies and NeoForge into your own Minecraft."
-            echo
-            echo 'macOS / Linux:'
-            echo '```'
-            echo "curl -fsSL https://github.com/${{ github.repository }}/releases/download/$TAG/install.sh | bash -s -- OWNER/REPO"
-            echo '```'
-            echo 'Windows (PowerShell):'
-            echo '```'
-            echo "& ([scriptblock]::Create((irm https://github.com/${{ github.repository }}/releases/download/$TAG/install.ps1))) OWNER/REPO"
-            echo '```'
-            echo
-            echo "Add \`--yes\` to take every default. Built from \`${{ github.sha }}\` by tools/player-install.py --bundle."
-          } > notes.md
           gh release create "$TAG" dist/player-install.zip dist/install.sh dist/install.ps1 dist/SHA256SUMS \
             --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "Player install ${TAG#player-install-}" \
-            --notes-file notes.md --latest=false
+            --notes-file dist/RELEASE-NOTES.md --latest=false
