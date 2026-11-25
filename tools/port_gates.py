@@ -271,6 +271,88 @@ def gate_gradle_args(repo, mc=None):
     return out
 
 
+# A fork's own gate script, declared in a JSON file the fork commits: .port/<mc>/gate-c.json (its Gate C, run by
+# ci-gates.py in place of the built-in client phases, issue #308) and .github/port-release-gate.json (its release gate,
+# issue #306). One validator for both, so the two files take the same rules:
+#   {"schema": 1, "script": "<repo-relative path>.py|.sh", "args": [...], "timeout_minutes": N}  (+ the caller's lists)
+# The script runs as an argv (python3 / bash, never a shell string), so every argument is a literal from a charset with
+# no quote, `$`, `{`, space or newline; the path has no `..`, no `.` and no component starting with `-`.
+GATE_SCRIPT_ARG = re.compile(r"[A-Za-z0-9_.:=/@+-]+")
+GATE_SCRIPT_PATH = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
+GATE_SCRIPT_TIMEOUT = (1, 360, 60)                 # minutes: least, most, default
+GATE_SCRIPT_SHAPE = '{"schema": 1, "script": "<path>.py|.sh", "args": ["..."], "timeout_minutes": N}'
+
+
+def gate_script(text, name, repo=None, lists=("args",), shape=GATE_SCRIPT_SHAPE):
+    """A fork's own gate declaration (`text`, the JSON of the file `name`), validated: {script, timeout_minutes, and
+    each of `lists`} -- `args` defaults to [], any other list (gate-c.json's release_args) to None when absent. A bad
+    file raises Fail naming `name` and what is wrong; it never falls back to a default. `repo` None: the script's
+    existence is not checked (a file read at a git ref)."""
+    def bad(why):
+        return Fail(f"{name}: {why} -- expected {shape}")
+    try:
+        cfg = json.loads(text)
+    except ValueError as e:
+        raise bad(f"not JSON ({e})")
+    if not isinstance(cfg, dict):
+        raise bad("not a JSON object")
+    keys = {"schema", "script", "timeout_minutes", *lists}
+    if set(cfg) - keys:
+        raise bad("unknown key(s) " + ", ".join(sorted(set(cfg) - keys)))
+    if cfg.get("schema") != 1 or isinstance(cfg.get("schema"), bool):
+        raise bad(f"schema must be 1, got {cfg.get('schema')!r}")
+    script = cfg.get("script")
+    if not isinstance(script, str) or not script.endswith((".py", ".sh")):
+        raise bad(f"script must be a .py or .sh file in the repository, got {script!r}")
+    if not GATE_SCRIPT_PATH.fullmatch(script) or any(x in (".", "..") or x.startswith("-") for x in script.split("/")):
+        raise bad(f"script must be a path inside the repository, relative to its root (no '..', no component "
+                  f"starting with '-'), got {script!r}")
+    if repo is not None and not (pathlib.Path(repo) / script).is_file():
+        raise bad(f"script {script}: no such file in the repository")
+    out = {"script": script}
+    for k in lists:
+        if k not in cfg:
+            out[k] = [] if k == "args" else None
+            continue
+        v = cfg[k]
+        if not isinstance(v, list) or len(v) > 32:
+            raise bad(f"{k} must be a list of at most 32 strings")
+        for x in v:
+            if not isinstance(x, str) or len(x) > 200 or not GATE_SCRIPT_ARG.fullmatch(x):
+                raise bad(f"each of {k} must be 1-200 characters of [A-Za-z0-9_.:=/@+-], got {x!r}")
+        out[k] = list(v)
+    lo, hi, default = GATE_SCRIPT_TIMEOUT
+    t = cfg.get("timeout_minutes", default)
+    if not isinstance(t, int) or isinstance(t, bool) or not lo <= t <= hi:
+        raise bad(f"timeout_minutes must be a whole number of minutes from {lo} to {hi}, got {t!r}")
+    out["timeout_minutes"] = t
+    return out
+
+
+# The fork's own Gate C (issue #308): .port/<mc>/gate-c.json, else the nearest lower version's (port_file).
+FORK_GATEC = "gate-c.json"
+FORK_GATEC_SHAPE = ('{"schema": 1, "script": "<path>.py|.sh", "args": ["..."], "release_args": ["..."], '
+                    '"timeout_minutes": N}')
+
+
+def fork_gatec_file(repo, mc=None):
+    """The fork's .port/<mc>/gate-c.json, else the nearest lower version's, or None (port_file)."""
+    return port_file(repo, FORK_GATEC, mc)
+
+
+def fork_gatec(repo, mc=None):
+    """The fork's own Gate C: None without a gate-c.json, else gate_script's dict and `file` (the file used, relative to
+    the git root, where the script is relative to and runs). Fail when the file is bad."""
+    f = fork_gatec_file(repo, mc)
+    if f is None:
+        return None
+    root = port_root(pathlib.Path(repo))
+    rel = f.relative_to(root).as_posix()
+    g = gate_script(f.read_text(encoding="utf-8", errors="replace"), rel, root, ("args", "release_args"),
+                    FORK_GATEC_SHAPE)
+    return dict(g, file=rel)
+
+
 def with_gradle_args(current, extra):
     """PORT_GRADLE_ARGS with `extra` appended after what it already holds (a round's -Dmaven.repo.local stays)."""
     return "\n".join(a for a in [*(current or "").splitlines(), *extra] if a.strip())

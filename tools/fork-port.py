@@ -1842,7 +1842,7 @@ class Run:
         cmd = [self.py, str(ROOT / "tools/ci-gates.py"), "--repo", str(self.repo), "--modid", modid, "--base",
                self.a.base, "--mc", self.t, "--summary", str(summ), "--work-dir", str(self.work / "gates")]
         if self.a.gates == "ab":
-            cmd += ["--gatec", ""]
+            cmd += ["--gatec", "", "--no-fork-gatec"]   # A/B: no real client, the fork's own Gate C neither
         if self.shipped_expected():    # the fork lists what its shipped jar must log
             cmd += ["--shipped"]
         r = self.sh(cmd, self.work / "ci-gates.log")
@@ -1917,7 +1917,7 @@ class Run:
             cmd = [self.py, str(ROOT / "tools/ci-gates.py"), "--repo", str(folder), "--modid", modid, "--base",
                    self.a.base, "--mc", self.t, "--summary", str(summ), "--work-dir", str(self.work / "gates" / m)]
             if self.a.gates == "ab":
-                cmd += ["--gatec", ""]
+                cmd += ["--gatec", "", "--no-fork-gatec"]   # A/B: no real client, the fork's own Gate C neither
             if self.shipped_expected():
                 cmd += ["--shipped"]
             r = self.sh(cmd, log)

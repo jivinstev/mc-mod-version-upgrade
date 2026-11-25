@@ -92,7 +92,10 @@ own commit and writes nothing; the parent branch is read from origin when the lo
    only then);
 2. the full gates are green **including Gate C**, recorded in `.port/<v>/GATES.md` at a commit HEAD contains (not an
    edited tree), with nothing that can change the jar changed since: everything but the records, documents and CI files,
-   and `branch.properties` only by its build keys (a library pin or the freeze does not make it stale);
+   and `branch.properties` only by its build keys (a library pin or the freeze does not make it stale). A fork with a
+   real-client check of its own declares it in `.port/<v>/gate-c.json` (else the nearest lower version's): its script
+   runs in place of the built-in Gate C phases and its `Gate C -- fork's own (...)` row counts the same (a Port CI
+   release's minimal summary says `full only` beside it); README "The fork's own Gate C";
 3. no `STUBS.json` entry is unreviewed;
 4. `.port/<v>/REVIEW.md` is complete for the commit it names: an **independent fresh-context review** with one verdict
    (`ok` / `not-ok`) and a note per row, and a row for each of:

@@ -15,6 +15,14 @@ pipeline did:
   - Gate A: the mixin-config integrity test (every config entry compiled; every port-added mixin listed);
   - Gate B: a headless dedicated server loads the mod and runs the baseline GameTests;
   - Gate C: a real client under Xvfb + Mesa (software GL): reach the title screen, then spawn every entity.
+    A fork with a real-client check of its own declares it in .port/<mc>/gate-c.json (else the nearest lower
+    version's): {"schema": 1, "script": "<path>.sh|.py", "args": [...], "release_args": [...], "timeout_minutes": N}.
+    On the full environment that script runs in place of the built-in phases, whatever --gatec says (it is the
+    fork's gate of record; --no-fork-gatec skips it), once (it owns its retries), as an argv in the fork's checkout,
+    under the timeout, with PORT_GATE_MC, PORT_GATE_MODID, PORT_GATE_SET (release or full: --gatec-set, by default
+    release on a tag or a release = true dispatch, where release_args replace args) and PORT_GATE_REPO; it is the Gate
+    C row (`Gate C -- fork's own (<script>, <set> set)`). The minimal environment records it as `full only`. A bad
+    file fails the run; no file changes nothing.
 The harness is generated OUTSIDE the author's tree (--work-dir, default a temp dir) and wired in with
 --init-script, exactly as during the port. The summary (markdown) lists what ran and what passed, and is
 what the release notes quote. Standard library only.
@@ -563,6 +571,143 @@ def gate_args_rows(port_ci, pu, repo, rows, record):
     print(f"[ci-gates] Port CI: every Gradle call carries {' '.join(extra)} ({rel})", flush=True)
 
 
+# The fork's own Gate C (issue #308): .port/<mc>/gate-c.json, else the nearest lower version's (port_gates.fork_gatec,
+# validated by the validator the release gate's file uses). On the full environment it runs in place of the built-in
+# client phases and is the Gate C row; the minimal environment records FORK_GATEC_FULL_ONLY instead, which
+# tools/fork-branches.py (release_gate_record) and tools/round-audit.py (release_gatec) accept only beside a release's
+# full summary whose fork's own Gate C row is PASS.
+FORK_GATEC_LABEL = "Gate C -- fork's own"
+FORK_GATEC_FULL_ONLY = "full only"
+GATEC_SETS = ("release", "full")
+
+
+def gatec_set(choice="auto", environ=None):
+    """Which argument set a run passes the fork's Gate C script: `release` (its release_args) on a run that can
+    publish a release -- a tag (GITHUB_REF refs/tags/...), or a workflow_dispatch with release = true and no
+    dep_override (read from the event the runner wrote, GITHUB_EVENT_PATH) -- else `full`. --gatec-set release|full
+    says it outright; a local run (no GITHUB_* variables) is `full`. An unreadable event is `full`: more, never less."""
+    if choice in GATEC_SETS:
+        return choice
+    env = os.environ if environ is None else environ
+    if env.get("GITHUB_REF", "").startswith("refs/tags/"):
+        return "release"
+    if env.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and env.get("GITHUB_EVENT_PATH"):
+        try:
+            inputs = json.loads(pathlib.Path(env["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")).get("inputs") or {}
+        except (OSError, ValueError, AttributeError):
+            inputs = {}
+        if isinstance(inputs, dict) and str(inputs.get("release")).lower() == "true" and not inputs.get("dep_override"):
+            return "release"
+    return "full"
+
+
+def fork_gatec_argv(g, set_, bash="bash"):
+    """(argv, which): the script's command line for set_ -- an argv, never a shell string: python3 (this interpreter)
+    for a .py, bash for a .sh, then the script and its arguments -- release_args on the release set when the file has
+    them, else args -- and which of the two it took."""
+    which = "release_args" if set_ == "release" and g.get("release_args") is not None else "args"
+    return [sys.executable if g["script"].endswith(".py") else bash, g["script"], *g[which]], which
+
+
+def fork_gatec_label(g, set_):
+    return f"{FORK_GATEC_LABEL} (`{g['script']}`, {set_} set)"
+
+
+def _stop_group(p):
+    """Stop a timed-out script and what it started (a client): its process group on POSIX (it runs in a session of its
+    own), the process tree on Windows."""
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(p.pid, 15)
+        else:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
+        p.wait(timeout=30)
+    except Exception:  # noqa: BLE001 -- best effort; the next lines make sure
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(p.pid, 9)
+            p.kill()
+            p.wait(timeout=30)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def run_fork_gatec(argv, cwd, env, log, timeout_s):
+    """Run the fork's Gate C script ONCE -- it owns its retry policy (a flaky check retried inside it) -- in `cwd`, its
+    output in `log` (a file, never a pipe a client it started could hold open), under `timeout_s` seconds. -> (exit
+    code, or None when it ran out of time and was stopped; seconds)."""
+    import time
+    t0 = time.monotonic()
+    with open(log, "w", encoding="utf-8") as out:
+        p = subprocess.Popen([str(x) for x in argv], cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=out,
+                             stderr=subprocess.STDOUT, start_new_session=hasattr(os, "killpg"))
+        try:
+            rc = p.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            _stop_group(p)
+            rc = None
+    return rc, time.monotonic() - t0
+
+
+def fork_gatec_row(g, set_, which, rc, secs, log_text, gatec_arg, timeout_s):
+    """(label, passed, detail) of the fork's Gate C run: the row names the script, the set and the arguments, says it is
+    the fork's declared gate of record run whatever --gatec says, and on a failure quotes the last output lines."""
+    took = f"{secs:.0f} s" if secs < 120 else f"{secs / 60:.1f} min"
+    cmd = " ".join([g["script"], *g[which]])
+    how = f"`{cmd}` ({which}" + (", the file has no release_args" if set_ == "release" and which == "args" else "") + ")"
+    decl = (f"declared in `{g['file']}`, the fork's gate of record: run in place of the built-in client phases "
+            f"(--gatec `{gatec_arg or 'none'}` does not skip it)")
+    tail = [ln.strip() for ln in log_text.splitlines() if ln.strip()][-6:]
+    last = "; last output: " + " / ".join(tail)[-500:] if tail else "; no output"
+    if rc == 0:
+        detail = f"{how} exited 0 in {took}; {decl}"
+    elif rc is None:
+        detail = f"{how} did not finish in {timeout_s / 60:g} min (timeout_minutes) and was stopped{last}; {decl}"
+    else:
+        detail = f"{how} exited {rc} after {took}{last}; {decl}"
+    return fork_gatec_label(g, set_), rc == 0, detail.replace("|", "/")[:1200]
+
+
+def fork_gatec_full_only_row(g):
+    """The minimal environment's row: the fork's Gate C does not run there; the full environment's summary holds it."""
+    return (f"| {FORK_GATEC_LABEL} (`{g['script']}`) | {FORK_GATEC_FULL_ONLY} | declared in `{g['file']}`: it runs on "
+            "the full environment only, whose summary holds its verdict |")
+
+
+def fork_gatec_step(fork, a, ok, pu, repo, work, rows, record, timeout_s=None):
+    """The fork's own Gate C in a gate run (after Gate B): nothing without a gate-c.json (fork None); on the full
+    environment its script, run once with PORT_GATE_MC / PORT_GATE_MODID / PORT_GATE_SET / PORT_GATE_REPO, recorded as
+    the Gate C row (`not run` after an earlier failure); on the minimal one the FORK_GATEC_FULL_ONLY row; nothing with
+    --no-fork-gatec. a: the parsed arguments (env, gatec, gatec_set, no_fork_gatec, modid). timeout_s: the file's
+    timeout_minutes unless a test gives seconds."""
+    if fork is None:
+        return
+    if a.no_fork_gatec:
+        print(f"[ci-gates] Gate C: the fork's own ({fork['file']}) not run (--no-fork-gatec)", flush=True)
+        return
+    if a.env != "full":
+        rows.append(fork_gatec_full_only_row(fork))
+        print(f"[ci-gates] Gate C: the fork's own ({fork['file']}) runs on the full environment only", flush=True)
+        return
+    set_ = gatec_set(a.gatec_set)
+    if not ok:
+        rows.append(f"| {fork_gatec_label(fork, set_)} | not run | an earlier gate failed |")
+        return
+    argv, which = fork_gatec_argv(fork, set_, pu.BASH)
+    root = pu.port_root(repo)
+    genv = dict(os.environ, PORT_GATE_MC=pu.port_mc(repo) or "", PORT_GATE_MODID=a.modid, PORT_GATE_SET=set_,
+                PORT_GATE_REPO=str(root))
+    limit = timeout_s if timeout_s is not None else fork["timeout_minutes"] * 60
+    log = pathlib.Path(work) / "gate-c-fork.log"
+    print(f"[ci-gates] Gate C: the fork's own ({fork['file']}, {set_} set): {' '.join(argv[1:])} "
+          f"(timeout {limit / 60:g} min)", flush=True)
+    rc, secs = run_fork_gatec(argv, root, genv, log, limit)
+    text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+    if rc != 0:
+        print(text[-6000:], flush=True)
+    record(*fork_gatec_row(fork, set_, which, rc, secs, text, a.gatec, limit))
+
+
 def harness_base_of(bprops):
     """The gate harness's base for a version branch's branch.properties (PORT_BRANCH_BASE): `harness_base`, else
     base_minecraft_version, else 1.21.1 (#262)."""
@@ -611,6 +756,233 @@ def multimod_check():
             if not good:
                 ok = False
                 print(f"ci-gates self-check FAIL [multi-mod --repo <folder>]: {what}: {got!r}")
+    return ok
+
+
+FORK_GATEC_SH = """#!/usr/bin/env bash
+printf '%s\\n' "$PORT_GATE_MC $PORT_GATE_MODID $PORT_GATE_SET" > "$PORT_GATE_REPO/ran-env.txt"
+printf '%s\\n' "$*" > "$PORT_GATE_REPO/ran-args.txt"
+pwd > "$PORT_GATE_REPO/ran-in.txt"
+echo "rig film one: ok"
+if [ "$1" = fail ]; then echo "rig film two: failed twice, FLAKY counts as a failure"; exit 1; fi
+if [ "$1" = sleep ]; then sleep 60 & echo $! > "$PORT_GATE_REPO/child.pid"; wait; fi
+exit 0
+"""
+
+
+def fork_gatec_check():
+    """The fork's own Gate C (issue #308) on fixture forks of both kinds: the file read for the version gated, else the
+    nearest lower one's (never a higher one's); a passing script is a PASS Gate C row, a failing one a FAIL row (its
+    last output quoted) and a red run; release_args on the release set (else args), the set chosen from the run's
+    event; the minimal environment and --no-fork-gatec never run it; an earlier failure leaves it `not run`; the timeout
+    stops it and what it started; every bad file refused, by name; no file, nothing."""
+    import time
+    pu = _load("port_gates_fg", "port_gates.py")
+    ok, why = True, []
+
+    def want(name, good, got=None):
+        nonlocal ok
+        if not good:
+            ok = False
+            why.append(f"{name}: {got!r}")
+
+    def fails(fn, needle):
+        try:
+            fn()
+            return f"accepted: {fn()!r}"
+        except pu.Fail as e:
+            return None if needle in str(e) else str(e)
+
+    def args(env="full", gatec="none", gatec_set="auto", no_fork_gatec=False):
+        return types.SimpleNamespace(env=env, gatec=gatec, gatec_set=gatec_set, no_fork_gatec=no_fork_gatec,
+                                     modid="examplemod")
+    saved = {k: os.environ.pop(k, None) for k in ("PORT_BRANCH_MC", "GITHUB_REF", "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH")}
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d).resolve()
+            sv = d / "sv"                                  # a single-version fork (P2: the single-version route)
+            (sv / "tools/gate").mkdir(parents=True)
+            (sv / "gradle.properties").write_text("mod_id=examplemod\nminecraft_version=1.21.4\n", encoding="utf-8")
+            with open(sv / "tools/gate/rig.sh", "w", encoding="utf-8", newline="\n") as f_:
+                f_.write(FORK_GATEC_SH)
+            (sv / "tools/gate/rig.py").write_text("import os, sys\nopen(os.path.join(os.environ['PORT_GATE_REPO'], "
+                                                  "'ran-py.txt'), 'w', encoding='utf-8').write(' '.join(sys.argv[1:]))\n",
+                                                  encoding="utf-8")
+            work = d / "work"
+            work.mkdir()
+
+            def put(v, cfg):
+                (sv / ".port" / v).mkdir(parents=True, exist_ok=True)
+                (sv / ".port" / v / "gate-c.json").write_text(cfg if isinstance(cfg, str) else json.dumps(cfg),
+                                                              encoding="utf-8")
+
+            def step(a_, ok_=True, timeout_s=None):
+                rows, rec = [], []
+                for f in ("ran-env.txt", "ran-args.txt", "ran-in.txt", "ran-py.txt", "child.pid"):
+                    (sv / f).unlink(missing_ok=True)
+
+                def record(name, passed, detail):
+                    rec.append(passed)
+                    rows.append(f"| {name} | {'PASS' if passed else 'FAIL'} | {detail} |")
+                fork_gatec_step(pu.fork_gatec(sv), a_, ok_, pu, sv, work, rows, record, timeout_s)
+                return rows, rec
+            read = lambda f: (sv / f).read_text(encoding="utf-8").strip() if (sv / f).is_file() else None
+            # no file: nothing, on either environment
+            want("no file: None", pu.fork_gatec(sv) is None and pu.fork_gatec_file(sv) is None, pu.fork_gatec(sv))
+            want("no file: no row, no run", step(args()) == ([], []) and step(args("minimal")) == ([], []), step(args()))
+            # a passing script: the Gate C row, PASS, run in the checkout with the env, the full set's args
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["all", "--films=8"],
+                           "release_args": ["smoke"], "timeout_minutes": 60})
+            rows, rec = step(args())
+            want("pass: one PASS row", rec == [True] and len(rows) == 1 and rows[0].startswith(
+                "| Gate C -- fork's own (`tools/gate/rig.sh`, full set) | PASS | `tools/gate/rig.sh all --films=8` (args) "
+                "exited 0 in "), rows)
+            want("pass: the row says it is the gate of record --gatec does not skip", "the fork's gate of record" in rows[0]
+                 and "--gatec `none` does not skip it" in rows[0] and "`.port/1.21.4/gate-c.json`" in rows[0], rows)
+            want("pass: the env", read("ran-env.txt") == "1.21.4 examplemod full", read("ran-env.txt"))
+            want("pass: the args, an argv", read("ran-args.txt") == "all --films=8", read("ran-args.txt"))
+            ran = read("ran-in.txt") or ""
+            win = lambda x: re.sub(r"^/([A-Za-z])/", lambda m_: m_.group(1) + ":/", x) if os.name == "nt" else x
+            want("pass: run in the checkout", bool(ran) and pathlib.Path(win(ran)).resolve() == sv, ran)
+            want("pass: its log kept", "rig film one: ok" in (work / "gate-c-fork.log").read_text(encoding="utf-8"), "")
+            # the release set: release_args; with none in the file, args
+            rows, rec = step(args(gatec_set="release"))
+            want("release: release_args", read("ran-args.txt") == "smoke" and read("ran-env.txt") == "1.21.4 examplemod release"
+                 and "(`tools/gate/rig.sh`, release set) | PASS | `tools/gate/rig.sh smoke` (release_args)" in rows[0], rows)
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["all"]})
+            rows, rec = step(args(gatec_set="release"))
+            want("release, no release_args: args", read("ran-args.txt") == "all" and rec == [True]
+                 and "(args, the file has no release_args)" in rows[0], rows)
+            # which set: the run's event
+            ev = d / "event.json"
+            for name, env, set_ in (
+                    ("a local run", {}, "full"),
+                    ("a tag push", {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/tags/examplemod-1.0-mc1.21.4"}, "release"),
+                    ("a branch push", {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/neoforge-1.21.4"}, "full"),
+                    ("a pull request", {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/3/merge"}, "full"),
+                    ("release = true", {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/x",
+                                        "GITHUB_EVENT_PATH": str(ev), "_ev": {"inputs": {"release": "true"}}}, "release"),
+                    ("release = true (a boolean)", {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_EVENT_PATH": str(ev),
+                                                    "_ev": {"inputs": {"release": True}}}, "release"),
+                    ("release = false", {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_EVENT_PATH": str(ev),
+                                         "_ev": {"inputs": {"release": "false"}}}, "full"),
+                    ("a dep_override run (never releases)", {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_EVENT_PATH": str(ev),
+                                                             "_ev": {"inputs": {"release": "true", "dep_override": "o/l@t/l.jar=g:a:1"}}}, "full"),
+                    ("an unreadable event", {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_EVENT_PATH": str(d / "none.json")}, "full")):
+                if "_ev" in env:
+                    ev.write_text(json.dumps(env.pop("_ev")), encoding="utf-8")
+                want(f"set: {name}", gatec_set("auto", env) == set_, gatec_set("auto", env))
+            want("set: said outright", gatec_set("full", {"GITHUB_REF": "refs/tags/x"}) == "full"
+                 and gatec_set("release", {}) == "release", "")
+            # a failing script: FAIL, the last lines quoted, a red run
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["fail"]})
+            rows, rec = step(args())
+            want("fail: a FAIL row with the last lines", rec == [False] and "| FAIL | `tools/gate/rig.sh fail` (args) exited 1"
+                 in rows[0] and "last output: rig film one: ok / rig film two: failed twice, FLAKY counts as a failure"
+                 in rows[0], rows)
+            # an earlier gate failed: not run
+            rows, rec = step(args(), ok_=False)
+            want("earlier failure: not run", rec == [] and read("ran-args.txt") is None and rows == [
+                "| Gate C -- fork's own (`tools/gate/rig.sh`, full set) | not run | an earlier gate failed |"], rows)
+            # the minimal environment: never run, the `full only` row
+            rows, rec = step(args("minimal"))
+            want("minimal: not run, `full only`", rec == [] and read("ran-args.txt") is None and rows == [
+                "| Gate C -- fork's own (`tools/gate/rig.sh`) | full only | declared in `.port/1.21.4/gate-c.json`: it runs "
+                "on the full environment only, whose summary holds its verdict |"], rows)
+            want("--no-fork-gatec: nothing", step(args(no_fork_gatec=True)) == ([], []) and read("ran-args.txt") is None, "")
+            # a .py script runs with this interpreter
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.py", "args": ["a=1", "b"]})
+            rows, rec = step(args())
+            want(".py: python", rec == [True] and read("ran-py.txt") == "a=1 b", (rows, read("ran-py.txt")))
+            # the timeout stops the script and the process it started
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["sleep"], "timeout_minutes": 1})
+            t0 = time.monotonic()
+            rows, rec = step(args(), timeout_s=2)
+            took = time.monotonic() - t0
+            want("timeout: stopped, FAIL", rec == [False] and took < 45 and "did not finish in" in rows[0]
+                 and "was stopped; last output: rig film one: ok" in rows[0], (took, rows))
+            pid = read("child.pid")
+            if pid and hasattr(os, "killpg"):
+                alive = True
+                for _ in range(50):
+                    try:
+                        os.kill(int(pid), 0)
+                    except OSError:
+                        alive = False
+                        break
+                    time.sleep(0.1)
+                want("timeout: the process it started is stopped too", not alive, pid)
+            # nearest-lower inheritance: a version with no file of its own takes the nearest LOWER version's
+            (sv / ".port/1.21.4/gate-c.json").unlink()
+            put("1.21.1", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["low"]})
+            put("1.21.3", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["nearer"]})
+            put("1.21.5", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["higher"]})
+            g = pu.fork_gatec(sv)
+            want("inherit: the nearest lower", g and g["file"] == ".port/1.21.3/gate-c.json" and g["args"] == ["nearer"], g)
+            rows, rec = step(args())
+            want("inherit: run, the row names the file", read("ran-args.txt") == "nearer" and "`.port/1.21.3/gate-c.json`"
+                 in rows[0], rows)
+            want("inherit: never a higher version's", (pu.fork_gatec(sv, "1.21.2") or {}).get("args") == ["low"]
+                 and pu.fork_gatec(sv, "1.20.1") is None, pu.fork_gatec(sv, "1.20.1"))
+            # a version branch: .port/<PORT_BRANCH_MC>/ (gradle.properties names the base)
+            os.environ["PORT_BRANCH_MC"] = "1.21.5"
+            try:
+                rows, rec = step(args())
+                want("version branch: its own version's file and PORT_GATE_MC", read("ran-args.txt") == "higher"
+                     and read("ran-env.txt") == "1.21.5 examplemod full", (read("ran-args.txt"), read("ran-env.txt")))
+            finally:
+                del os.environ["PORT_BRANCH_MC"]
+            # every bad file refused, naming the file, never a fallback
+            good = {"schema": 1, "script": "tools/gate/rig.sh", "args": ["x"]}
+            (sv / "tools/gate/notes.txt").write_text("x\n", encoding="utf-8")
+            (sv / "tools/gate/dir.sh").mkdir()
+            for case, cfg, says in (
+                    ("not JSON", "{schema: 1", "not JSON"), ("not an object", "[]", "not a JSON object"),
+                    ("unknown key", dict(good, shell="x"), "unknown key(s) shell"),
+                    ("no schema", {"script": "tools/gate/rig.sh"}, "schema must be 1"),
+                    ("schema 2", dict(good, schema=2), "schema must be 1"),
+                    ("schema true", dict(good, schema=True), "schema must be 1"),
+                    ("no script", {"schema": 1}, "script must be a .py or .sh"),
+                    ("script .txt", dict(good, script="tools/gate/notes.txt"), "script must be a .py or .sh"),
+                    ("script outside (..)", dict(good, script="../rig.sh"), "inside the repository"),
+                    ("script ../ inside", dict(good, script="tools/../tools/gate/rig.sh"), "inside the repository"),
+                    ("script absolute", dict(good, script="/tmp/rig.sh"), "inside the repository"),
+                    ("script ./", dict(good, script="./tools/gate/rig.sh"), "inside the repository"),
+                    ("script with a space", dict(good, script="tools/gate/my rig.sh"), "inside the repository"),
+                    ("script an option", dict(good, script="-c.sh"), "starting with '-'"),
+                    ("script missing", dict(good, script="tools/gate/none.sh"), "no such file"),
+                    ("script a folder", dict(good, script="tools/gate/dir.sh"), "no such file"),
+                    ("args a string", dict(good, args="all"), "args must be a list"),
+                    ("args too many", dict(good, args=["x"] * 33), "args must be a list"),
+                    ("arg a number", dict(good, args=[150]), "each of args"),
+                    ("arg empty", dict(good, args=[""]), "each of args"),
+                    ("arg a space", dict(good, args=["a b"]), "each of args"),
+                    ("arg a $", dict(good, args=["$HOME"]), "each of args"),
+                    ("arg an expression", dict(good, args=["${{ github.token }}"]), "each of args"),
+                    ("arg a quote", dict(good, args=["a'b"]), "each of args"),
+                    ("arg a semicolon", dict(good, args=["a;b"]), "each of args"),
+                    ("arg a newline", dict(good, args=["a\nb"]), "each of args"),
+                    ("arg too long", dict(good, args=["a" * 201]), "each of args"),
+                    ("release_args a string", dict(good, release_args="smoke"), "release_args must be a list"),
+                    ("release_arg a $", dict(good, release_args=["$X"]), "each of release_args"),
+                    ("timeout 0", dict(good, timeout_minutes=0), "timeout_minutes must be"),
+                    ("timeout over the cap", dict(good, timeout_minutes=361), "timeout_minutes must be"),
+                    ("timeout a string", dict(good, timeout_minutes="60"), "timeout_minutes must be"),
+                    ("timeout a float", dict(good, timeout_minutes=1.5), "timeout_minutes must be"),
+                    ("timeout true", dict(good, timeout_minutes=True), "timeout_minutes must be")):
+                put("1.21.3", cfg)
+                bad = fails(lambda: pu.fork_gatec(sv), says)
+                bad = bad or fails(lambda: pu.fork_gatec(sv), ".port/1.21.3/gate-c.json: ")
+                want(f"refused: {case}", bad is None, bad)
+            put("1.21.3", dict(good, timeout_minutes=360))
+            want("the cap is allowed, the default is 60", pu.fork_gatec(sv)["timeout_minutes"] == 360 and
+                 pu.gate_script(json.dumps(good), "x", sv)["timeout_minutes"] == 60, pu.fork_gatec(sv))
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+    for w in why:
+        print(f"ci-gates self-check FAIL [fork's own Gate C]: {w}")
     return ok
 
 
@@ -801,6 +1173,7 @@ def self_check():
         tier.write_text("class InfTier implements Tier {\n  public int getUses() { return 512; }\n}\n", encoding="utf-8")
         ok &= zero_uses_row(r, d) is None
     ok &= multimod_check()
+    ok &= fork_gatec_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -811,7 +1184,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", default="."); ap.add_argument("--modid", required=True)
     ap.add_argument("--base", help="the author's ref (mixins they left unlisted stay exempt from Gate A)")
-    ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet", help="Gate C phases; '' or 'none' skips Gate C")
+    ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet",
+                    help="Gate C phases; '' or 'none' skips the built-in Gate C. A fork's own Gate C (.port/<mc>/gate-c.json) "
+                         "runs on the full environment in place of these phases whatever this says (--no-fork-gatec)")
+    ap.add_argument("--gatec-set", choices=("auto", "release", "full"), default="auto",
+                    help="the fork's own Gate C: release runs its release_args (else args), full its args; auto (default): "
+                         "release on a tag or a release = true dispatch (GITHUB_REF / GITHUB_EVENT_PATH), else full")
+    ap.add_argument("--no-fork-gatec", action="store_true",
+                    help="do not run the fork's own Gate C (tools/fork-port.py's A/B tier: no real client at all)")
     ap.add_argument("--summary", default="ci-gates-summary.md"); ap.add_argument("--work-dir")
     ap.add_argument("--skip-author-build", action="store_true")
     ap.add_argument("--env", choices=("full", "minimal"), default="full",
@@ -875,6 +1255,15 @@ def main():
         print(f"[ci-gates] {name}: {'PASS' if passed else 'FAIL'} -- {detail}", flush=True)
 
     gate_args_rows(a.port_ci, pu, repo, rows, record)
+    fork = None              # the fork's own Gate C: a bad file fails the run before anything is built, never ignored
+    gf = pu.fork_gatec_file(repo)
+    if gf is not None:
+        try:
+            fork = pu.fork_gatec(repo)
+        except pu.Fail as e:
+            record(f"{FORK_GATEC_LABEL} (`{gf.relative_to(pu.port_root(repo)).as_posix()}`)", False,
+                   str(e).replace("|", "/")[:600])
+    use_fork = fork is not None and a.env == "full" and not a.no_fork_gatec
     excluded, ex, arts = {}, [], []
     if a.env == "minimal":
         env0 = dict(os.environ, **pu.gate_env(c))
@@ -978,6 +1367,8 @@ def main():
     env = dict(os.environ, **pu.gate_env(c))
     library = is_library(repo, bv)
     phases, skipped = library_phases([q for q in a.gatec.split(",") if q and q != "none"], library)
+    if use_fork:             # the fork's own Gate C stands in for the built-in client phases (below, after Gate B)
+        phases, skipped = [], []
     for q in skipped:
         rows.append(f"| Gate C -- real client, `{q}` | skipped | a library: no entity of its own to spawn; proven by a "
                     + ("dependent's Gate C against this jar (tools/fork-branches.py library-record) |" if bv else
@@ -1027,6 +1418,7 @@ def main():
                 record("Data loads -- the server rejected none of the mod's data files", not bad,
                        f"{len(bad)} rejected, e.g. {bad[0]}" if bad else "no rejection logged")
         record(label, r.returncode == 0, detail)
+    fork_gatec_step(fork, a, ok, pu, repo, work, rows, record)
     exempt_rows(rows, pu, repo, a.modid)
 
     if a.shipped:

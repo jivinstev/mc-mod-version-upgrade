@@ -804,30 +804,37 @@ TESTED_AS = re.compile(r"tested as (\w+) \((\w+) run (\d+)\), the same tree")
 def release_gatec(F, rel):
     """(bad rows, read, problem or None) of the release's gate summary assets: none, or one not downloadable, is a
     problem. Each summary needs at least one Gate C row PASS; a `skipped` row is accepted only on a library (ci-gates
-    skips a library's spawn-type phases)."""
-    bad, read, names = [], 0, []
+    skips a library's spawn-type phases). The fork's own Gate C (ci-gates.py, .port/<mc>/gate-c.json) is the full
+    summary's `Gate C -- fork's own` row; the minimal summary's `full only` row counts as its PASS only when a summary
+    of the same release has that row PASS."""
+    bad, read, names, texts = [], 0, [], []
     for a in sorted(rel.get("assets") or [], key=lambda a: a.get("name") or ""):
         if not re.fullmatch(r"gates-[\w-]+\.md", a.get("name") or ""):
             continue
         names.append(a["name"])
         try:
-            text = gh_raw(a["url"]).decode("utf-8", "replace")
+            texts.append((a["name"], gh_raw(a["url"]).decode("utf-8", "replace")))
         except Exception as e:                   # noqa: BLE001 -- unreadable evidence: said as such
             return bad, read, f"{a['name']} could not be downloaded ({type(e).__name__})"
         read += 1
+    cells = lambda text: [c for c in ([x.strip() for x in ln.strip().strip("|").split("|")] for ln in text.splitlines())
+                          if len(c) >= 2 and c[0].startswith("Gate C")]
+    fork_c = any(c[0].startswith("Gate C -- fork's own") and c[1] == "PASS" for _n, t_ in texts for c in cells(t_))
+    for name, text in texts:
         rows = passed = 0
-        for line in text.splitlines():
-            c = [x.strip() for x in line.strip().strip("|").split("|")]
-            if len(c) >= 2 and c[0].startswith("Gate C"):
-                rows += 1
-                passed += c[1] == "PASS"
-                if c[1] not in (("PASS", "skipped") if F.library else ("PASS",)):
-                    bad.append(f"{a['name']}: {c[0]} {c[1]}" + (" (skipped is accepted on a library only)"
-                                                                if c[1] == "skipped" else ""))
+        for c in cells(text):
+            rows += 1
+            if fork_c and c[0].startswith("Gate C -- fork's own") and c[1] == "full only":
+                passed += 1
+                continue
+            passed += c[1] == "PASS"
+            if c[1] not in (("PASS", "skipped") if F.library else ("PASS",)):
+                bad.append(f"{name}: {c[0]} {c[1]}" + (" (skipped is accepted on a library only)"
+                                                       if c[1] == "skipped" else ""))
         if not rows:
-            bad.append(f"{a['name']}: no Gate C row")
+            bad.append(f"{name}: no Gate C row")
         elif not passed:
-            bad.append(f"{a['name']}: no Gate C row PASS")
+            bad.append(f"{name}: no Gate C row PASS")
     if not names:
         return bad, read, "the release has no gate summary (gates-*.md)"
     return bad, read, None
@@ -1505,6 +1512,22 @@ def self_check(cases_arg=None):
                and gatec_phases("# python3 ci-gates.py --gatec launch\nrun: python3 ci-gates.py --base x\n") == []
                and gatec_phases("run: python3 ci-gates.py \\\n  --gatec launch,battle\n") == ["battle", "launch"],
                "gatec_phases: phases from the ci-gates command; none, an expression, a comment are no Gate C")
+        # the fork's own Gate C (ci-gates.py, .port/<mc>/gate-c.json): PASS on full, `full only` on minimal -- the
+        # minimal summary stands only beside a full one whose fork's own Gate C is PASS
+        own_full = "| Gate C -- fork's own (`tools/gate/rig.sh`, release set) | {} | exited 0 |\n"
+        own_min = "| Gate C -- fork's own (`tools/gate/rig.sh`) | full only | runs on the full environment only |\n"
+        sums = {}
+        RAW = lambda url, accept: sums[url.rsplit("/", 1)[1]].encode("utf-8")
+        rel_ = {"assets": [{"name": n, "url": f"https://api.github.com/repos/o/r/releases/assets/1/{n}"}
+                           for n in ("gates-full.md", "gates-minimal.md")]}
+        for case, full_, min_, ok_ in (("fork's own PASS + full only", own_full.format("PASS"), own_min, True),
+                                       ("fork's own FAIL + full only", own_full.format("FAIL"), own_min, False),
+                                       ("built-in PASS + full only (no fork's own PASS)",
+                                        "| Gate C -- real client, `launch` | PASS | ok |\n", own_min, False)):
+            sums.update({"gates-full.md": full_, "gates-minimal.md": min_})
+            bad_, read_, prob_ = release_gatec(type("F", (), {"library": False})(), rel_)
+            expect((not bad_ and read_ == 2 and prob_ is None) == ok_, f"release_gatec: {case}: {bad_} {prob_}")
+        RAW = None
         fx = Fixture(tmp / "base")
         API, RAW = fx.api, fx.raw
         base_rep, rc = fx.run()
