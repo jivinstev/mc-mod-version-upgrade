@@ -64,6 +64,8 @@ INVENTORY-CHECK.json equal to a fresh check; no dependency built against a libra
 development-only checkout jar; for a library (library=true) at least one dependent recorded as Gate C green against
 this library's jar (DEPENDENTS.json, `library-record`). A record naming a LAYER commit (a migrated target) counts when
 .port/<t>/MIGRATED.json maps that commit to a prepared-tree digest equal to the branch's own.
+A version branch of a repository of SEVERAL MODS (mod_dirs) needs the green Gate C per mod: .port/<t>/<mod>/GATES.md
+(or that mod's own `<mod>-<digit>...-mc<t>` pre-release), every mod, none red (.port/<t>/<mod>/GATES-RED.md).
 A SINGLE-VERSION fork (#161 U5, C2) has the same list in .port/<mc>/, judged by `check-done --base REF` against the
 review base REVIEW.md records (the commit its change started from) instead of a parent branch: every file that differs
 from the base is a row (no rows, parent or library record apply there), the base's behaviour inventory is the one to
@@ -234,9 +236,52 @@ def rec_dir(root, t):
 def checkout_version(root):
     """The Minecraft version of a version branch checked out (or exported) at `root`: gradle.properties'
     minecraft_version when .port/<it>/branch.properties exists there; else None (the port branch, a single-version fork,
-    a layer branch)."""
+    a layer branch). A repository of SEVERAL MODS (mod_dirs: no build at the root) names its version in each mod
+    folder's gradle.properties: the one they all name."""
     mc = parse_props(read_file(pathlib.Path(root) / "gradle.properties")).get("minecraft_version")
+    if not mc:
+        by = {m: parse_props(read_file(pathlib.Path(root) / m / "gradle.properties")).get("minecraft_version")
+              for m in mod_dirs(root)}
+        mcs = set(by.values())
+        if len(mcs) > 1 and any((rec_dir(root, x) / BRANCH_PROPS).is_file() for x in mcs if x):
+            raise SystemExit(f"{root}: the mod folders name different Minecraft versions in their gradle.properties ("
+                             + ", ".join(f"{m}: {x or 'none'}" for m, x in sorted(by.items()))
+                             + "): a version branch builds every mod for its one version; set minecraft_version alike")
+        mc = mcs.pop() if len(mcs) == 1 else None
     return mc if mc and (rec_dir(root, mc) / BRANCH_PROPS).is_file() else None
+
+
+MOD_ID_LINE = re.compile(r"(?m)^\s*mod_id\s*[=:]\s*\S")
+
+
+def mod_dirs(root, ref=None):
+    """A repository of SEVERAL SEPARATE MODS (issue #274): its top-level folders whose own gradle.properties names a
+    mod_id, sorted -- [] when the root gradle.properties names one (the one-mod layout every tool assumes) or no folder
+    does. tools/fork-kind.py's mod_dirs rule; read from git at `ref` when given (`root` a clone), else from the tree at
+    `root` (a checkout, or an export the done check judges)."""
+    root = pathlib.Path(root)
+    if ref:
+        def text(rel):
+            r = git(root, "show", f"{ref}:{rel}")
+            return r.stdout if r.returncode == 0 else ""
+        tops = git(root, "ls-tree", "-d", "--name-only", ref).stdout.split()
+    else:
+        def text(rel):
+            return read_file(root / rel)
+        tops = [x.name for x in root.iterdir() if x.is_dir()] if root.is_dir() else []
+    if MOD_ID_LINE.search(text("gradle.properties")):
+        return []
+    return sorted(t for t in tops if not t.startswith(".") and MOD_ID_LINE.search(text(f"{t}/gradle.properties")))
+
+
+def mod_records(root, t):
+    """[(mod folder, its records dir .port/<t>/<mod>/)] of version t's tree at `root` when it is a version branch of a
+    repository of several mods; [] otherwise (a one-mod version branch, a single-version fork: their records stay in
+    .port/<t>/). Each mod's gate records (GATES.md, GATES-RED.md) live in its own dir; the other records are the
+    version's."""
+    if not (rec_dir(root, t) / BRANCH_PROPS).is_file():
+        return []
+    return [(m, rec_dir(root, t) / m) for m in mod_dirs(root)]
 
 
 def info(root, t):
@@ -1242,6 +1287,11 @@ def gate_text_problems(text, t, what="GATES.md", tag_version=False):
     return m.group(1).split()[0], []
 
 
+def mod_tag(name, tag):
+    """Is `tag` one of mod `name`'s releases: `<name>-<digit>...` (tools/port-publish.py mod_tag, the same rule)?"""
+    return re.match(re.escape(name) + r"-[0-9]", tag or "") is not None
+
+
 GATE_ASSET = re.compile(r"gates-[\w.+-]+\.md")
 RELEASES = {}            # slug -> the release list, read once per process (release_gate_record)
 
@@ -1257,11 +1307,13 @@ def gh_read(url, accept="application/vnd.github+json"):
         return r.read()
 
 
-def release_gate_record(repo, root, t, ref, work, files, read=None):
+def release_gate_record(repo, root, t, ref, work, files, read=None, mod=None):
     """The gate record of a Port CI pre-release: the newest release of this fork for Minecraft t that carries gate
     summaries (gates-<env>.md assets, attached by the release job from the run that built its jars), every one green
     with Gate C, for a commit this branch carries with nothing jar-relevant changed since. The release is built from
     the commit the gates certified, so no commit records it in the branch (no second commit after a PR's merge).
+    mod: one mod of several -- only its own releases, `<mod>-<digit>...` (Port CI's per-mod tags; tools/port-publish.py
+    mod_tag's rule, never a bare prefix: mod `a` must not take mod `a-b`'s release).
     -> (commit, where) or (None, why)."""
     read = read or gh_read
     slug = origin_slug(repo)
@@ -1275,9 +1327,9 @@ def release_gate_record(repo, root, t, ref, work, files, read=None):
     except (OSError, ValueError) as e:
         return None, f"the releases of {slug} could not be read ({str(e)[:120]})"
     rx = re.compile(rf"-mc{re.escape(t)}(?:-r\d+)?$")
-    rels = sorted((r for r in rels if rx.search(r.get("tag_name") or "")),
+    rels = sorted((r for r in rels if rx.search(r.get("tag_name") or "") and (not mod or mod_tag(mod, r.get("tag_name")))),
                   key=lambda r: r.get("published_at") or r.get("created_at") or "", reverse=True)
-    why = f"no release of {slug} for {t} carries gate summaries"
+    why = f"no {mod + ' ' if mod else ''}release of {slug} for {t} carries gate summaries"
     for r in rels:
         assets = [a for a in r.get("assets") or [] if GATE_ASSET.fullmatch(a.get("name") or "")]
         if not assets:
@@ -1314,17 +1366,32 @@ def release_gate_record(repo, root, t, ref, work, files, read=None):
 def gate_record(repo, root, t, ref, work, files):
     """(commit, problems): the Gate C record version t's done check accepts -- .port/<t>/GATES.md certifying a commit
     this branch carries with nothing jar-relevant changed since (a local full run), else a Port CI pre-release's gate
-    summaries for such a commit (release_gate_record). A red local run (GATES-RED.md) counts against both."""
-    if (rec_dir(root, t) / "GATES-RED.md").is_file():
-        return None, ["the last full gate run was red (GATES-RED.md); GATES.md's older green record does not count until a full "
-                      "run is green again"]
-    c, probs = gate_text_problems(read_file(rec_dir(root, t) / "GATES.md"), t)
+    summaries for such a commit (release_gate_record). A red local run (GATES-RED.md) counts against both.
+    A version branch of a repository of SEVERAL MODS (mod_records): every mod's own record, .port/<t>/<mod>/GATES.md
+    (or that mod's `<mod>-*-mc<t>` pre-release); a mod with none, or a red one, fails the version."""
+    per = mod_records(root, t)
+    if per:
+        commits, probs = [], []
+        for m, d in per:
+            c, p = one_gate_record(repo, root, t, ref, work, files, d, f"{m}/", m)
+            commits.append(c)
+            probs += [f"mod {m}: {x}" for x in p]
+        return (None if probs else commits[0]), probs
+    return one_gate_record(repo, root, t, ref, work, files, rec_dir(root, t))
+
+
+def one_gate_record(repo, root, t, ref, work, files, d, label="", mod=None):
+    """gate_record for the records in `d` (label: how the problems name them; mod: only that mod's releases count)."""
+    if (d / "GATES-RED.md").is_file():
+        return None, [f"the last full gate run was red ({label}GATES-RED.md); {label}GATES.md's older green record does not "
+                      "count until a full run is green again"]
+    c, probs = gate_text_problems(read_file(d / "GATES.md"), t, f"{label}GATES.md")
     if not probs:
         good, why = commit_current(repo, root, t, c, ref, work, "gates", files)
         if good:
             return c, []
-        probs = [f"GATES.md {why}"]
-    rc, where = release_gate_record(repo, root, t, ref, work, files)
+        probs = [f"{label}GATES.md {why}"]
+    rc, where = release_gate_record(repo, root, t, ref, work, files, mod=mod)
     if rc:
         return rc, []
     return None, [f"{probs[0]}; and no release record either: {where}"]

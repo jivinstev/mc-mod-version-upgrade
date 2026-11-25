@@ -2683,7 +2683,18 @@ def gates_green(path, at, v, overlay=False):
 
 
 def built_jars(co):
-    return [j for j in (pathlib.Path(co) / "build/libs").glob("*.jar") if not j.name.endswith("-sources.jar")]
+    """The jars a build left in checkout co: build/libs, and each mod folder's <mod>/build/libs in a repository of
+    several mods (fork-branches.py mod_dirs; none in the one-mod layout, so a one-mod fork reads build/libs alone)."""
+    co = pathlib.Path(co)
+    libs = [co / "build/libs"] + [co / m / "build/libs" for m in mod("fb").mod_dirs(co)]
+    return [j for d_ in libs for j in sorted(d_.glob("*.jar")) if not j.name.endswith("-sources.jar")]
+
+
+def gate_records(d, v):
+    """[(label, records dir)] whose GATES.md / GATES-RED.md judge version v's checkout d: one per mod in a version
+    branch of several mods (.port/<v>/<mod>/, fork-branches.py mod_records), else .port/<v>/ alone."""
+    recs = mod("fb").mod_records(d, v)
+    return [(f".port/{v}/{m}", r) for m, r in recs] or [(f".port/{v}", pathlib.Path(d) / ".port" / v)]
 
 
 def gate_run_cmd(d, v, stage, frozen, *extra, gates="full"):
@@ -2732,11 +2743,12 @@ def t_gates(st, it, log):
                 "gated_head": gated, "gated_at": at, "head_after": head(d), "ci_record": True}
         with full_gate_lock(it["id"], say_to(log)) as lk:
             sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"]), log, ok=(0, 18), hold=lk)
-        if (pathlib.Path(d) / ".port" / v / "GATES-RED.md").is_file():
-            raise StepError(f".port/{v}/GATES-RED.md: the full run is not green")
-        why = gates_green(pathlib.Path(d) / ".port" / v / "GATES.md", gated, v)
-        if why:
-            raise StepError(f".port/{v}/GATES.md: {why}")
+        for label, rd in gate_records(d, v):
+            if (rd / "GATES-RED.md").is_file():
+                raise StepError(f"{label}/GATES-RED.md: the full run is not green")
+            why = gates_green(rd / "GATES.md", gated, v)
+            if why:
+                raise StepError(f"{label}/GATES.md: {why}")
         c = commit_paths(d, [f".port/{v}"], f"Gate records for {v} (keep-current round)")
         return "full gates green" + (f", records {pre[:12]} before" if pre else "") + (f", records {c[:12]}" if c else ""), {"gated_head": gated, "gated_at": at,
                                                                             "head_after": head(d)}
@@ -2773,15 +2785,20 @@ def t_gates(st, it, log):
             sh(st, it, cmd, log, hold=lk)
     c = None
     if single:                 # #161 U5 (C2): the full run is the version's GATES.md, as on a version branch
-        rec, summ = pathlib.Path(d) / ".port" / v, pathlib.Path(d) / "build/round-gates-full.md"
-        if not summ.is_file():
-            raise StepError("ci-gates.py --env full wrote no build/round-gates-full.md: no record of the full run")
-        rec.mkdir(parents=True, exist_ok=True)
-        (rec / "GATES.md").write_text(summ.read_text(encoding="utf-8"), encoding="utf-8")
-        why = gates_green(rec / "GATES.md", gated, v)
-        if why:
-            raise StepError(f".port/{v}/GATES.md: {why}")
-        c = commit_paths(d, [f".port/{v}/GATES.md"], f"Gate record for {v} (keep-current round)")
+        # a repository of several mods (one Port CI workflow each): each mod's full run is .port/<v>/<name>/GATES.md
+        recs = []
+        for name, _ in port_ci_wfs(d) or [("", PORT_CI_WF)]:
+            rel = f".port/{v}/{name}/GATES.md" if name else f".port/{v}/GATES.md"
+            summ = pathlib.Path(d) / "build" / (f"round-gates-{name}-full.md" if name else "round-gates-full.md")
+            if not summ.is_file():
+                raise StepError(f"ci-gates.py --env full wrote no build/{summ.name}: no record of the full run")
+            (pathlib.Path(d) / rel).parent.mkdir(parents=True, exist_ok=True)
+            (pathlib.Path(d) / rel).write_text(summ.read_text(encoding="utf-8"), encoding="utf-8")
+            why = gates_green(pathlib.Path(d) / rel, gated, v)
+            if why:
+                raise StepError(f"{rel}: {why}")
+            recs.append(rel)
+        c = commit_paths(d, recs, f"Gate record for {v} (keep-current round)")
     return "ci-gates full and minimal green" + (f", GATES.md {c[:12]}" if c else ""), {
         "gated_head": gated, "gated_at": at, "head_after": head(d)}
 
@@ -2923,13 +2940,16 @@ def t_depgate(st, it, log):
             # other build on this machine (fork-port's, round's) cannot overwrite the candidate mid-run
             r = sh(st, it, gate_run_cmd(work, v, "setup", st.data["frozen"], "--port-checkout", f"{it['fork']}={lco}",
                                         "--allow-undone-library"), log, ok=range(0, 256), hold=lk, env=private_env(m2))
-        for f in ("GATES.md", "GATES-RED.md", "RESIDUE.md", "DEPS.md"):
-            q_ = work / ".port" / v / f
-            if q_.is_file():
-                shutil.copy2(q_, evid / f)
-        why = ("GATES-RED.md" if (work / ".port" / v / "GATES-RED.md").is_file()
-               else f"fork-port exit {r.returncode}" if r.returncode not in (0, 18)
-               else gates_green(work / ".port" / v / "GATES.md", wt_head, v, overlay=True))
+        recs = gate_records(work, v)
+        vdir = work / ".port" / v
+        for rd, f in [(vdir, f) for f in ("GATES.md", "GATES-RED.md", "RESIDUE.md", "DEPS.md")] + [
+                (rd, f) for _, rd in recs if rd != vdir for f in ("GATES.md", "GATES-RED.md")]:
+            if (rd / f).is_file():          # a mod's records as <mod>-GATES.md beside the version's own
+                shutil.copy2(rd / f, evid / (f if rd == vdir else f"{rd.name}-{f}"))
+        why = (f"fork-port exit {r.returncode}" if r.returncode not in (0, 18) else None)
+        for label, rd in recs:
+            why = why or (f"{label}/GATES-RED.md" if (rd / "GATES-RED.md").is_file()
+                          else gates_green(rd / "GATES.md", wt_head, v, overlay=True))
         if why:
             raise StepError(f"{it['extra']['dependent']} {v}: Gate C against {it['fork']}'s candidate jar is NOT green "
                             f"({why}; evidence in {evid}): a blocking finding on the library version, which does not merge")
@@ -5869,6 +5889,47 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
     return not bad
 
 
+def self_check_mod_records(expect):
+    """A version branch of SEVERAL MODS (#274 B): its built jars are each mod folder's, its gate records each mod's
+    .port/<v>/<mod>/ (a red mod fails the version), and mod folders naming different versions are refused by name; a
+    one-mod tree's jars and records are build/libs and .port/<v>/ as before."""
+    fb = mod("fb")
+    with tempfile.TemporaryDirectory() as td:
+        d, v = pathlib.Path(td) / "multi", "1.21.10"
+        for m_ in ("zeta", "alpha"):
+            (d / m_ / "build/libs").mkdir(parents=True)
+            (d / m_ / "gradle.properties").write_text(f"mod_id=example{m_}\nminecraft_version={v}\n", encoding="utf-8")
+            for j_ in (f"example{m_}-1.0.jar", f"example{m_}-1.0-sources.jar"):
+                (d / m_ / "build/libs" / j_).write_text("x", encoding="utf-8")
+        (d / "shared").mkdir()
+        (d / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2G\n", encoding="utf-8")
+        (d / ".port" / v).mkdir(parents=True)
+        (d / ".port" / v / fb.BRANCH_PROPS).write_text("java=21\n", encoding="utf-8")
+        expect(sorted(j.name for j in built_jars(d)) == ["examplealpha-1.0.jar", "examplezeta-1.0.jar"],
+               f"several mods: each mod folder's jars, not its sources jar: {[j.name for j in built_jars(d)]}")
+        got = [(lb, r.relative_to(d).as_posix()) for lb, r in gate_records(d, v)]
+        expect(got == [(f".port/{v}/alpha", f".port/{v}/alpha"), (f".port/{v}/zeta", f".port/{v}/zeta")],
+               f"several mods: each mod's gate records in its own dir: {got}")
+        expect(fb.checkout_version(d) == v, "several mods: the version the mod folders all name")
+        (d / "zeta" / "gradle.properties").write_text("mod_id=examplezeta\nminecraft_version=1.21.11\n", encoding="utf-8")
+        try:
+            fb.checkout_version(d)
+            msg = ""
+        except SystemExit as e:
+            msg = str(e)
+        expect("alpha: 1.21.10" in msg and "zeta: 1.21.11" in msg,
+               f"several mods naming different versions: refused, naming each folder's: {msg!r}")
+        one = pathlib.Path(td) / "one"
+        (one / "build/libs").mkdir(parents=True)
+        (one / "gradle.properties").write_text(f"mod_id=examplemod\nminecraft_version={v}\n", encoding="utf-8")
+        (one / "build/libs/examplemod-1.0.jar").write_text("x", encoding="utf-8")
+        (one / ".port" / v).mkdir(parents=True)
+        (one / ".port" / v / fb.BRANCH_PROPS).write_text("java=21\n", encoding="utf-8")
+        expect([j.name for j in built_jars(one)] == ["examplemod-1.0.jar"]
+               and [(lb, r.resolve()) for lb, r in gate_records(one, v)] == [(f".port/{v}", (one / ".port" / v).resolve())],
+               "one mod: build/libs and .port/<v>/ as before")
+
+
 def self_check_multimod(expect):
     """A repository of SEVERAL MODS (#274): its Port CI workflows are one per mod (port_ci_wfs), the gate of record
     only when every one carries the ci_record inputs, and its version's release dispatches each mod's workflow and
@@ -6151,6 +6212,7 @@ def self_check():
         return rc, "\n".join(buf)
     self_check_bump(expect)
     self_check_multimod(expect)
+    self_check_mod_records(expect)
     # a version branch's gate run fixes nothing (weekly round 2026-10-21: a gate re-run with the default budget started
     # the file loop and rewrote unrelated files); the single-version route's commands (sv_gate_cmds) are not this one
     gc_ = [str(x) for x in gate_run_cmd("co", "1.21.4", "measure", "frozen.json", "--allow-undone-library")]

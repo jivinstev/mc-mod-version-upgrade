@@ -51,6 +51,11 @@ Stages, each logged as one line and skipped with a reason when it does not apply
   gates    ci-gates.py --mc <t>: none = skip; ab = author build, Gate A, Gate B; full = + Gate C phases. After a green run, the
            mod's own log files (harness/run/logs, minus vanilla's) are compared with the parent version's last gate run: a file
            it wrote there and not here is residue (exit 11) -- a subsystem stopped running (CATALOG X47)
+  (several mods) a repository of SEVERAL MODS (fork-branches.py mod_dirs: no mod_id at the root, top-level folders
+           whose gradle.properties names one) runs measure, audit and gates once per mod folder -- Gradle from the folder
+           through the nearest gradlew, ci-gates.py --repo <folder> with its mod_id -- and keeps each mod's GATES.md /
+           GATES-RED.md in .port/<t>/<mod>/; the version is green only when every mod is; the compile loop and the cost
+           stage do not run per mod (a compile error stops at the spend guard; cost is skipped)
   cost     port-cost.py --target <t> appended to .port/<t>/COST.md: the requests that worked on <t>, from where its last
            record ended (no record: all of them on this machine), plus the loop workers' own recorded dollars when the
            loop ran
@@ -367,10 +372,13 @@ def mc_key(v):
 RED_GATES = "GATES-RED.md"       # a full gate run that was not green, kept apart from the last green GATES.md
 
 
-def gates_auto(tdir):
+def gates_auto(tdir, mods=()):
     """`--gates auto`: "full" until targets/<t>/GATES.md records a green Gate C (a PASS row naming Gate C, no FAIL row),
     then "ab". Every Minecraft version a fork supports gets one real-client run on its initial port. A red full run on
-    record (GATES-RED.md) means "full" again, whatever GATES.md says."""
+    record (GATES-RED.md) means "full" again, whatever GATES.md says. A repository of several mods (mods: their
+    folders): "full" until every mod's own .port/<t>/<mod>/GATES.md records one."""
+    if mods:
+        return "full" if any(gates_auto(tdir / m) == "full" for m in mods) else "ab"
     if (tdir / RED_GATES).is_file():
         return "full"
     g = tdir / "GATES.md"
@@ -1377,6 +1385,13 @@ def spend_guard(errors, budget, max_errors=None, confirm=False):
             f"range of earlier hops is 76-144)")
 
 
+def folder_modid(folder):
+    """The mod_id a mod folder's own gradle.properties names (one mod of a repository of several), else None."""
+    f = pathlib.Path(folder) / "gradle.properties"
+    m = re.search(r"(?m)^\s*mod_id\s*[=:]\s*(\S+)", f.read_text(encoding="utf-8", errors="replace")) if f.is_file() else None
+    return m.group(1) if m else None
+
+
 def parse_modid(toml_text):
     m = re.search(r'(?s)\[\[mods\]\].*?modId\s*=\s*"([^"]+)"', toml_text)
     return m.group(1) if m else None
@@ -1711,22 +1726,32 @@ class Run:
                             "development only, against a --port-checkout: the same command with --allow-undone-library "
                             f"(recorded in DEPS.md; {self.t} is then not done until it is re-resolved with --port-release)"]}
 
-    def s_measure(self):
-        ss = load("srcsets", "srcsets.py")
-        tasks = ss.compile_tasks(self.repo)
-        log = self.work / "measure.log"
-        self.work.mkdir(parents=True, exist_ok=True)
-        self.gradle(tasks, log)
+    def mods(self):
+        """The mod folders of a repository of several mods (fork-branches.py mod_dirs), [] for one mod at the root."""
+        return self.fb.mod_dirs(self.repo)
+
+    def measure_one(self, tasks, log, full, cwd=None):
+        """Compile `tasks` (in mod folder cwd, else the root) into log; -> count(log)."""
+        self.gradle(tasks, log, cwd=cwd)
         capped = capped_tasks(pathlib.Path(log).read_text(encoding="utf-8", errors="replace"))
         if capped:
             # the capped compile is not a count (tools/maxerrs.init.gradle): re-run the same javac uncapped and append
             # it to the same log, as tools/port_gates.py compile_log() does (measured: a 26.3 hop stopped here)
-            full = self.work / "measure.full.log"
-            self.gradle(["portFullErrors", "-PportFullErrorsTasks=" + ",".join(capped)], full)
+            self.gradle(["portFullErrors", "-PportFullErrorsTasks=" + ",".join(capped)], full, cwd=cwd)
             with open(log, "a", encoding="utf-8") as fh:
                 fh.write("\n" + RECOUNT_MARK + "\n")
                 fh.write(full.read_text(encoding="utf-8", errors="replace"))
-        n, why = self.count(log)
+        return self.count(log)
+
+    def s_measure(self):
+        ss = load("srcsets", "srcsets.py")
+        mods = self.mods()
+        if mods:
+            return self.measure_mods(ss, mods)
+        tasks = ss.compile_tasks(self.repo)
+        log = self.work / "measure.log"
+        self.work.mkdir(parents=True, exist_ok=True)
+        n, why = self.measure_one(tasks, log, self.work / "measure.full.log")
         if n is None:
             return {"stop": "the compile does not count: " + why, "code": 10, "errors": None, "detail": [why],
                     "choices": ["read build/mc%s/fork-port/measure.log; fix what keeps javac from attributing" % self.t]}
@@ -1734,6 +1759,29 @@ class Run:
         if gap:
             self.say("measure", gap)
         return {"done": f"{n} error(s) across {len(tasks)} compile task(s) (starting count)", "errors": n, "log": str(log), "this_run": True}
+
+    def measure_mods(self, ss, mods):
+        """s_measure for a repository of several mods: each mod folder compiled on its own, through the nearest
+        gradlew (tools/port_gates.py gradlew_cmd), into measure-<mod>.log; the count is their sum, and measure.log
+        holds every mod's log one after another (what the spend guard's error lines read)."""
+        self.work.mkdir(parents=True, exist_ok=True)
+        total, parts, n_tasks, texts = 0, [], 0, []
+        for m in mods:
+            tasks = ss.compile_tasks(self.repo / m)
+            log = self.work / f"measure-{m}.log"
+            n, why = self.measure_one(tasks, log, self.work / f"measure-{m}.full.log", cwd=self.repo / m)
+            if n is None:
+                return {"stop": f"the compile of {m} does not count: " + why, "code": 10, "errors": None, "detail": [why],
+                        "choices": [f"read build/mc{self.t}/fork-port/measure-{m}.log; fix what keeps javac from attributing"]}
+            total += n; n_tasks += len(tasks); parts.append(f"{m} {n}")
+            texts.append(f"==== {m} ====\n" + log.read_text(encoding="utf-8", errors="replace"))
+        log = self.work / "measure.log"
+        log.write_text("\n".join(texts), encoding="utf-8")
+        gap = self.shared_gap()
+        if gap:
+            self.say("measure", gap)
+        return {"done": f"{total} error(s) across {n_tasks} compile task(s) in {len(mods)} mods ({', '.join(parts)}) "
+                        "(starting count)", "errors": total, "log": str(log), "this_run": True}
 
     def error_view(self, log):
         cs = load("compile_summary", "compile-summary.py")
@@ -1766,6 +1814,8 @@ class Run:
                 "choices": [f"resume from measure: {self.resume_cmd('measure')}"]}
 
     def modid(self):
+        if self.mods():
+            return None             # several mods: each mod folder's own mod_id (folder_modid)
         if self.a.modid:
             return self.a.modid
         f = self.repo / "src/main/resources/META-INF/neoforge.mods.toml"
@@ -1777,6 +1827,9 @@ class Run:
         n = self.compile_errors()
         if n != 0:
             return self.not_compiled(n, "gates")
+        mods = self.mods()
+        if mods:
+            return self.gates_mods(mods)
         modid = self.modid()
         if not modid:
             return {"stop": "cannot read the mod id from neoforge.mods.toml (pass --modid)", "code": 2, "choices": ["--modid ID"]}
@@ -1847,14 +1900,82 @@ class Run:
                 "choices": ["run the same gates without --mc as the control: a red that is red on the base is not this target's",
                             "read build/mc%s/fork-port/ci-gates.log and the gate's own log" % self.t]}
 
-    def record_red(self, summ, failed):
-        """Write the red full gate run to GATES-RED.md: the commit tested, when, and its summary (or the failed rows)."""
+    def gates_mods(self, mods):
+        """s_gates for a repository of several mods: ci-gates.py once per mod folder (--repo <folder>, that folder's
+        mod_id; Gradle through the nearest gradlew, the version's .port/<t>/ read at the git root), each mod's records in
+        .port/<t>/<mod>/ (GATES.md for a green full run, GATES-RED.md for a red one). The version is green only when
+        every mod is; a red mod never stops the others from being gated."""
+        shutil.rmtree(self.work / "gates", ignore_errors=True)
+        failed, n_passed, recorded, red = [], 0, [], []
+        for m in mods:
+            folder, mdir = self.repo / m, self.tdir / m
+            modid = folder_modid(folder)
+            if not modid:
+                return {"stop": f"{m}/gradle.properties names no mod_id", "code": 2, "choices": [f"add mod_id to {m}/gradle.properties"]}
+            summ, log = self.work / f"ci-gates-summary-{m}.md", self.work / f"ci-gates-{m}.log"
+            summ.unlink(missing_ok=True)
+            cmd = [self.py, str(ROOT / "tools/ci-gates.py"), "--repo", str(folder), "--modid", modid, "--base",
+                   self.a.base, "--mc", self.t, "--summary", str(summ), "--work-dir", str(self.work / "gates" / m)]
+            if self.a.gates == "ab":
+                cmd += ["--gatec", ""]
+            if self.shipped_expected():
+                cmd += ["--shipped"]
+            r = self.sh(cmd, log)
+            lines = log.read_text(encoding="utf-8", errors="replace").splitlines() if log.is_file() else []
+            rows = [re.sub(r"^\[ci-gates\] ", "", l) for l in lines if l.startswith("[ci-gates]") and ": " in l]
+            bad = [l for l in rows if re.search(r": FAIL\b", l)]
+            n_passed += sum(1 for l in rows if re.search(r": PASS\b", l))
+            if r.returncode == 0:
+                lost, prev = self.lost_logs(m)
+                bad = [f"log file {f} written on {prev}, absent on {self.t}" for f in lost]
+                if not bad and self.a.gates == "full" and summ.is_file():
+                    mdir.mkdir(parents=True, exist_ok=True)
+                    (mdir / "GATES.md").write_text(summ.read_text(encoding="utf-8"), encoding="utf-8")
+                    (mdir / RED_GATES).unlink(missing_ok=True)
+                    recorded.append(m)
+            if r.returncode != 0 or bad:
+                if self.a.gates == "full":
+                    self.record_red(summ if r.returncode != 0 else pathlib.Path(), bad, mdir)
+                red.append(m)
+                failed += [f"{m}: {l}" for l in bad] or [f"{m}: ci-gates.py exit {r.returncode} (read {log})"]
+        if not red:
+            note = f"; recorded in .port/{self.t}/<mod>/GATES.md for {', '.join(recorded)}" if recorded else ""
+            open_ = unreviewed_stubs(self.tdir)
+            if open_:
+                detail = [stub_line(e) for e in open_]
+                return {"stop": f"{n_passed} gate(s) green in {len(mods)} mods{note}, but {len(open_)} unreviewed stub "
+                                "signal(s) in STUBS.json", "code": 10, "detail": detail, "view": detail,
+                        "choices": ["port each flagged method to the new signature, or, when the change is right, set its "
+                                    "\"reviewed\" in targets/<t>/STUBS.json to why; then resume with --from-stage loop"]}
+            return {"done": f"{n_passed} gate(s) green ({self.a.gates}) in {len(mods)} mods ({', '.join(mods)}){note}"}
+        code = 12 if any("Gate C" in l for l in failed) else 11
+        linux = sys.platform.startswith("linux")
+        env = environmental_stop(failed, code, self.resume_cmd("gates"),
+                                 load("gl", "gate-loop.py").mem_available_mb() if linux else None,
+                                 memory_holders() if linux else None)
+        if env:
+            return env
+        evidence = []
+        for l in failed[:2]:
+            lp = re.search(r"see (\S+?)(?:[;)\s]|$)", l)
+            lp = pathlib.Path(lp.group(1)) if lp else None
+            if lp and lp.is_file():
+                evidence += [f"{l.split(':')[0][:40]}: {e}" for e in gate_evidence(lp.read_text(encoding="utf-8", errors="replace"))]
+        return {"stop": f"{len(red)} of {len(mods)} mods red ({', '.join(red)}): " + "; ".join(l[:90] for l in failed[:2]),
+                "code": code, "gates": [l[:200] for l in failed], "detail": [l[:200] for l in failed[:4]] + [e[:240] for e in evidence],
+                "choices": ["run the same mod's gates without --mc as the control: a red that is red on the base is not this target's",
+                            f"read build/mc{self.t}/fork-port/ci-gates-<mod>.log and the gate's own log"]}
+
+    def record_red(self, summ, failed, tdir=None):
+        """Write the red full gate run to GATES-RED.md (in tdir: one mod's .port/<t>/<mod>/, else .port/<t>/): the commit
+        tested, when, and its summary (or the failed rows)."""
+        tdir = tdir or self.tdir
         head = _git(self.repo, "rev-parse", "--short", "HEAD")[1].strip() or "?"
         when = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
         body = summ.read_text(encoding="utf-8", errors="replace") if summ.is_file() else \
             "".join(f"- {l}\n" for l in failed) or "- (no gate rows: read the run's ci-gates.log)\n"
-        self.tdir.mkdir(parents=True, exist_ok=True)
-        (self.tdir / RED_GATES).write_text(
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / RED_GATES).write_text(
             f"Red full gate run at `{head}` for Minecraft {self.t} ({when}). GATES.md, the last green record, is kept as it "
             "was; while this file is here the target is not done and `--gates auto` runs the full gates. A green full run "
             "deletes it.\n\n" + body, encoding="utf-8")
@@ -1862,7 +1983,7 @@ class Run:
     def s_cost(self):
         modid = self.modid()
         if not modid:
-            return {"skipped": "no mod id"}
+            return {"skipped": "several mods: port-cost.py takes one mod id" if self.mods() else "no mod id"}
         f = self.tdir / "COST.md"
         old = f.read_text(encoding="utf-8") if f.is_file() else ""
         # port-cost charges each request to one target by what it touched, so the window need not be this run's: it
@@ -1881,11 +2002,16 @@ class Run:
     def props(self):
         return self.fb.info(self.repo, self.t)
 
-    def gradle(self, tasks, log):
+    def gradlew(self, cwd=None):
+        """The start of a Gradle call: the root's `gradlew`, or for a mod folder (cwd) the nearest wrapper up to the git
+        root (tools/port_gates.py gradlew_cmd), run from that folder."""
+        return [BASH, "gradlew"] if cwd is None else load("port_gates_fp", "port_gates.py").gradlew_cmd(cwd)
+
+    def gradle(self, tasks, log, cwd=None):
         init = [str(x) for x in ("--init-script", ROOT / "tools/maxerrs.init.gradle",
                                  "--init-script", ROOT / "tools/central-mirror.init.gradle")]
-        return self.sh([BASH, "gradlew", *tasks, "--continue", "--console=plain", *init, "-Dorg.gradle.jvmargs=-Xmx6g",
-                        *gradle_args(self.env)], log)
+        return self.sh([*self.gradlew(cwd), *tasks, "--continue", "--console=plain", *init, "-Dorg.gradle.jvmargs=-Xmx6g",
+                        *gradle_args(self.env)], log, cwd=cwd)
 
     def artifacts(self, root=None, mc=None):
         """(merged jars, sources jars) the build staged: ModDevGradle's build/moddev/artifacts, else NeoGradle's
@@ -2115,6 +2241,9 @@ class Run:
                                     "to why the change is right; then resume with --from-stage loop"]}
             return {"skipped": "already at 0 errors", "errors": 0}
         why = spend_guard(start, self.a.budget, self.a.max_errors, self.a.confirm_spend)
+        if not why and self.mods():
+            why = ("the compile loop (file-loop.py) works on one mod's tree, and this repository has several "
+                   f"({', '.join(self.mods())}): fix the errors by hand in each mod folder")
         if why:
             errs = compile_error_lines(self.work / "measure.log", self.repo)
             return {"stop": "spend guard: " + why, "code": 10, "errors": start, "this_run": True,
@@ -2160,30 +2289,46 @@ class Run:
         n = self.compile_errors()
         if n != 0:
             return self.not_compiled(n, "audit")
+        mods = self.mods()
+        if not mods:
+            return self.audit_in(None)
+        done, warnings = [], []
+        for m in mods:          # several mods: each folder audited against its own staged jar and classpath
+            res = self.audit_in(self.repo / m)
+            if res.get("stop"):
+                return dict(res, stop=f"{m}: {res['stop']}")
+            done.append(f"{m}: {res['done']}")
+            warnings += [f"{m}: {w}" for w in res.get("warnings", [])]
+        return dict({"done": "; ".join(done)[:400]}, **({"warnings": warnings} if warnings else {}))
+
+    def audit_in(self, folder):
+        """The audit of the root's tree (folder None), or of one mod folder of several."""
+        base = folder or self.repo
+        arts = (self.artifacts(folder) if folder else self.artifacts())[1]
         neo = self.props().get("prop.neo_version", "")
-        jars = [j for j in self.artifacts()[1] if neo in j.name] or self.artifacts()[1]
+        jars = [j for j in arts if neo in j.name] or arts
         if not jars:
             return {"stop": "no staged sources jar to audit against", "code": 13, "choices": ["stage Minecraft first"]}
-        prepared = self.repo / "src/main/java"
-        r = self.sh([self.py, str(ROOT / "tools/audit-mixin-targets.py"), str(self.repo), str(jars[0]), f"--sources={prepared}"])
+        prepared = base / "src/main/java"
+        r = self.sh([self.py, str(ROOT / "tools/audit-mixin-targets.py"), str(base), str(jars[0]), f"--sources={prepared}"])
         lines = (r.stdout or "").strip().splitlines()
         if r.returncode == 0:
             if self.props().get("strip_onlyin") == "true":
-                hits = client_refs_in_common(self.repo, prepared)
+                hits = client_refs_in_common(base, prepared)
                 if hits:
                     return {"stop": f"{len(hits)} client lookup(s) in common classes will crash a dedicated server once "
                                     "@OnlyIn is stripped (CATALOG M52)", "code": 13, "audit": hits, "detail": hits[:6],
                             "choices": ["call <mv_package>.ClientRefs.player()/level(), or move the lookup into a client-only class"]}
-            ev = self.audit_event_listeners()
+            ev = self.audit_event_listeners(folder) if folder else self.audit_event_listeners()
             if ev.get("stop"):
                 return ev
             done = {"done": ((lines[-1] if lines else "all targets match")[:120] + "; " + ev["done"])[:200]}
-            zero = zero_use_tiers(self.repo)
+            zero = zero_use_tiers(base)
             if zero:          # report only (CATALOG 177): a warning in the stage line and the summary, never a stop
                 done["warnings"] = [f"0-use tier (CATALOG 177: breaks on its first hit unless it has no durability "
                                     f"components): {h}" for h in zero]
                 done["done"] += f"; WARNING {len(zero)} 0-use tier(s), CATALOG 177: {', '.join(zero[:4])}"
-            handled = zero_use_handled(self.repo)
+            handled = zero_use_handled(base)
             if handled:       # not a warning: the mod removes the durability components itself (verify the items)
                 done["done"] += (f"; {len(handled)} 0-use tier(s) handled by a ModifyDefaultComponentsEvent handler "
                                  f"(verify it covers these items): {', '.join(handled[:2])}")
@@ -2196,15 +2341,16 @@ class Run:
                 "code": 13, "audit": bad, "detail": bad[:6],
                 "choices": ["retarget each mixin on the branch (and on the branches above it by cascade)"]}
 
-    def audit_event_listeners(self):
-        trees = sorted(str(p) for p in self.repo.glob("src/*/java") if p.is_dir())
+    def audit_event_listeners(self, folder=None):
+        base = folder or self.repo
+        trees = sorted(str(p) for p in base.glob("src/*/java") if p.is_dir())
         if not trees:
             return {"stop": "no source tree to audit event listeners in", "code": 13, "choices": ["-"]}
-        cp, why = self.target_classpath()
+        cp, why = self.target_classpath(folder) if folder else self.target_classpath()
         if cp is None:
             return {"stop": "event-listener audit: " + why, "code": 13, "detail": [why],
                     "choices": ["fix the classpath resolution; this audit refuses to run on a guessed one"]}
-        r = self.sh([self.py, str(ROOT / "tools/audit-event-listeners.py"), str(self.repo), f"--cp-file={cp}",
+        r = self.sh([self.py, str(ROOT / "tools/audit-event-listeners.py"), str(base), f"--cp-file={cp}",
                      f"--tree={','.join(trees)}", f"--mc={self.t}"])
         lines = (r.stdout or "").strip().splitlines()
         if r.returncode == 0:
@@ -2216,34 +2362,38 @@ class Run:
         return {"stop": f"{sum('ABSTRACT' in l for l in bad)} event listener(s) name an abstract event", "code": 13,
                 "audit": bad, "detail": bad[:6], "choices": ["port each listener to a concrete subclass of the event (CATALOG X33)"]}
 
-    def target_classpath(self):
+    def target_classpath(self, folder=None):
         """Gradle's own resolved compile classpath of the branch build (tools/qtc-init.gradle), through the branch's
-        plain ./gradlew. Never rebuilt by hand (CATALOG X25b-ii)."""
+        plain ./gradlew (one mod folder of several: from that folder, through the nearest gradlew). Never rebuilt by
+        hand (CATALOG X25b-ii)."""
         self.work.mkdir(parents=True, exist_ok=True)
-        cmd = [BASH, "gradlew", "-I", str(ROOT / "tools/qtc-init.gradle"), "-I", str(ROOT / "tools/central-mirror.init.gradle"),
+        cmd = [*self.gradlew(folder), "-I", str(ROOT / "tools/qtc-init.gradle"), "-I", str(ROOT / "tools/central-mirror.init.gradle"),
                "-q", "qtcClasspath", "--console=plain", *gradle_args(self.env)]
-        r = subprocess.run(cmd, cwd=self.repo, capture_output=True, text=True, encoding="utf-8", errors="replace", env=self.env)
+        r = subprocess.run(cmd, cwd=folder or self.repo, capture_output=True, text=True, encoding="utf-8", errors="replace", env=self.env)
         m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", r.stdout or "", re.S)
         jars = [l.strip() for l in m.group(1).splitlines() if l.strip()] if m else []
         if not jars:
             return None, f"could not resolve the {self.t} classpath: {(r.stdout or '')[-300:]}"
-        cp = self.work / f"qtc-classpath-{self.t}.txt"
+        cp = self.work / (f"qtc-classpath-{self.t}-{folder.name}.txt" if folder else f"qtc-classpath-{self.t}.txt")
         cp.write_text("\n".join(jars) + "\n", encoding="utf-8")
         return cp, ""
 
     def shipped_expected(self):
         return (self.tdir / "shipped-expect.txt").is_file()
 
-    def lost_logs(self):
+    def lost_logs(self, mod=None):
+        """The mod's log files the parent version's last gate run wrote and this one did not (one mod of several: in
+        its own gates/<mod>/ work dir)."""
         pv = self.parent_version()
         if not pv:
             return [], None
-        prev = self.repo / "build" / f"mc{pv}" / "fork-port" / "gates" / "harness" / "run" / "logs"
+        sub = [mod] if mod else []
+        prev = self.repo.joinpath("build", f"mc{pv}", "fork-port", "gates", *sub, "harness", "run", "logs")
         if not prev.is_dir():
             return [], None
         known = self.tdir / "logs-known-absent.txt"
         absent = [l.split("#", 1)[0].strip() for l in known.read_text(encoding="utf-8").splitlines()] if known.is_file() else []
-        return lost_log_files(prev, self.work / "gates" / "harness" / "run" / "logs", [x for x in absent if x]), pv
+        return lost_log_files(prev, self.work.joinpath("gates", *sub, "harness", "run", "logs"), [x for x in absent if x]), pv
 
     def done(self, prepare=False):
         return self.fb.target_done(self.repo, self.t, write=True)
@@ -2469,7 +2619,7 @@ def main():
     run = Run(a)
     os.environ["GRADLE_OPTS"] = run.env["GRADLE_OPTS"]     # the in-process helpers start Gradle too: daemon-less as well
     if a.gates == "auto":
-        a.gates = gates_auto(run.tdir)
+        a.gates = gates_auto(run.tdir, run.mods())
         print(f"fork-port: gates: auto -> {a.gates} ({'Gate C already recorded in GATES.md' if a.gates == 'ab' else 'no recorded Gate C pass yet: one real-client run on the initial port'})")
     cl = load("checkout_lock", "checkout-lock.py")
     lock = cl.CheckoutLock(run.repo, "fork-port.py", a.target)
@@ -2561,7 +2711,7 @@ def drive(run, a, skipped, todo):
         clear_residue(run.tdir, a.target)
     # a version is DONE only after its real-client run: green A/B with no Gate C on record is reported as such, never as done
     no_gates = not partial and a.gates == "none"      # no gates is not done either: the same exit as A/B without Gate C
-    pending_c = not partial and (no_gates or gates_auto(run.tdir) != "ab")
+    pending_c = not partial and (no_gates or gates_auto(run.tdir, run.mods()) != "ab")
     if pending_c:
         run.summary["done"] = False
         run.summary["gate_c"] = "not run"
@@ -3560,8 +3710,169 @@ def self_check():
         expect(seen.get("holder") == str(os.getpid()) and "-Dorg.gradle.daemon=false" in seen["env"].get("GRADLE_OPTS", ""),
                f"a child sees this run as the lock holder, daemon-less: {seen.get('holder')}")
     ok = self_check_freeze() and ok
+    ok = self_check_mods() and ok
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
+
+
+MODS_STUB_GRADLEW = """#!/usr/bin/env bash
+# a stub of the root's Gradle wrapper: records where it ran and with what, writes a fake jar and staged sources jar
+printf '%s|%s\\n' "$(basename "$(pwd)")" "$*" >> "$MMVU_STUB_LOG"
+mkdir -p build/libs build/moddev/artifacts
+: > build/moddev/artifacts/neoforge-21.4.0-sources.jar
+printf 'jar\\n' > "build/libs/$(basename "$(pwd)")-1.0.jar"
+case " $* " in *" qtcClasspath "*) printf 'QTC_CLASSPATH_BEGIN\\n/x/a.jar\\nQTC_CLASSPATH_END\\n' ;; esac
+echo "BUILD SUCCESSFUL"
+"""
+
+
+def self_check_mods():
+    """Issue #274 item B: a version branch of a repository of SEVERAL MODS (two mod folders, a shared folder, one root
+    gradlew -- a stub here, so no Gradle or Minecraft runs) is gated once per mod folder: the compile from each folder
+    through the root wrapper, ci-gates.py with --repo <folder> and that folder's mod_id, each mod's records in
+    .port/<t>/<mod>/, one red mod failing the version (fork-port's exit and the done check's gate record); the one-mod
+    layout is untouched (mod_dirs []), and a single-version repository of several mods is still refused."""
+    import contextlib, io
+    from subprocess import CompletedProcess
+    ok = True
+
+    def expect(c, msg):
+        nonlocal ok
+        if not c:
+            ok = False; print("FAIL (several mods):", msg)
+    fb = fork_branches()
+    pg = load("port_gates_fpck", "port_gates.py")
+    t = "1.21.4"
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d) / "multi"; repo.mkdir()
+        stub_log = pathlib.Path(d) / "gradlew-calls.txt"
+
+        def g(*a):
+            return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout
+
+        def w(rel, text):
+            f = repo / rel; f.parent.mkdir(parents=True, exist_ok=True)
+            with open(f, "w", encoding="utf-8", newline="\n") as fh:      # LF: the stub gradlew is a bash script
+                fh.write(text)
+        g("init", "-q", "-b", "main"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
+        g("config", "core.autocrlf", "false")
+        w(".gitignore", "build/\n"); w("gradlew", MODS_STUB_GRADLEW); w("shared/level.gradle", "// shared\n")
+        for m in ("alpha", "zeta"):
+            w(f"{m}/gradle.properties", f"mod_id=example{m}\nmod_version=0.1.0\nminecraft_version={t}\n")
+            w(f"{m}/settings.gradle", f"rootProject.name = '{m}'\n")
+            w(f"{m}/src/main/java/com/example/{m}/Mod.java", f"package com.example.{m};\npublic class Mod {{}}\n")
+        w(f".port/{t}/branch.properties", f"minecraft_version={t}\nbranch=neoforge-{t}\n")
+        g("add", "-A"); g("commit", "-qm", "two mods"); g("checkout", "-q", "-b", f"neoforge-{t}")
+        expect(fb.mod_dirs(repo) == ["alpha", "zeta"] and fb.mod_dirs(repo, "HEAD") == ["alpha", "zeta"],
+               f"mod_dirs: the two mod folders, not shared/ (tree and git): {fb.mod_dirs(repo)}")
+        expect(fb.checkout_version(repo) == t, f"no root build: the version comes from the mod folders ({fb.checkout_version(repo)})")
+        expect(pg.gradlew_of(repo / "alpha") == (repo / "gradlew").resolve().as_posix(), "a mod folder builds with the root wrapper")
+        calls, real_sh = [], Run.sh
+
+        def fake_sh(self, cmd, log=None, cwd=None):
+            tool = pathlib.Path(str(cmd[1])).name if len(cmd) > 1 else ""
+            if tool == "ci-gates.py":
+                arg = lambda k: cmd[cmd.index(k) + 1]
+                folder = pathlib.Path(arg("--repo"))
+                calls.append(("ci-gates", folder.name, arg("--modid"), "--gatec" in cmd))
+                b = subprocess.run([*pg.gradlew_cmd(folder), "build"], cwd=folder, capture_output=True, text=True,
+                                   encoding="utf-8", env=self.env)      # ci-gates' author build, as port_gates.gradle runs it
+                red = (folder / "RED").is_file()
+                rows = ["[ci-gates] author build: PASS", "[ci-gates] Gate A: PASS",
+                        "[ci-gates] Gate B -- server: " + ("FAIL -- a red mod" if red else "PASS")]
+                full = "--gatec" not in cmd
+                if full and not red:
+                    rows.append("[ci-gates] Gate C -- real client, `launch`: PASS")
+                pathlib.Path(log).parent.mkdir(parents=True, exist_ok=True)
+                pathlib.Path(log).write_text("\n".join(rows) + "\n", encoding="utf-8")
+                head = g("rev-parse", "HEAD").strip()
+                pathlib.Path(arg("--summary")).write_text(
+                    f"Gates at `{head}` for Minecraft {t}\n\n" + "".join(
+                        f"| {r_.split('] ', 1)[1].rsplit(': ', 1)[0]} | {r_.rsplit(': ', 1)[1].split(' ')[0]} | x |\n" for r_ in rows),
+                    encoding="utf-8")
+                return CompletedProcess(cmd, 1 if red or b.returncode else 0, "", "")
+            if tool in ("audit-mixin-targets.py", "audit-event-listeners.py"):
+                calls.append((tool, pathlib.Path(str(cmd[2])).name))
+                return CompletedProcess(cmd, 0, "checked 1 target: all targets match\n", "")
+            return real_sh(self, cmd, log, cwd)
+
+        def fork_port(*argv):
+            old_argv, old_env = sys.argv, os.environ.get("MMVU_STUB_LOG")
+            sys.argv = ["fork-port.py", "--repo", str(repo), "--target", t, "--from-stage", "measure", "--budget", "0",
+                        "--max-errors", "0", *argv]
+            os.environ["MMVU_STUB_LOG"] = str(stub_log)
+            Run.sh = fake_sh
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    rc = main()
+            finally:
+                Run.sh, sys.argv = real_sh, old_argv
+                if old_env is None:
+                    os.environ.pop("MMVU_STUB_LOG", None)
+                else:
+                    os.environ["MMVU_STUB_LOG"] = old_env
+            return rc, buf.getvalue()
+        rc, out = fork_port("--gates", "full")
+        stub = stub_log.read_text(encoding="utf-8").splitlines() if stub_log.is_file() else []
+        tdir = repo / ".port" / t
+        expect(any(x.startswith("alpha|compileJava") for x in stub) and any(x.startswith("zeta|compileJava") for x in stub)
+               and not any(x.startswith("multi|") for x in stub),
+               f"the compile runs the root gradlew from each mod folder, never the root: {stub}")
+        expect(("ci-gates", "alpha", "examplealpha", False) in calls and ("ci-gates", "zeta", "examplezeta", False) in calls,
+               f"ci-gates.py once per mod folder with its own mod_id: {calls}")
+        expect({("audit-mixin-targets.py", "alpha"), ("audit-mixin-targets.py", "zeta")} <= set(calls),
+               f"the audit runs in each mod folder: {calls}")
+        expect(all((repo / m / "build/libs" / f"{m}-1.0.jar").is_file() for m in ("alpha", "zeta")),
+               "each mod's jar lands in its own folder")
+        expect(rc in (0, UNDONE_EXIT) and (tdir / "alpha/GATES.md").is_file() and (tdir / "zeta/GATES.md").is_file()
+               and not (tdir / "GATES.md").exists() and gates_auto(tdir, ["alpha", "zeta"]) == "ab",
+               f"a green full run: exit {rc}, records in .port/{t}/<mod>/GATES.md, none at .port/{t}/GATES.md\n{out[-600:]}")
+        g("add", "-A"); g("commit", "-qm", "gate records")
+        files = fb.root_files(repo, repo, True)
+        expect(fb.gates_problems(repo, repo, t, "HEAD", True, files) == [],
+               f"the done check's gate record: every mod green -> none: {fb.gates_problems(repo, repo, t, 'HEAD', True, files)}")
+        (tdir / "zeta/GATES.md").unlink(); g("add", "-A"); g("commit", "-qm", "zeta's record gone")
+        why = fb.gates_problems(repo, repo, t, "HEAD", True, fb.root_files(repo, repo, True))
+        expect(len(why) == 1 and why[0].startswith("mod zeta: no green Gate C recorded in zeta/GATES.md"),
+               f"a mod with no record fails the version's done check: {why}")
+        expect(gates_auto(tdir, ["alpha", "zeta"]) == "full", "a mod with no Gate C: --gates auto runs full")
+        # one red mod: the version is red (exit 11), the green mod's record written, the red one's GATES-RED.md
+        w("zeta/RED", "x\n")
+        calls.clear()
+        rc, out = fork_port("--gates", "full")
+        expect(rc == 11 and "zeta" in out and (tdir / "alpha/GATES.md").is_file() and (tdir / f"zeta/{RED_GATES}").is_file()
+               and not (tdir / "zeta/GATES.md").exists() and not (tdir / RED_GATES).exists(),
+               f"one red mod: exit {rc} (want 11), zeta/GATES-RED.md, alpha/GATES.md\n{out[-600:]}")
+        why = fb.gates_problems(repo, repo, t, "HEAD", True, fb.root_files(repo, repo, True))
+        expect(any(x.startswith("mod zeta: the last full gate run was red (zeta/GATES-RED.md)") for x in why),
+               f"the red mod's GATES-RED.md fails the done check: {why}")
+        (tdir / f"zeta/{RED_GATES}").unlink()
+        rc, out = fork_port("--gates", "ab")
+        expect(rc == 11 and ("ci-gates", "alpha", "examplealpha", True) in calls and not (tdir / f"zeta/{RED_GATES}").exists(),
+               f"--gates ab with a red mod: exit {rc} (want 11), Gate C off, no red record written\n{out[-400:]}")
+        # the rule's edges: a root mod_id is the one-mod layout; tags are <mod>-<digit>..., never a prefix
+        expect(fb.mod_tag("alpha", "alpha-0.1.0-mc1.21.4") and not fb.mod_tag("alpha", "alpha-b-0.1.0-mc1.21.4"),
+               "a mod's releases are <mod>-<digit>...")
+        w("gradle.properties", f"mod_id=examplemod\nminecraft_version={t}\n")
+        expect(fb.mod_dirs(repo) == [] and fb.mod_records(repo, t) == [], "a root mod_id: one mod, records in .port/<t>/")
+    with tempfile.TemporaryDirectory() as d:       # a single-version repository of several mods: still refused, untouched
+        repo = pathlib.Path(d)
+        for m in ("alpha", "zeta"):
+            (repo / m).mkdir(); (repo / m / "gradle.properties").write_text(f"mod_id=example{m}\nminecraft_version={t}\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        old = sys.argv
+        sys.argv = ["fork-port.py", "--repo", str(repo), "--target", t, "--from-stage", "measure", "--gates", "ab"]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = main()
+        finally:
+            sys.argv = old
+        expect(rc == 2 and "single-version fork" in buf.getvalue() and not (repo / "build").exists()
+               and fb.checkout_version(repo) is None and fb.sv_version(repo, repo) is None,
+               f"single-version, several mods: refused (exit {rc}), nothing written")
+    return ok
 
 
 def self_check_freeze():
