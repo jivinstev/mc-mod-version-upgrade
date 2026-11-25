@@ -507,6 +507,9 @@ def build_queue(frozen, cfg, forks, date):
         for b in f.get("dep_bumps", []) + implied.get(slug, []):
             bumps.setdefault(b["mc"], []).append(b)
         libs = deps_of.get(slug, [])
+        # the fork's own commands after each re-pin (weekly-plan.py install --after-repin), before that re-pin's commit
+        ar = next((c.get("after_repin") for c in cfg.get("forks", []) if c.get("repo") == slug), None)
+        arp = {"after_repin": ar} if ar else {}
         casc = f.get("cascade") or {}
         head_cascade = f.get("head_cascade", True)
         authors_up = bool(f.get("take_authors")) and head_cascade
@@ -553,7 +556,8 @@ def build_queue(frozen, cfg, forks, date):
                     q.add(slug, base, "upstream", extra=dict(up))
                 q.add(slug, base, "authors", extra=up)
             if lib_head:
-                q.add(slug, base, "repin-head", deps=lib_head, extra={"libraries": [lb for lb in libs if (lb, base) in release_of]})
+                q.add(slug, base, "repin-head", deps=lib_head,
+                      extra={"libraries": [lb for lb in libs if (lb, base) in release_of], **arp})
             if at.get(base):
                 q.add(slug, base, "backlog", extra={"fixes": at[base]})
             if single:               # the review starts from A/B; ONE full pass on the reviewed tree (keep-current step 4)
@@ -609,7 +613,8 @@ def build_queue(frozen, cfg, forks, date):
                                                        "decisions_file": authors_up and bool(casc.get("decisions"))})
             rel = [lb for lb in libs if rel_at(lb, v)]
             if rel or bumps.get(v):
-                addv("repin", deps=[release_of[(lb, v)] for lb in rel], extra={"bumps": bumps.get(v, []), "libraries": rel})
+                addv("repin", deps=[release_of[(lb, v)] for lb in rel],
+                     extra={"bumps": bumps.get(v, []), "libraries": rel, **arp})
             # the version directly below works this round: its merge comes up again before anything of v is pushed (a
             # version the round skips is untouched, so v's merge-up from it is final)
             below_works = prev_seg in merge_of and prev_seg == prev
@@ -947,9 +952,9 @@ def sv_library_branches(cfg, forks, items):
             if not (L and L["kind"] == "single" and L["base"] in D["versions"]):
                 continue
             v = L["base"]
-            wf = git(D["dir"], "show", f"origin/neoforge-{v}:{PORT_CI_WF}")
-            pinned = wf.returncode == 0 and any(p["repo"].lower() == lb.lower()
-                                                for p in mod("ld").port_deps(wf.stdout).values())
+            ref = f"origin/neoforge-{v}"         # every Port CI workflow of the branch (one per mod of several)
+            pinned = any(p["repo"].lower() == lb.lower() for _n, path in port_ci_wfs(D["dir"], ref)
+                         for p in mod("ld").port_deps(wf_text(D["dir"], path, ref)).values())
             releases = f"{L['name']}@{v}:release" in ids
             if releases and pinned:
                 return (f"{cf['repo']}'s version branch neoforge-{v} pins {lb}, a single-version library that releases "
@@ -1540,7 +1545,8 @@ FIX_HINT = {
     "release": "The release run failed: Run step 6's rule (one re-run of a job that failed before any gate body; else "
                "RESULT: blocked with the failing job's summary line). Never promote.",
     "repin": "The re-pin failed: keep-current \"A fork with version branches\" step 5 (layer-deps.py resolve "
-             "--port-release, fork-branches.py ci --target <v> --modid ID --run).",
+             "--port-release, fork-branches.py ci --target <v> --modid ID --run; a version branch of several mods: "
+             "no --modid). A failed after_repin command is the fork's own: fix its cause in the fork's checkout.",
     "freeze": "fork-branches.py freeze failed: \"A fork with version branches\" step 4.",
     "ledger": "keep-current step 7 (known-issues.py status ... --set <versions>=fixed@<commit>, then render-ports "
               "--write), each committed alone on the head branch.",
@@ -1856,11 +1862,20 @@ def job_task(st, it):
     if s == "repin-head":
         libs = it["extra"]["libraries"]
         tags = [st.item(f"{st.fork(lb)['name']}@{v}:release").get("result", {}).get("tag") for lb in libs]
+        ar = [shlex.join(a_) for a_ in it["extra"].get("after_repin") or []]
         return [f"Re-pin {it['fork']}'s head ({F['head']}, single-version) to the library pre-release(s) this round cut: "
-                + ", ".join(f"{lb}@{t}" for lb, t in zip(libs, tags)) + ". keep-current Run step 7: `python3 "
-                f"{T / 'port-ci.py'} args --repo {F['dir']}` gives the current command; change the tag and asset of "
-                "--dep-jar AND of any --dep-jar-variant together and rerun it, on " + w + "; commit.",
-                f"Acceptance: the workflow pins the new release(s), committed on {br}."]
+                + ", ".join(f"{lb}@{t}" for lb, t in zip(libs, tags)) + ". keep-current Run step 7, on " + w + ": `python3 "
+                f"{T / 'layer-deps.py'} head-repin --repo {F['dir']} "
+                + " ".join(f"--port-release {lb}@{t}" for lb, t in zip(libs, tags)) + f" --branch {F['head']}` "
+                "regenerates each Port CI workflow that pins the library (port-ci.yml, or each mod's port-ci-<NAME>.yml "
+                "of a repository of several mods) with the new release's asset and sha256, --dep-jar and "
+                "--dep-jar-variant together, every other option as it is; it writes and does not commit."
+                + (" Then run the fork's own after_repin command(s) in that checkout, in order: "
+                   + "; ".join(f"`{c}`" for c in ar) + " (its own code, the trust its Gradle build has; a non-zero exit "
+                   "is RESULT: blocked naming the command)." if ar else "")
+                + " Commit it all in ONE commit.",
+                f"Acceptance: every workflow pins the new release(s)" + (", the after_repin output in the same commit"
+                                                                         if ar else "") + f", committed on {br}."]
     return [f"(no task text for step {s})"]
 
 
@@ -2145,18 +2160,19 @@ def push_ci_regen(st, it):
 def sv_ci_check(st, it, log):
     """A single-version fork's workflow check (port-ci.py check, on origin's head): a WARNING never blocks (keep-current
     step 4); it is recorded, and setup regenerates the workflow at the newest kit on the work branch, so the PR carries
-    it."""
+    it. A repository of several mods: each mod's workflow is checked (port_ci_wfs at origin's head)."""
     F = st.fork(it["fork"])
     d = F["dir"]
     git(d, "fetch", "-q", "origin", F["head"], check=True)
-    wf = git(d, "show", f"origin/{F['head']}:{PORT_CI_WF}")
-    if wf.returncode:
+    wfs = port_ci_wfs(d, f"origin/{F['head']}")
+    if not wfs:
         return f"no {PORT_CI_WF} on origin/{F['head']}: nothing to check", {}
-    f_ = st.rdir / "round/work" / f"ci-check-{F['name']}.yml"
-    f_.parent.mkdir(parents=True, exist_ok=True)
-    f_.write_text(wf.stdout, encoding="utf-8")
     at = log_size(log)
-    sh(st, it, [sys.executable, TOOLS / "port-ci.py", "check", "--repo", d, "--file", f_], log)
+    for name, path in wfs:
+        f_ = st.rdir / "round/work" / (f"ci-check-{F['name']}-{name}.yml" if name else f"ci-check-{F['name']}.yml")
+        f_.parent.mkdir(parents=True, exist_ok=True)
+        f_.write_text(wf_text(d, path, f"origin/{F['head']}"), encoding="utf-8")
+        sh(st, it, [sys.executable, TOOLS / "port-ci.py", "check", "--repo", d, "--file", f_], log)
     warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
     if warn:
         return (f"WARNING (never blocks; setup regenerates the workflow on the work branch): {warn[0][:300]}",
@@ -2165,51 +2181,39 @@ def sv_ci_check(st, it, log):
 
 
 PORT_CI_WF = ".github/workflows/port-ci.yml"
-MOD_WF_RE = re.compile(r"^\.github/workflows/port-ci-([\w.-]+)\.yml$")
-MOD_WF_GEN = re.compile(r'ci-gates\.py --repo (?!\.\s)\S+ --modid "[^"]+"[\s\S]*port-ci-kit-v\d+|'
-                        r'port-ci-kit-v\d+[\s\S]*ci-gates\.py --repo (?!\.\s)\S+ --modid "[^"]+"')
 
 
 def port_ci_wfs(d, ref=None):
     """The fork's Port CI workflows, at git ref (else in the working tree at d): [(name, path)] -- [("", PORT_CI_WF)]
     for a one-mod repository; for a repository of several mods (port-ci.py --mod-dir: one workflow per mod, no
-    PORT_CI_WF) each `port-ci-<name>.yml`, sorted by name; [] when there is none."""
-    if ref:
-        files = git(d, "ls-tree", "--name-only", ref, ".github/workflows/").stdout.split()
-    else:
-        wd = pathlib.Path(d) / ".github" / "workflows"
-        files = sorted(f".github/workflows/{f.name}" for f in wd.glob("*.yml")) if wd.is_dir() else []
-    if PORT_CI_WF in files:
-        return [("", PORT_CI_WF)]
-    # a mod's workflow only when port-ci.py --mod-dir generated it (its gates run on a mod folder): a workflow of the
-    # repository's own that merely shares the name pattern (port-ci-check.yml) is never taken for a mod's
-    return sorted((m.group(1), f) for f in files for m in [MOD_WF_RE.match(f)]
-                  if m and MOD_WF_GEN.search(wf_text(d, f, ref)))
+    PORT_CI_WF) each `port-ci-<name>.yml`, sorted by name; [] when there is none. tools/fork-kind.py
+    port_ci_workflows, the one list layer-deps.py and fork-branches.py read too."""
+    return mod("fk").port_ci_workflows(d, ref)
 
 
 def wf_text(d, path, ref=None):
     """A workflow's text at ref (else the working tree); "" when absent."""
-    if ref:
-        r = git(d, "show", f"{ref}:{path}")
-        return r.stdout if r.returncode == 0 else ""
-    f = pathlib.Path(d) / path
-    return f.read_text(encoding="utf-8") if f.is_file() else ""
+    return mod("fk").workflow_text(d, path, ref)
 
 
 def regen_workflow(st, it, d, log):
     """The work branch's Port CI workflow rendered again at the newest kit, every other option read back (port-ci.py
-    check's regenerate command, run here), committed alone. -> the commit or None."""
-    try:
-        rec = mod("pc").recover_args((pathlib.Path(d) / PORT_CI_WF).read_text(encoding="utf-8"))
-    except (OSError, SystemExit) as e:
-        raise StepError(f"the work branch's {PORT_CI_WF} cannot be read back to regenerate it: {e}")
-    args = [x for i, x in enumerate(rec) if x not in ("--kit-version", "--kit-sha")
-            and (i == 0 or rec[i - 1] not in ("--kit-version", "--kit-sha"))]
-    # the head's own name, never the checked-out work branch: port-ci.py falls back to that on a checkout with no
-    # .port/<mc>/ (a version-branch head) -- measured, trial round 2026-10-29: the triggers, the manifest refresh and
-    # the release jobs named keep-current/<date>, caught by the head's review
-    sh(st, it, [sys.executable, TOOLS / "port-ci.py", "--repo", d, *args, "--branch", st.fork(it["fork"])["head"]], log)
-    return commit_paths(d, [PORT_CI_WF], "Port CI workflow at the newest kit (keep-current round)")
+    check's regenerate command, run here), committed alone. A repository of several mods (port_ci_wfs): each mod's
+    port-ci-<NAME>.yml, each from its own read-back options (its --mod-dir, --tag-name, --also-path among them).
+    -> the commit or None."""
+    wfs = port_ci_wfs(d) or [("", PORT_CI_WF)]
+    for _name, path in wfs:
+        try:
+            rec = mod("pc").recover_args((pathlib.Path(d) / path).read_text(encoding="utf-8"))
+        except (OSError, SystemExit) as e:
+            raise StepError(f"the work branch's {path} cannot be read back to regenerate it: {e}")
+        args = [x for i, x in enumerate(rec) if x not in ("--kit-version", "--kit-sha")
+                and (i == 0 or rec[i - 1] not in ("--kit-version", "--kit-sha"))]
+        # the head's own name, never the checked-out work branch: port-ci.py falls back to that on a checkout with no
+        # .port/<mc>/ (a version-branch head) -- measured, trial round 2026-10-29: the triggers, the manifest refresh
+        # and the release jobs named keep-current/<date>, caught by the head's review
+        sh(st, it, [sys.executable, TOOLS / "port-ci.py", "--repo", d, *args, "--branch", st.fork(it["fork"])["head"]], log)
+    return commit_paths(d, [p_ for _n, p_ in wfs], "Port CI workflow at the newest kit (keep-current round)")
 
 
 def t_grades(st, it, log):
@@ -2569,6 +2573,22 @@ def t_nochange(st, it, log):
                                                                                  "pre_push": pre}
 
 
+def after_repin(st, it, d, log):
+    """The fork's own commands after a re-pin (weekly-plan.py install --after-repin: the item's extra `after_repin`, a
+    list of argv lists), each run in the checkout d before the re-pin's commit, so the files the repository derives from
+    its pins land in that commit. Its own code in its own checkout: the trust its Gradle build already has. A non-zero
+    exit is a StepError naming the command. -> the commands run."""
+    ran = []
+    for argv in it["extra"].get("after_repin") or []:
+        cmd = [sys.executable if c == "python3" and i == 0 else c for i, c in enumerate(argv)]
+        try:
+            sh(st, it, cmd, log, cwd=d)
+        except (StepError, OSError) as e:
+            raise StepError(f"the fork's after_repin command `{shlex.join(argv)}` failed in {d}: {e}")
+        ran.append(shlex.join(argv))
+    return ran
+
+
 def t_repin(st, it, log):
     v = it["version"]
     d = vco(st, it["fork"], v)
@@ -2603,15 +2623,21 @@ def t_repin(st, it, log):
                       for m in [fb.PIN_URL.match((val.split() or [""])[0])] if m and m.group(1) == lb})
         if got and got != [tag]:
             raise StepError(f"{lb} {v}: the re-pin left {', '.join(got)} pinned, not this round's release {tag}")
+    after_repin(st, it, d, log)         # the fork's own derived pin files, in the re-pin's commit
     # the re-pin committed BEFORE ci --run: ci reads the committed branch.properties (an uncommitted re-pin left it
     # rendering the old pin, warning of a newer re-cut) and refuses a dirty worktree -- measured, weekly round
     # 2026-10-27: a fixer job at every dependent version until this commit moved here
     c = commit_paths(d, ["."], f"Re-pin {', '.join(pins) or 'dependencies'} at {v} (keep-current round)")
     if pins:
-        modid = mod("fb").parse_props(mod("fb").read_file(pathlib.Path(d) / "gradle.properties")).get("mod_id")
-        if not modid:
-            raise StepError("no mod_id in gradle.properties: run fork-branches.py ci --target <v> --modid ID --run")
-        sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--modid", modid, "--run"], log)
+        if fb.mod_dirs(d):
+            # a version branch of several mods: ci renders each mod's workflow, each mod's id from its own folder
+            sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--run"], log)
+        else:
+            modid = fb.parse_props(fb.read_file(pathlib.Path(d) / "gradle.properties")).get("mod_id")
+            if not modid:
+                raise StepError("no mod_id in gradle.properties: run fork-branches.py ci --target <v> --modid ID --run")
+            sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--modid", modid,
+                        "--run"], log)
         c = commit_paths(d, ["."], f"Re-pin {', '.join(pins)} at {v}: what ci --run left (keep-current round)") or c
     return (("re-pinned " + ", ".join(pins) if pins else f"{len(it['extra']['bumps'])} bump(s)") + (f", {c[:12]}" if c else "")
             + (f"; the plan's bump(s) {', '.join(skipped)} superseded by this round's release" if skipped else "")), {
@@ -2793,7 +2819,11 @@ def t_gates(st, it, log):
     def pins():
         # the jars the head's Port CI installs before it builds (its workflow's --dep-jar steps) into ~/.m2,
         # sha256-checked (a version branch's pins go in through fork-port.py); a workflow pinning nothing: untouched
-        for ok_, m_ in mod("ld").install_workflow_pins(d):
+        try:
+            got_ = mod("ld").install_workflow_pins(d)
+        except ValueError as e:     # two mods' workflows pin one library differently
+            raise StepError(str(e))
+        for ok_, m_ in got_:
             if not ok_:
                 raise StepError(f"a pinned jar could not be put into mavenLocal before the gates: {m_}")
             say_to(log)("round: pins:" + (" WARNING" if "REPLACED" in m_ else ""), m_)
@@ -4157,19 +4187,23 @@ def head_pins(st, it, log):
         br = where(st, it)[1]
     except StepError:
         br = F["head"]
-    r = git(F["dir"], "show", f"{br}:.github/workflows/port-ci.yml")
-    if r.returncode:
-        r = git(F["dir"], "show", f"origin/{F['head']}:.github/workflows/port-ci.yml")
-    text = r.stdout if r.returncode == 0 else ""
+    # every Port CI workflow of the head (a repository of several mods: one per mod, port_ci_wfs), else origin's
+    ref = br if port_ci_wfs(F["dir"], br) else f"origin/{F['head']}"
+    texts = [(path, wf_text(F["dir"], path, ref)) for _n, path in port_ci_wfs(F["dir"], ref)]
+    text = "".join(t_ for _p, t_ in texts)
     key = hashlib.sha256(text.encode("utf-8")).hexdigest()
     if not text or F.get("pins_installed") == key:
         return
     log.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
-        wf = pathlib.Path(td) / ".github/workflows/port-ci.yml"
-        wf.parent.mkdir(parents=True)
-        wf.write_text(text, encoding="utf-8")
-        got = mod("ld").install_workflow_pins(td, pin_jar=guarded_pin)
+        for path, t_ in texts:
+            wf = pathlib.Path(td) / path
+            wf.parent.mkdir(parents=True, exist_ok=True)
+            wf.write_text(t_, encoding="utf-8")
+        try:
+            got = mod("ld").install_workflow_pins(td, pin_jar=guarded_pin)
+        except ValueError as e:         # two mods' workflows pin one library differently: said, and the job runs
+            got = [(False, str(e))]
     F["pins_installed"] = key
     for ok_, m_ in got:
         say_to(log)("round: pins:" + ("" if ok_ else " FAILED") + (" WARNING" if "REPLACED" in m_ else ""), m_)
@@ -6098,6 +6132,86 @@ def self_check_multimod(expect):
             ld.port_deps = keep_pd
 
 
+def self_check_repin_several(expect):
+    """A head of SEVERAL MODS (#274 C2; layer-deps.py several_mods_fixture): a stale workflow is regenerated per mod,
+    each from its own read-back options; the workflow check reads each mod's; the pins every mod's workflow installs go
+    into mavenLocal before a job; the repin-head job is told to run layer-deps.py head-repin and the fork's after_repin
+    commands before its one commit."""
+    G = globals()
+    keep = {k: G[k] for k in ("sh", "guarded_pin")}
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td)
+        bare, d = tmp / "multi.git", tmp / "multi"
+        git(tmp, "init", "-q", "--bare", "-b", "neoforge-1.21.1", str(bare), check=True)
+        git(tmp, "init", "-q", "-b", "neoforge-1.21.1", str(d), check=True)
+        for k_, v_ in (("user.name", "t"), ("user.email", "t@example.invalid")):
+            git(d, "config", k_, v_)
+        mod("ld").several_mods_fixture(d, "1.21.1")
+        git(d, "add", "-A"); git(d, "commit", "-qm", "two mods", check=True)
+        git(d, "remote", "add", "origin", bare.as_posix()); git(d, "push", "-q", "origin", "neoforge-1.21.1", check=True)
+        F = {"dir": str(d), "head": "neoforge-1.21.1", "name": "multi", "kind": "single", "base": "1.21.1", "versions": []}
+
+        class _St:
+            rdir, path = tmp, tmp / "STATE.json"
+            data = {"date": "2026-12-02", "allow": [], "plan": {"repo": "o/multi", "issue": 1}}
+
+            def fork(self, s_):
+                return F if s_ == "o/multi" else {"name": s_.split("/")[1], "dir": str(tmp)}
+
+            def item(self, _):
+                return {"result": {"tag": "examplelib-1.1-mc1.21.1"}}
+        log = tmp / "log"
+        cmds = []
+
+        def fake_sh(st_, it_, cmd, log_, **k_):
+            c_ = [str(x) for x in cmd]
+            cmds.append(c_)
+            if "port-ci.py" in c_[1] and "check" in c_:
+                if c_[-1].endswith("-zeta.yml"):
+                    with open(log_, "a", encoding="utf-8") as fh:
+                        fh.write("port-ci: check: WARNING neoforge-1.21.1: its workflow pins Port CI kit 9, older than kit 86\n")
+            elif "port-ci.py" in c_[1]:
+                f_ = d / f".github/workflows/port-ci-{c_[c_.index('--mod-dir') + 1]}.yml"
+                f_.write_text(f_.read_text(encoding="utf-8") + "# kit 86\n", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        try:
+            G["sh"] = fake_sh
+            it = {"id": "multi@1.21.1:ci-check", "fork": "o/multi", "version": "1.21.1", "step": "ci-check", "extra": {},
+                  "result": {}}
+            note, res = sv_ci_check(_St(), it, log)
+            checks = [c_[c_.index("--file") + 1] for c_ in cmds if "check" in c_]
+            expect([pathlib.Path(x).name for x in checks] == ["ci-check-multi-alpha.yml", "ci-check-multi-zeta.yml"]
+                   and res.get("stale_workflow") and "kit 86" in note,
+                   f"the workflow check: each mod's workflow at origin's head, a stale one recorded: {note} {cmds}")
+            cmds.clear()
+            c = regen_workflow(_St(), it, str(d), log)
+            arg = lambda c_, k: c_[c_.index(k) + 1] if k in c_ else None
+            expect(len(cmds) == 2 and [arg(c_, "--mod-dir") for c_ in cmds] == ["alpha", "zeta"]
+                   and all(arg(c_, "--also-path") == "shared" and c_[-2:] == ["--branch", "neoforge-1.21.1"]
+                           and "--kit-version" not in c_ for c_ in cmds)
+                   and [arg(c_, "--modid") for c_ in cmds] == ["examplealpha", "examplezeta"]
+                   and c and sorted(git(d, "show", "--name-only", "--format=", c).stdout.split())
+                   == [".github/workflows/port-ci-alpha.yml", ".github/workflows/port-ci-zeta.yml"],
+                   f"regen_workflow: each mod's workflow from its own options, the kit to the newest, one commit: {cmds} {c}")
+            # the pins every mod's workflow installs, before a job on the head
+            got = []
+            G["guarded_pin"] = lambda ga, ver, val: (got.append(ga), (True, f"{ga} fake"))[1]
+            head_pins(_St(), {"id": "multi@1.21.1:review", "fork": "o/multi", "version": "1.21.1", "step": "review"}, log)
+            expect(got == ["com.example:examplelib", "com.example:examplelib-core"],
+                   f"head_pins: the union of the mods' workflow pins: {got}")
+            # the repin-head job: head-repin, then the fork's after_repin commands, then ONE commit
+            rp = {"id": "multi@1.21.1:repin-head", "fork": "o/multi", "version": "1.21.1", "step": "repin-head",
+                  "extra": {"libraries": ["o/examplelib"], "after_repin": [["python3", "tools/core-pins.py", "--write"]]}}
+            txt = "\n".join(job_task(_St(), rp))
+            expect("layer-deps.py head-repin --repo" in txt and "--port-release o/examplelib@examplelib-1.1-mc1.21.1" in txt
+                   and "--branch neoforge-1.21.1" in txt and "`python3 tools/core-pins.py --write`" in txt
+                   and "ONE commit" in txt, f"repin-head: head-repin, the after_repin command, one commit: {txt}")
+            rp["extra"].pop("after_repin")
+            expect("after_repin" not in "\n".join(job_task(_St(), rp)), "no after_repin: none named")
+        finally:
+            G.update(keep)
+
+
 def self_check_bump(expect):
     """An OWNED fork's release bump (weekly-plan.py install --release-bump): the queue puts `bump` between setup and the
     authors' take only when the fork has one; the step needs merge-fork-prs and the fork's automerge; on a local origin
@@ -6272,6 +6386,7 @@ def self_check():
         return rc, "\n".join(buf)
     self_check_bump(expect)
     self_check_multimod(expect)
+    self_check_repin_several(expect)
     self_check_mod_records(expect)
     # a version branch's gate run fixes nothing (weekly round 2026-10-21: a gate re-run with the default budget started
     # the file loop and rewrote unrelated files); the single-version route's commands (sv_gate_cmds) are not this one
@@ -6715,6 +6830,16 @@ def self_check():
                and by["examplemod@1.21.4:mergeup"]["extra"]["from"] == "neoforge-1.21.1"
                and by["examplemod@1.21.4:mergeup"]["extra"]["head_cascade"],
                "the dependent re-pins each version to the library's release of this round; the ticked bump at its version")
+        cfg_ar = json.loads(json.dumps(cfg))
+        for c_ in cfg_ar["forks"]:
+            if c_["repo"] == DEP:
+                c_["after_repin"] = [["python3", "tools/core-pins.py", "--write"]]
+        with State.tx(state, write=False) as st_:
+            by_ar = {x["id"]: x for x in build_queue(fz(), cfg_ar, json.loads(json.dumps(st_.data["forks"])), "2026-10-21")}
+        expect(by_ar["examplemod@1.21.4:repin"]["extra"]["after_repin"] == [["python3", "tools/core-pins.py", "--write"]]
+               and "after_repin" not in by["examplemod@1.21.4:repin"]["extra"]
+               and not any("after_repin" in x["extra"] for x in by_ar.values() if x["fork"] != DEP),
+               "a fork's after_repin rides on its re-pin items only; a fork without it: as before")
         # a dependent's bump that moves NeoForge at a version moves its library there first, in the library's own cycle
         with State.tx(state, write=False) as st_:
             forks_ = json.loads(json.dumps(st_.data["forks"]))
@@ -7940,6 +8065,53 @@ def self_check():
             expect(dirty_at_ci == [""] and "Re-pin o/lib@lib-1.0-mc1.21.4-r2 at 1.21.4" in
                    git(rp_, "log", "-1", "--format=%s").stdout,
                    f"the re-pin is committed before ci --run reads branch.properties (weekly round 2026-10-27): {dirty_at_ci}")
+            # the fork's after_repin commands: run in the checkout after the re-pin, before its commit (their output is
+            # in that commit), in order; a failing one stops the re-pin naming it. A version branch of several mods:
+            # ci renders each mod's workflow, no root mod_id needed
+            pin_("lib-1.0-mc1.21.4")
+            git(rp_, "add", "-A"); git(rp_, "commit", "-qm", "back to the base cut")
+            (rp_ / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2G\n", encoding="utf-8")
+            for n_ in ("alpha", "zeta"):
+                (rp_ / n_).mkdir(exist_ok=True)
+                (rp_ / n_ / "gradle.properties").write_text(f"mod_id=example{n_}\n", encoding="utf-8")
+            git(rp_, "add", "-A"); git(rp_, "commit", "-qm", "two mods")
+            order_ = []
+            def sh_ar_(st_, it_, cmd, log, **k_):
+                c_ = [str(x) for x in cmd]
+                if "--port-release" in c_:
+                    pin_("lib-1.0-mc1.21.4-r2"); order_.append("resolve")
+                elif "core-pins.py" in " ".join(c_):
+                    expect(k_.get("cwd") == str(rp_) and c_[0] == sys.executable, f"after_repin: in the checkout: {k_} {c_}")
+                    with open(rp_ / "derived-pins.txt", "a", encoding="utf-8") as fh:
+                        fh.write(c_[-1] + "\n")
+                    order_.append(c_[-1])
+                elif "--run" in c_:
+                    order_.append(("ci", "--modid" in c_, git(rp_, "status", "--porcelain").stdout.strip()))
+                return rec_out("")(st_, it_, cmd, log, **k_)
+            sh = sh_ar_
+            rpa = dict(rpi, extra=dict(rpi["extra"], bumps=[], after_repin=[["python3", "tools/core-pins.py", "first"],
+                                                                             ["python3", "tools/core-pins.py", "second"]]))
+            note, r_ = t_repin(_St5(), rpa, log_)
+            expect(order_ == ["resolve", "first", "second", ("ci", False, "")]
+                   and "derived-pins.txt" in git(rp_, "show", "--name-only", "--format=", "HEAD").stdout
+                   and "Re-pin o/lib@lib-1.0-mc1.21.4-r2" in git(rp_, "log", "-1", "--format=%s").stdout,
+                   f"after_repin: in order, after the re-pin, in its commit; several mods: ci with no --modid: {order_}")
+            pin_("lib-1.0-mc1.21.4")
+            git(rp_, "add", "-A"); git(rp_, "commit", "-qm", "back again")
+            def sh_fail_(st_, it_, cmd, log, **k_):
+                if "core-pins.py" in " ".join(map(str, cmd)):
+                    raise StepError("core-pins.py exit 3: boom")
+                return sh_ar_(st_, it_, cmd, log, **k_)
+            sh = sh_fail_
+            try:
+                t_repin(_St5(), rpa, log_)
+                err_ = ""
+            except StepError as e:
+                err_ = str(e)
+            expect("after_repin command `python3 tools/core-pins.py first` failed" in err_ and "exit 3" in err_
+                   and "Re-pin o/lib" not in git(rp_, "log", "-1", "--format=%s").stdout,
+                   f"a failing after_repin command: a StepError naming it, nothing committed: {err_}")
+            git(rp_, "checkout", "--", "."); git(rp_, "clean", "-qfd")
             # the ci-check fixer's regeneration on a branch with no PR item (the head) is pushed; a code commit is not
             cr_ = tmp / "ci-fork"
             cr_.mkdir()
