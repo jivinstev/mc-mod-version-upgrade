@@ -732,6 +732,31 @@ def log_findings(text, ns, work=None):
     return [f for f in out if not any(k in f for k in known)], [f for f in out if any(k in f for k in known)]
 
 
+STOPPED = re.compile(r"(?m)^\[gate-loop\] stopped the run: ((TIMEOUT after (\d+)s|the client's log has not grown|"
+                     r"the GameTest server started, then its log did not grow).*)$")
+
+
+def stopped_of(text):
+    """A run with no verdict that THIS loop stopped -- at its time budget, or because its log stopped growing -- is a
+    `timeout`, never a `crash` (#240: a Gate B suite longer than 1500 s was reported as a crash quoting the mod's own
+    deliberately logged test fixtures, and two diagnoses chased a crash that never happened). -> (kind 'timeout',
+    text, signature) or None. The text names the stop and the run's last lines, and says a logged exception before the
+    stop is not its cause. A loop stop for another reason (mod loading failed, a verdict with a shutdown hang) is not
+    this case: those are judged as before."""
+    m = None
+    for m in STOPPED.finditer(text):
+        pass
+    if m is None:
+        return None
+    why = m.group(1)
+    budget = f"the {m.group(3)} s budget" if m.group(3) else "the stall limit"
+    tail = [l for l in text[:m.start()].splitlines() if l.strip() and not TRACE_LINE.match(l)][-12:]
+    first = (f"stopped by the gate loop at {budget}, with no verdict ({why}) -- a timeout, not a crash: an exception "
+             "logged before the stop did not end the run")
+    sig = f"timeout: {why}"
+    return "timeout", "\n".join([first, "the run's last lines:"] + ["  " + l.strip()[:300] for l in tail]), sig[:200]
+
+
 def failure_of(text, client=False, ns=None, work=None):
     """-> (kind, text for the worker, a short signature to detect a repeat) or None when green."""
     lines = text.splitlines()
@@ -761,6 +786,9 @@ def failure_of(text, client=False, ns=None, work=None):
     k = killed_of(text, client)
     if k:
         return k
+    t = stopped_of(text)
+    if t:
+        return t
     for i, l in enumerate(lines):
         # the deepest cause is the last top-level one; a trace logged at WARN/INFO was caught, it stopped nothing
         if l.startswith("Caused by:") and not is_noise(l) and not caught(lines, i):
@@ -1098,6 +1126,18 @@ def self_check():
     ok &= failure_of(oomlog.replace("value 137", "value 143"), client=False)[0] == "killed"      # a server run too
     # a run THIS loop stopped is judged as before, not as a kill
     ok &= failure_of(oomlog + "[gate-loop] stopped the run: TIMEOUT after 9s with no verdict\n", client=True)[0] != "killed"
+    # #240: a run the loop stopped at its budget is a timeout, whatever exception was logged before it
+    fixture_log = ("[12:00:01] [Server thread/ERROR] [examplemod/]: refused a bad file\n"
+                   "java.lang.IllegalStateException: unparseable on purpose (a negative-test fixture)\n"
+                   "\tat com.example.mod.Loader.read(Loader.java:9)\n[12:24:59] [Server thread/INFO] [examplemod/]: test 41 of 90\n")
+    k5 = failure_of(fixture_log + "\n[gate-loop] stopped the run: TIMEOUT after 1500s with no verdict\n")
+    ok &= bool(k5) and k5[0] == "timeout" and "1500 s budget" in k5[1] and "not a crash" in k5[1] and "test 41 of 90" in k5[1] \
+        and "unparseable" not in k5[2]
+    k6 = failure_of(fixture_log + "\n[gate-loop] stopped the run: the GameTest server started, then its log did not grow for 300s with no verdict\n")
+    ok &= bool(k6) and k6[0] == "timeout" and "stall limit" in k6[1]
+    k7 = failure_of(fixture_log + "\n[gate-loop] stopped the run: mod loading failed; the client shows the error screen and would wait for a click\n")
+    ok &= bool(k7) and k7[0] != "timeout"        # a loop stop for a real failure is still judged as before
+    ok &= failure_of(fixture_log)[0] == "crash"   # no stop: as before
     # control: a real uncaught crash before any verdict is still a crash (exit 1, not a kill), and the caught one is not it
     real_crash = (warn_trace + "[12:00:05] [Render thread/ERROR] [minecraft/Minecraft]: Unreported exception thrown!\n"
                   "java.lang.NullPointerException: Cannot invoke \"a.m.Thing.go()\" because \"t\" is null\n"
