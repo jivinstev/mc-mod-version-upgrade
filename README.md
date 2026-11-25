@@ -240,7 +240,7 @@ runs the same checker and adds the mod checks. A `@shot` name is letters, digits
 runs the vanilla fixtures in `templates/gatec-carrier/playtests/` on every carrier version
 (`python3 tools/gatec-carrier.py client-smoke --mode playtest --playtest FILE`).
 
-The carrier takes a frame at each step's end and wherever a step fails, and respawns the player after a death. It turns subtitles on and raises any muted volume, so a quiet `options.txt` cannot hide a sound. Each step's end also checks the log: a new ERROR line, or a WARN carrying an exception, fails the step unless `@allow error` covers it.
+The carrier takes a frame at each step's end and wherever a step fails, and respawns the player after a death. It turns subtitles on and raises any muted volume, so a quiet `options.txt` cannot hide a sound. Each step's end also checks the log: a new ERROR line, or a WARN carrying an exception, fails the step unless `@allow error` covers it. A GLFW error that describes the test machine rather than the game is listed in the report as an environment line and never fails a step: today only code 65547, `Standard cursor shape unavailable`, which a headless X display (Xvfb) logs from 26.2 whenever a screen sets a cursor shape.
 
 There are four skills, each driving `tools/playtest.py`:
 

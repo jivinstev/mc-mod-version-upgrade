@@ -103,12 +103,15 @@ give @s minecraft:oak_planks 8
 gamemode creative
 
 @step a vanilla screen's button
-# Escape with no screen open is the pause menu; its "Back to Game" button closes it. A widget accepts only the
-# version's own left mouse button (0 under GLFW, 1 under 26.3's SDL3), so this pins @click button on every version.
-# (Not "Options...": on 26.2 under the CI's software OpenGL the options screen logs GL ERROR lines unrelated to clicks.)
+# Escape with no screen open is the pause menu; its "Options..." button opens the options screen. A widget accepts
+# only the version's own left mouse button (0 under GLFW, 1 under 26.3's SDL3), so this pins @click button on every one
 @key key.keyboard.escape
 @expect screen PauseScreen within 3s
-@click button "Back to Game"
+@click button "Options"
+@expect screen OptionsScreen within 3s
+@key key.keyboard.escape
+@expect screen PauseScreen within 3s
+@key key.keyboard.escape
 @expect screen none within 3s
 
 @step repeat, for each entity, until it is gone
