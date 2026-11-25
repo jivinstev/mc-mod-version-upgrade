@@ -372,6 +372,8 @@ and version-branch forks alike:
   branch for the head's version) with promote, played_by = the commenter and played_notes = "promoted from <issue>";
   Port CI's promote and same-run publish then run as for `port-ci.py promote`. It replies once, tag -> run link. The
   token reaches only the library's repository: the reply names the `port-ci.py promote` command for the dependents.
+  `plan_owner` is read from the head branch's `.github/weekly-plan.json`, so whoever can push to the head branch can
+  change who may promote; that is no wider than today, since push access can already run Port CI's promote.
 - **No answer:** the defaults apply. **No round** (no quota, the session never started): nothing is lost -- next
   Tuesday's workflow sees the plan issue no round closed, carries its ticks and replies into the new issue, says "last
   week's round did not run", and closes the old one as superseded.
