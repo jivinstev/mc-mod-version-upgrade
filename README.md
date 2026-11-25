@@ -73,8 +73,15 @@ tree. Then:
   `own_mod`. The weekly round (`round.py`) treats its per-mod workflows as one fork: its head's gates run each mod's
   `ci-gates.py` on that mod's folder; every mod's workflow must carry the gate-of-record inputs; a version's release
   dispatches each mod's workflow and records one tag per mod (`tags`); a library's pre-merge dependent gate dispatches
-  each of the dependent's mod workflows that pins the library, with `dep_override`, committing nothing. The version
-  branches' own gates (`fork-port.py`, `cascade --gates ab`) do not yet run per mod (#274).
+  each of the dependent's mod workflows that pins the library, with `dep_override`, committing nothing.
+  On a version branch of such a repository (no `mod_id` in a root `gradle.properties`, each top-level folder whose
+  `gradle.properties` names one is a mod), `fork-port.py --from-stage measure --gates ab|full` and `fork-branches.py
+  cascade --gates ab` gate each mod folder on its own: the compile and the audit in the folder through the nearest
+  `gradlew`, then `ci-gates.py --repo FOLDER` with that folder's `mod_id`. Each mod's gate records go in
+  `.port/<mc>/<FOLDER>/` (`GATES.md` for a green full run, `GATES-RED.md` for a red one); the other records stay in
+  `.port/<mc>/`. The version is green only when every mod is (one red mod: exit 11, or 12 for Gate C), and its done
+  check (`fork-branches.py check-done`) wants every mod's `GATES.md`, or that mod's own `<FOLDER>-<digit>...-mc<mc>`
+  pre-release record. A one-mod version branch, and a single-version fork, read and write `.port/<mc>/GATES.md` as before.
 - **Two classes of gate run** (opt-in): a fork whose whole GameTest suite outlasts the kit's Gate B limit (1500 s)
   commits `.port/<mc>/gate-gradle-args.txt`, one Gradle argument a line (`#` comments; an option with a value in its
   one-word form, e.g. `-Pshard=ci`), on every kind of fork (a version branch reads its own version's file, a
