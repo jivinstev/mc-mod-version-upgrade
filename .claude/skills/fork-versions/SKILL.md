@@ -58,7 +58,11 @@ helpers, catalogue entries and a cost figure; the next fork, and the next versio
 - **Records, per version.** Branch `neoforge-<v>` carries `.port/<v>/` -- `branch.properties` (the version, its parent,
   the port branch, the upstream freeze, the library pins, the build keys: `prop.*` also written into gradle.properties,
   `toml.*`, `java_version`, `nfrt_version`, `substitute.*`/`exclude.*`/`port_jar.*`, `strip_onlyin`, `library=true` for
-  a library fork), `renames.tsv`, `moves.generated.tsv`, `shared-renames.tsv`, `drops.txt`, `shared-helpers.txt`, and
+  a library fork; `base_minecraft_version` is the PORT BRANCH's own Minecraft version, which the cascade and the
+  shared-helper span read, and `harness_base` the gate harness Port CI uses when the port branch builds a later line
+  than any harness -- `add-target` from a port branch at 1.21.8 writes `base_minecraft_version=1.21.8` and
+  `harness_base=1.21.1`, from one at 1.21.1 only `base_minecraft_version=1.21.1`, and a child version branch inherits
+  both), `renames.tsv`, `moves.generated.tsv`, `shared-renames.tsv`, `drops.txt`, `shared-helpers.txt`, and
   the records: `GATES.md`, `REVIEW.md`, `STUBS.json`, `COST.md`, `DEPS.md`, `INVENTORY-CHECK.json`, `TEST-ITEMS.md`,
   `DRIFT.md`, `RESIDUE.md`, `BEHAVIOUR.json`, `REMERGE.json`, `DEPENDENTS.json`, `MIGRATED.json` -- plus
   `.port/branch.gradle` (applied by one line at the end of build.gradle: the Java toolchain, the NeoForm runtime, the

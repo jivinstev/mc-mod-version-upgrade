@@ -551,8 +551,18 @@ def gate_args_rows(port_ci, pu, repo, rows, record):
     print(f"[ci-gates] Port CI: every Gradle call carries {' '.join(extra)} ({rel})", flush=True)
 
 
+def harness_base_of(bprops):
+    """The gate harness's base for a version branch's branch.properties (PORT_BRANCH_BASE): `harness_base`, else
+    base_minecraft_version, else 1.21.1 (#262)."""
+    return bprops.get("harness_base") or bprops.get("base_minecraft_version") or "1.21.1"
+
+
 def self_check():
     ok = green_detail("[x] All 4 required tests passed :)") == "4 required test(s) passed"
+    # #262: the harness's base -- harness_base wins; else base_minecraft_version, as before; else 1.21.1
+    ok &= harness_base_of({"base_minecraft_version": "1.21.8", "harness_base": "1.21.1"}) == "1.21.1"
+    ok &= harness_base_of({"base_minecraft_version": "1.21.1"}) == "1.21.1" and harness_base_of({}) == "1.21.1"
+    ok &= harness_base_of({"base_minecraft_version": "26.2"}) == "26.2"
     ok &= green_detail("M_BOOT_TEST: spawned 40 creature type(s): [a]\nM_BOOT_TEST: PASS — ticked 200").startswith(
         "PASS — ticked 200; 40 entity types spawned")
     ok &= green_detail("") == "green"
@@ -771,9 +781,11 @@ def main():
     bv = branch_version(repo)        # a version branch (tools/fork-branches.py): a plain build at its own version
     if bv:
         bprops = read_kv(repo / ".port" / bv / "branch.properties")
-        # the harness is written for the base version and renamed for this one (port_gates.py)
+        # the harness is written for the base version and renamed for this one (port_gates.py). `harness_base` names it
+        # when the port branch builds a later line than any harness (#262: base_minecraft_version is then the port
+        # branch's own version, which fork-branches.py reads); without it, base_minecraft_version, as before
         os.environ["PORT_BRANCH_MC"] = bv
-        os.environ["PORT_BRANCH_BASE"] = bprops.get("base_minecraft_version", "1.21.1")
+        os.environ["PORT_BRANCH_BASE"] = harness_base_of(bprops)
     if a.mc and bv and a.mc != bv:
         print(f"[ci-gates] --mc {a.mc}: the checkout is version branch {bv}", flush=True)
         return 2

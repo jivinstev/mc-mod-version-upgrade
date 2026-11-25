@@ -2376,8 +2376,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
     # a row the merged code went through may name a shared helper this branch never carried (weekly round 2026-10-21: the
     # 1.21.5 getOwnerUUID row's Owners): each helper the tree now uses and lacks is installed, as add-target installs it
     if props.get("mv_package") and (shared_dir()).is_dir():
-        span = sorted({v for v in os.listdir(shared_dir()) if (shared_dir() / v).is_dir() and re.match(r"^\d+(\.\d+)+$", v)
-                       and mc_key(props.get("base_minecraft_version") or "1.21.1") < mc_key(v) <= mc_key(t)}, key=mc_key)
+        span = helper_span(props, t)
         bfiles = {k: blob_at(repo, pre, k) or b"" for k in ("build.gradle", "gradle.properties")}
         toml = next((data for path_, data in ref_files(repo, pre, "src").items()
                      if path_.endswith("META-INF/neoforge.mods.toml")), b"")
@@ -4096,6 +4095,28 @@ def substitute_line(s):
     return f"{k.replace(':', chr(92) + ':')}={v}"
 
 
+def helper_span(props, t):
+    """The shared-library versions whose helpers a version branch at t may carry: above the port branch's own version
+    (branch.properties' base_minecraft_version, #262) up to t -- a port branch made at 1.21.8 already has every lower
+    version's API, so 1.21.2..1.21.8's helpers are not its."""
+    base = props.get("base_minecraft_version") or "1.21.1"
+    return sorted({v for v in os.listdir(shared_dir()) if (shared_dir() / v).is_dir() and re.match(r"^\d+(\.\d+)+$", v)
+                   and mc_key(base) < mc_key(v) <= mc_key(t)}, key=mc_key)
+
+
+def base_keys(pp, base_mc, port_mc, t):
+    """branch.properties' base_minecraft_version and harness_base for a new version branch (#262): a child of a version
+    branch inherits both; the first one from the port branch writes the port branch's own version as
+    base_minecraft_version when it builds a later line than the table's base (below t), and then harness_base=<the
+    table's base>, so Port CI keeps the gate harness it used before. -> [lines]."""
+    if pp:
+        out = [f"base_minecraft_version={pp.get('base_minecraft_version', base_mc)}"]
+        return out + ([f"harness_base={pp['harness_base']}"] if pp.get("harness_base") else [])
+    if version_line(port_mc) and mc_key(base_mc) < mc_key(port_mc) < mc_key(t):
+        return [f"base_minecraft_version={port_mc}", f"harness_base={base_mc}"]
+    return [f"base_minecraft_version={base_mc}"]
+
+
 def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None, say=print):
     """Make version branch neoforge-<t> from its parent's (the nearest lower version branch, or --parent, else the port
     branch): its versions from templates/fork-layer/versions.json written into gradle.properties, branch.properties
@@ -4176,8 +4197,7 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
             f"minecraft_version={t}", f"branch={branch_name(t)}", f"parent={branch_name(parent) if parent else pb}"]
     if parent:
         head.append(f"parent_minecraft_version={parent}")
-    head += [f"port_branch={pb}", f"base_minecraft_version={pp.get('base_minecraft_version', base_mc)}", f"mv_package={mv_pkg}",
-             f"port_taken={port_now}"]
+    head += [f"port_branch={pb}", *base_keys(pp, base_mc, port_mc, t), f"mv_package={mv_pkg}", f"port_taken={port_now}"]
     for k in ("upstream", "upstream_commit", "library"):
         if pp.get(k):
             head.append(f"{k}={pp[k]}")
@@ -7501,6 +7521,18 @@ def self_check():
             expect(rc == 0 and b"# ---- shared 1.21.10" in sh
                    and not any(f"# ---- shared {v}".encode() in sh for v in ("1.21.3", "1.21.4", "1.21.5", "1.21.8")),
                    f"add-target from a 1.21.8 port branch: only the 1.21.10 library, none below the port branch's line: rc {rc}: {out[-300:]}")
+            # #262: its branch.properties says what the port branch builds (base_minecraft_version=1.21.8, which the
+            # cascade's helper span reads) and keeps Port CI's harness (harness_base=1.21.1, the table's base)
+            bp = parse_props(fl.get(".port/1.21.10/branch.properties", b"").decode("utf-8", "surrogateescape"))
+            expect(bp.get("base_minecraft_version") == "1.21.8" and bp.get("harness_base") == "1.21.1",
+                   f"add-target from a 1.21.8 port branch: base_minecraft_version=1.21.8 and harness_base=1.21.1: {bp}")
+            span = helper_span(bp, "1.21.10")
+            expect(span and all(mc_key("1.21.8") < mc_key(v) <= mc_key("1.21.10") for v in span)
+                   and helper_span({"base_minecraft_version": "1.21.1"}, "1.21.10")[:1] != span[:1],
+                   f"the cascade's helper span from a 1.21.8 port branch: above 1.21.8 only: {span}")
+            expect(base_keys(bp, "1.21.1", "1.21.10", "1.21.11") == ["base_minecraft_version=1.21.8", "harness_base=1.21.1"]
+                   and base_keys({}, "1.21.1", "1.21.1", "1.21.4") == ["base_minecraft_version=1.21.1"],
+                   "a child version branch inherits both keys; a 1.21.1 port branch writes only base_minecraft_version, as before")
             git(r, "worktree", "remove", "--force", str(lw))
             g("branch", "-D", "late-port", "neoforge-1.21.10")
             # a port branch nobody names and that does not exist: a clear refusal, not a crash
