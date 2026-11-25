@@ -312,6 +312,9 @@ jobs:
             Copy-Item "$R\mesa\x64\*.dll" $j.DirectoryName; Write-Host "Mesa beside $($j.FullName)"
           }
           $env:GALLIUM_DRIVER = 'llvmpipe'
+          # nor a sound device: OpenAL's null device lets the sound engine start, which the boot judge waits for
+          # (the boot test sets this itself on Linux only)
+          $env:ALSOFT_DRIVERS = 'null'
           Write-Host '--- the same command again with --boot-test: a re-run, then the game booted'
           $argv2 = $argv + @('--boot-test')
           $out = & $boot @argv2 *>&1 | Out-String; $rc = $LASTEXITCODE; Write-Host $out
