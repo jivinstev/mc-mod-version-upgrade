@@ -203,6 +203,7 @@ jobs:
           path: |
             ${{ runner.temp }}/port-ci/*.log
             ${{ runner.temp }}/port-ci/*.jsonl
+            ${{ runner.temp }}/port-ci/gate-c-out/
             ${{ runner.temp }}/gates.md
             ${{ runner.temp }}/built-tree.txt
           if-no-files-found: ignore
@@ -518,7 +519,7 @@ jobs:
 
   player-install:
     # A player's install of the release just made full: the published player-install bootstrap (owner/migrator's
-    # player-install-v3, the command a README gives players; pinned by sha256 like the kit) installs exactly that
+    # player-install-v4, the command a README gives players; pinned by sha256 like the kit) installs exactly that
     # tag -- NeoForge, the jar and every release it pins -- into a fresh Minecraft folder on headless Linux and boots it
     # to the title screen with the mods loaded. Red means players cannot install what was promoted; the promotion stands.
     # A private repository is skipped: nobody can install its releases without a token.
@@ -539,8 +540,8 @@ jobs:
           set -euo pipefail
           if ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._+-]+$'; then echo "::error::not a release tag: $TAG"; exit 1; fi
           curl -fsSL -o "$RUNNER_TEMP/install.sh" \
-            "https://github.com/owner/migrator/releases/download/player-install-v3/install.sh"
-          echo "da9a778ba2b349f782a22ec2c9e4028d9f3d2e9b921a47e43b0c688d2b9185e0  $RUNNER_TEMP/install.sh" | sha256sum -c -
+            "https://github.com/owner/migrator/releases/download/player-install-v4/install.sh"
+          echo "924d562230ab32a39dd3f20f9d1ff54887085c82a67dc986727ec2a625e6e102  $RUNNER_TEMP/install.sh" | sha256sum -c -
           xvfb-run -a -s "-screen 0 1280x720x24" bash "$RUNNER_TEMP/install.sh" "$GITHUB_REPOSITORY" --release "$TAG" \
             --yes --minecraft-dir "$RUNNER_TEMP/minecraft" --boot-test
-          echo "A player's install of $TAG boots (player-install player-install-v3)" >> "$GITHUB_STEP_SUMMARY"
+          echo "A player's install of $TAG boots (player-install player-install-v4)" >> "$GITHUB_STEP_SUMMARY"

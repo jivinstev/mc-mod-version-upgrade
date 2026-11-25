@@ -142,6 +142,7 @@ jobs:
           path: |
             ${{ runner.temp }}/port-ci/*.log
             ${{ runner.temp }}/port-ci/*.jsonl
+            ${{ runner.temp }}/port-ci/gate-c-out/
             ${{ runner.temp }}/gates.md
             ${{ runner.temp }}/built-tree.txt
           if-no-files-found: ignore

@@ -121,7 +121,8 @@ tree. Then:
   file fails the gate run, it is never ignored. On the full environment `ci-gates.py` runs the script in place of the
   built-in client phases, whatever `--gatec` says (`none` included: the file is the fork's gate of record), once (the
   script owns its retries), as an argv (`bash` / `python3`, never a shell string) in the fork's checkout under the
-  timeout, with `PORT_GATE_MC`, `PORT_GATE_MODID`, `PORT_GATE_SET` and `PORT_GATE_REPO`. `PORT_GATE_SET` is `release`
+  timeout, with `PORT_GATE_MC`, `PORT_GATE_MODID`, `PORT_GATE_SET`, `PORT_GATE_REPO` and `PORT_GATE_OUT` (a folder for
+  the script's own evidence -- per-test logs, frames -- that Port CI uploads with the gate logs). `PORT_GATE_SET` is `release`
   on a Port CI run that can publish (a tag, or a `release = true` dispatch without `dep_override`), where
   `release_args` replace `args`, else `full` (`--gatec-set release|full` says it outright). Its exit code is the
   verdict and the Gate C row of `gates.md`: `Gate C -- fork's own (<script>, release set) | PASS`, or `FAIL` with

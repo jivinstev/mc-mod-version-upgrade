@@ -20,7 +20,8 @@ pipeline did:
     On the full environment that script runs in place of the built-in phases, whatever --gatec says (it is the
     fork's gate of record; --no-fork-gatec skips it), once (it owns its retries), as an argv in the fork's checkout,
     under the timeout, with PORT_GATE_MC, PORT_GATE_MODID, PORT_GATE_SET (release or full: --gatec-set, by default
-    release on a tag or a release = true dispatch, where release_args replace args) and PORT_GATE_REPO; it is the Gate
+    release on a tag or a release = true dispatch, where release_args replace args), PORT_GATE_REPO and PORT_GATE_OUT
+    (a folder for the script's own evidence -- logs, frames -- that Port CI uploads with the gate logs); it is the Gate
     C row (`Gate C -- fork's own (<script>, <set> set)`). The minimal environment records it as `full only`. A bad
     file fails the run; no file changes nothing.
 The harness is generated OUTSIDE the author's tree (--work-dir, default a temp dir) and wired in with
@@ -695,8 +696,10 @@ def fork_gatec_step(fork, a, ok, pu, repo, work, rows, record, timeout_s=None):
         return
     argv, which = fork_gatec_argv(fork, set_, pu.BASH)
     root = pu.port_root(repo)
+    out = pathlib.Path(work) / "gate-c-out"        # the script's own evidence (logs, frames): Port CI uploads this folder
+    out.mkdir(parents=True, exist_ok=True)
     genv = dict(os.environ, PORT_GATE_MC=pu.port_mc(repo) or "", PORT_GATE_MODID=a.modid, PORT_GATE_SET=set_,
-                PORT_GATE_REPO=str(root))
+                PORT_GATE_REPO=str(root), PORT_GATE_OUT=str(out))
     limit = timeout_s if timeout_s is not None else fork["timeout_minutes"] * 60
     log = pathlib.Path(work) / "gate-c-fork.log"
     print(f"[ci-gates] Gate C: the fork's own ({fork['file']}, {set_} set): {' '.join(argv[1:])} "
@@ -761,6 +764,7 @@ def multimod_check():
 
 FORK_GATEC_SH = """#!/usr/bin/env bash
 printf '%s\\n' "$PORT_GATE_MC $PORT_GATE_MODID $PORT_GATE_SET" > "$PORT_GATE_REPO/ran-env.txt"
+printf 'evidence\\n' > "$PORT_GATE_OUT/evidence.txt"
 printf '%s\\n' "$*" > "$PORT_GATE_REPO/ran-args.txt"
 pwd > "$PORT_GATE_REPO/ran-in.txt"
 echo "rig film one: ok"
@@ -841,6 +845,9 @@ def fork_gatec_check():
                  and "--gatec `none` does not skip it" in rows[0] and "`.port/1.21.4/gate-c.json`" in rows[0], rows)
             want("pass: the env", read("ran-env.txt") == "1.21.4 examplemod full", read("ran-env.txt"))
             want("pass: the args, an argv", read("ran-args.txt") == "all --films=8", read("ran-args.txt"))
+            ev = work / "gate-c-out" / "evidence.txt"
+            want("pass: PORT_GATE_OUT, the folder Port CI uploads, holds the script's own evidence (#318)",
+                 ev.is_file() and ev.read_text(encoding="utf-8").strip() == "evidence", ev)
             ran = read("ran-in.txt") or ""
             win = lambda x: re.sub(r"^/([A-Za-z])/", lambda m_: m_.group(1) + ":/", x) if os.name == "nt" else x
             want("pass: run in the checkout", bool(ran) and pathlib.Path(win(ran)).resolve() == sv, ran)
