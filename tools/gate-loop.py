@@ -1012,7 +1012,9 @@ def multimod_gradlew_check():
         ok &= cmd[1] != "gradlew" and pathlib.Path(cmd[1]).resolve() == (r / "gradlew").resolve() and has_gradlew(r / "alpha")
         subprocess.run([*cmd, "prepareSources"], cwd=str(r / "alpha"), capture_output=True, timeout=60)
         ran = (r / "ran-in.txt").read_text(encoding="utf-8").splitlines() if (r / "ran-in.txt").is_file() else []
-        ok &= len(ran) == 2 and pathlib.Path(ran[0]).resolve() == (r / "alpha").resolve() and ran[1] == "prepareSources"
+        # Git Bash's pwd prints /c/Users/... for C:/Users/...: read back as a Windows path before comparing
+        win = lambda x: re.sub(r"^/([A-Za-z])/", lambda m: m.group(1) + ":/", x) if os.name == "nt" else x
+        ok &= len(ran) == 2 and pathlib.Path(win(ran[0])).resolve() == (r / "alpha").resolve() and ran[1] == "prepareSources"
         if not ok:
             print(f"gate-loop self-check FAIL [multi-mod gradlew]: {cmd} ran in {ran}")
         (r / "gradlew").unlink()
