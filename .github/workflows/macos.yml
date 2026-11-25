@@ -1,0 +1,60 @@
+# The macOS leg of the gates, in its own workflow so a pull request's checks never wait on it.
+#
+# GitHub's macOS runners are a small shared pool: a macOS job here often waited ten minutes for one, and sometimes was
+# cancelled with no runner at all, which held every PR's `gates` run open long after its Linux and Windows jobs had
+# finished. These jobs are unchanged and still run on every pull request and every push to main, and a failure is a
+# red check like any other; they simply finish on their own time. What macOS breaks most often (bash 3.2, BSD tools,
+# Python 3.9 patterns) is also caught on Linux by tools/check-compat.py in the gates workflow's `compat-static` job.
+name: macos
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  macos:
+    name: "macOS: bash 3.2, BSD tools, Python 3.9 (part ${{ matrix.part }} of 3)"
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # The machine people run these tools on: Apple's /bin/bash (3.2), BSD sed and grep, and the Command Line Tools'
+      # /usr/bin/python3 (3.9). Linux and Windows CI pass code that breaks here, so this runs the same suites with
+      # those first on PATH (no Homebrew bash, no setup-python). Two parallel halves (PORT_TOOLS_PART) beside the
+      # other jobs: no added wall time.
+      - name: The shell, sed and Python this job really uses
+        run: |
+          export PATH="/bin:/usr/bin:$PATH"
+          bash --version | head -1; command -v sed; python3 --version
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 9), sys.version'
+      - name: Every tracked script parses with bash 3.2
+        if: matrix.part == 1
+        run: |
+          export PATH="/bin:/usr/bin:$PATH"
+          git ls-files '*.sh' | while read -r f; do /bin/bash -n "$f" || exit 1; done
+      - name: Port tools (macOS, part ${{ matrix.part }} of 3)
+        run: |
+          export PATH="/bin:/usr/bin:$PATH"
+          PORT_TOOLS_PART=${{ matrix.part }} ./tools/test-port-tools.sh
+      - name: Gates (macOS)
+        if: matrix.part == 1
+        run: |
+          export PATH="/bin:/usr/bin:$PATH"
+          ./tools/test-gates.sh
