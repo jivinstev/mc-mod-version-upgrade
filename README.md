@@ -160,6 +160,10 @@ curl -fsSL https://github.com/jivinstev/mc-mod-version-upgrade/releases/download
   `--with python`, `--boot-test`.
 - **An optional note**: a `player-install.txt` at the release's tag (the mod's folder, or `.github`) is printed after
   the install, up to 12 lines, e.g. how to turn on an optional feature in game.
+- **Acceptance**: the `player-install` workflow's `acceptance` input (a JSON list of argument strings) runs real
+  installs from real releases on headless Linux and boots each to the title screen (`--boot-test`); an agent starts
+  it with one dispatch call, and nothing reads a repository variable. A mod repository can run the published
+  one-liner on its own releases the same way (the skill's "Acceptance on every release").
 
 ## Testing released ports on real installs
 
