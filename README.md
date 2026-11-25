@@ -57,7 +57,8 @@ tree. Then:
 - **Two classes of gate run** (opt-in): a fork whose whole GameTest suite outlasts the kit's Gate B limit (1500 s)
   commits `.port/<mc>/gate-gradle-args.txt`, one Gradle argument a line (`#` comments; an option with a value in its
   one-word form, e.g. `-Pshard=ci`), on every kind of fork (a version branch reads its own version's file, a
-  single-version fork the one for `gradle.properties`' version). Port CI's gates job passes `ci-gates.py --port-ci`,
+  single-version fork the one for `gradle.properties`' version; with none of its own, the nearest lower version's,
+  so a new version branch keeps the subset; an empty file of its own adds nothing). Port CI's gates job passes `ci-gates.py --port-ci`,
   which appends the file's arguments to `PORT_GRADLE_ARGS` (after anything already there) for every Gradle call of the
   run, the authors' build, Gate A, B and C, in both passes, full and minimal (and every variant leg), and writes a
   REPORT row naming them in the gate summary; a line that is not one option fails the run before any gate. The file is

@@ -120,28 +120,31 @@ HARNESS_STRUCTURE = "port_ci_harness_empty"
 BASELINE_EXEMPT = "baseline-exempt.txt"
 
 
-def baseline_exempt_file(repo, mc=None):
-    """The fork's committed .port/<mc>/baseline-exempt.txt, else the nearest lower version's, or None (<mc>: the given
-    one, else the version branch's (PORT_BRANCH_MC), else gradle.properties' minecraft_version), on every kind of fork."""
+def port_file(repo, name, mc=None):
+    """The fork's committed .port/<mc>/<name>, else the nearest LOWER version's .port/<v>/<name>, or None, on every kind
+    of fork (<mc>: port_mc's order). What these files say (the entities the mod replaces when they join a level, the
+    gate subset its GameTest suite needs) is the mod's, not the version's: .port/<lower>/ is carried up by every merge,
+    and a single-version fork that moved its minecraft_version keeps its old directory, so a new version inherits
+    rather than failing the gate the lower version already settled (measured: a new rung's baseline failed "the level
+    refused it"; a new rung ran the whole suite past Port CI's limit). Never a HIGHER version's. An empty file of the
+    version's own overrides (it grants nothing, adds no argument); the caller's report names the file used."""
     repo = pathlib.Path(repo)
+    mc = port_mc(repo, mc)
     if not mc:
-        mc = layer_target()
-    if not mc:
-        gp = repo / "gradle.properties"
-        m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
-        mc = m.group(1) if m else None
-    f = repo / ".port" / str(mc) / BASELINE_EXEMPT if mc else None
-    if f is None or f.is_file():
+        return None
+    f = repo / ".port" / str(mc) / name
+    if f.is_file():
         return f
-    # no file of this version's own: the nearest LOWER version's (.port/<lower>/ is carried up by every merge, and a
-    # single-version fork that moved its minecraft_version keeps its old directory). What a mod replaces when it joins
-    # a level is the mod's behaviour, not the version's, so a new version branch inherits it rather than failing Gate B
-    # on the same stand-in the lower version excused (measured: a new rung's baseline failed "the level refused it").
-    # The report row names the file used; an empty file of the version's own grants nothing.
-    lower = sorted((mc_tuple(d.name), d / BASELINE_EXEMPT) for d in (repo / ".port").glob("*")
+    d0 = repo / ".port"
+    lower = sorted((mc_tuple(d.name), d / name) for d in d0.glob("*")
                    if re.fullmatch(r"\d+(\.\d+)+", d.name) and mc_tuple(d.name) < mc_tuple(str(mc))
-                   and (d / BASELINE_EXEMPT).is_file()) if (repo / ".port").is_dir() else []
+                   and (d / name).is_file()) if d0.is_dir() else []
     return lower[-1][1] if lower else None
+
+
+def baseline_exempt_file(repo, mc=None):
+    """The fork's .port/<mc>/baseline-exempt.txt, else the nearest lower version's, or None (port_file)."""
+    return port_file(repo, BASELINE_EXEMPT, mc)
 
 
 def baseline_exemptions(repo, modid, mc=None):
@@ -193,11 +196,10 @@ def port_mc(repo, mc=None):
 
 
 def gate_gradle_args_file(repo, mc=None):
-    """The fork's committed .port/<mc>/gate-gradle-args.txt, or None, on every kind of fork. The version's own file
-    only (a lower version's, carried up by a merge, is not read for another version)."""
-    mc = port_mc(repo, mc)
-    f = pathlib.Path(repo) / ".port" / mc / GATE_GRADLE_ARGS if mc else None
-    return f if f is not None and f.is_file() else None
+    """The fork's .port/<mc>/gate-gradle-args.txt, else the nearest lower version's, or None (port_file): a suite that
+    needed a subset on one version needs it on the next, and a new version branch must not run the whole suite past
+    Port CI's limit until somebody copies the file. An empty file of the version's own adds nothing."""
+    return port_file(repo, GATE_GRADLE_ARGS, mc)
 
 
 def gate_gradle_args(repo, mc=None):

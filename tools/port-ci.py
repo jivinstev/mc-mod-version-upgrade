@@ -288,13 +288,25 @@ def check(repo, file=None, kit_version=None, say=print):
 GATE_ARGS_FILE = "gate-gradle-args.txt"     # tools/port_gates.py GATE_GRADLE_ARGS
 
 
+def lower_gate_args(repo, mc):
+    """A lower version's .port/<v>/gate-gradle-args.txt, which this version inherits (tools/port_gates.py port_file),
+    or None."""
+    key = lambda v: tuple(int(x) for x in v.split("."))
+    d0 = pathlib.Path(repo) / ".port"
+    if not mc or not re.fullmatch(r"\d+(\.\d+)+", str(mc)) or not d0.is_dir():
+        return None
+    lower = sorted((key(d.name), d / GATE_ARGS_FILE) for d in d0.glob("*")
+                   if re.fullmatch(r"\d+(\.\d+)+", d.name) and key(d.name) < key(str(mc)) and (d / GATE_ARGS_FILE).is_file())
+    return lower[-1][1] if lower else None
+
+
 def hand_gradle_args(wf, repo, mc):
     """A warning when the installed workflow sets PORT_GRADLE_ARGS itself (a hand edit: the template never does) and the
     fork has no .port/<mc>/gate-gradle-args.txt: regenerating drops the edit, and the gates would run the whole suite.
     The committed file, read by every Port CI run (ci-gates.py --port-ci), is where those arguments go. None otherwise."""
     m = re.search(r"(?m)^\s*PORT_GRADLE_ARGS:\s*(.*)$", wf)
     rel = f".port/{mc}/{GATE_ARGS_FILE}"
-    if not m or (pathlib.Path(repo) / rel).is_file():
+    if not m or (pathlib.Path(repo) / rel).is_file() or lower_gate_args(repo, mc):
         return None
     return (f"the installed workflow sets PORT_GRADLE_ARGS by hand ({m.group(1).strip() or 'a block'}); a regenerated "
             f"workflow does not: put each argument on its own line in {rel} and commit it, so every Port CI gate run "
@@ -976,6 +988,8 @@ def workflow_check_check():
         said = []
         check(r, kit_version=7, say=said.append)
         ok &= want("check: the file present: no hand warning", len(said) == 1 and "is current" in said[0], "current", said)
+        ok &= want("check: a lower version's file (inherited) also silences it", hand_gradle_args(hand, r, "1.21.4") is None
+                   and hand_gradle_args(hand, r, "1.21.0") is not None, "None / a warning", "the lower file ignored")
         ok &= want("check: the template never sets PORT_GRADLE_ARGS", hand_gradle_args(cur, d, "1.21.4") is None
                    and hand_gradle_args(fixture(True), d, "1.21.4") is None, None, "a template PORT_GRADLE_ARGS")
         (r / WORKFLOW).write_text(old, encoding="utf-8")       # the cases below read the records-less workflow
