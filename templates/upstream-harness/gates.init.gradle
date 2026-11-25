@@ -1,4 +1,5 @@
-// Wires an EXTERNAL test harness into an upstream repo's own ModDevGradle build, for the gate run only.
+// Wires an EXTERNAL test harness into an upstream repo's own build -- ModDevGradle (net.neoforged.moddev) or
+// NeoGradle userdev (net.neoforged.gradle.userdev) -- for the gate run only.
 // Nothing here is committed to that repo: the harness lives in $PORT_HARNESS_DIR (java/, resources/,
 // test/, run/), and this script is passed with --init-script. tools/port-upstream.py sets both.
 //
@@ -42,6 +43,39 @@ allprojects { p ->
             type = 'gameTestServer'
             gameDirectory = p.file("${harness}/run")
             systemProperty 'neoforge.enabledGameTestNamespaces', modid
+        }
+    }
+    // The same harness for a build on NeoGradle's userdev plugin (#298). Its DSL differs from ModDevGradle's:
+    // the top-level `runs` container (RunManager) holds the runs, a run's game directory is its
+    // `workingDirectory` (the run task's working dir; there is no gameDirectory), and a run takes its type from
+    // its NAME (configureFromTypeWithName), so `gameTestServer` is a gameTestServer run. Its tasks have the
+    // same names: "run" + the capitalised run name (runClient, runGameTestServer).
+    p.pluginManager.withPlugin('net.neoforged.gradle.userdev') {
+        p.sourceSets.main.java.srcDir("${harness}/java")
+        p.sourceSets.main.resources.srcDir("${harness}/resources")
+        p.sourceSets.test.java.srcDir("${harness}/test")
+        p.dependencies.add('testImplementation', 'org.junit.jupiter:junit-jupiter:5.10.2')
+        p.dependencies.add('testRuntimeOnly', 'org.junit.platform:junit-platform-launcher')
+        p.tasks.withType(Test).configureEach { useJUnitPlatform(); workingDir = p.projectDir }
+        // After the author's build script, not in runs.configureEach: a userdev build commonly sets every run's
+        // workingDirectory in its own `runs { configureEach { ... } }`, which runs after an init script's action
+        // and would win. NeoGradle's own afterEvaluate (registered when the plugin applied, so before this one)
+        // only registers the run tasks; their JavaExec reads the run's directory and properties when the task is
+        // realised, after every afterEvaluate. A gameTestServer run the author has none of (the per-type default
+        // runs can be turned off) is made here, and NeoGradle's realizeAll configures it and adds its task.
+        p.afterEvaluate {
+            def runs = p.extensions.getByName('runs')
+            def client = runs.findByName('client')
+            if (client != null) {
+                client.workingDirectory.set(p.file("${harness}/run-client"))
+                if (p.hasProperty('boottest')) client.systemProperties.put("${modid}.boottest".toString(), 'true')
+                if (p.hasProperty('testmode')) {
+                    client.systemProperties.put("${modid}.testmode".toString(), p.property('testmode').toString())
+                }
+            }
+            def gts = runs.findByName('gameTestServer') ?: runs.create('gameTestServer')
+            gts.workingDirectory.set(p.file("${harness}/run"))
+            gts.systemProperties.put('neoforge.enabledGameTestNamespaces', modid)
         }
     }
 }

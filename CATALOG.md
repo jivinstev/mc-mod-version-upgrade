@@ -7158,3 +7158,22 @@ depends on the receiver's type belongs to a caret-precise fix at the compiler's 
 the same removed method fails again on a new receiver, add that receiver's row in the same change and note the
 method here.
 · **Scan:** `grep -rnoE '\b\w+\.<removedMethod>\(' src/main/java | awk -F: '{print $NF}' | sort | uniq -c`
+
+**X181. An init script that configures a NeoGradle userdev run in `runs.configureEach` loses to the author's build.**
+**Pattern:** a Gradle init script (the gate harness, `templates/upstream-harness/gates.init.gradle`) points a userdev
+build's `client` run somewhere else with `runs.configureEach { r -> r.workingDirectory.set(..) }` inside
+`withPlugin('net.neoforged.gradle.userdev')`, while the author's own build says `runs { configureEach {
+workingDirectory project.file('run') } }` · **Symptom:** no error; `runClient` still launches in the author's `run/`
+(measured on a 1.21.1 userdev fixture, NeoGradle 7.1.36, by printing the JavaExec task's `workingDir`): the init
+script's action is registered first, when the plugin applies, so the build script's later action wins for the same
+run. ModDevGradle-shaped wiring copied to NeoGradle carries this silently. · **What NeoGradle's DSL is** (read from
+the 7.1.36 sources, `net.neoforged.gradle:common` / `dsl-common`): the runs live in the top-level `runs` container
+(`RunManager`); a run's game directory IS its `workingDirectory` (no `gameDirectory`; default `runs/<name>`);
+`systemProperties` is a `MapProperty`; a run takes its type from its name (`configureFromTypeWithName`), and a run per
+userdev run type (client, server, data, gameTestServer, junit) is made by default when the NeoForge dependency is added
+(`create-default-run-per-type`); the task is `"run" + capitalised name` (`runClient`, `runGameTestServer`, the names
+ModDevGradle gives too). The JavaExec task reads the run's directory and properties when it is REALISED
+(`RunsUtil.createTasks`), and NeoGradle registers it in its own `afterEvaluate`. · **Fix:** set the harness's values in
+an `afterEvaluate` registered inside the `withPlugin` block (it runs after the author's script and after NeoGradle's,
+before any task is realised); create `gameTestServer` there only when `runs.findByName` finds none.
+· **Scan:** `grep -n "runs.configureEach\|runs.matching" <init script>` inside a userdev block.
