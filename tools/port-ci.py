@@ -1555,40 +1555,86 @@ def reuse_check():
         tree = g("rev-parse", f"{c_}^{{tree}}", cwd=repo).stdout.strip()
         fake_gh = ('gh() { echo "$*" >> "$GH_CALLS"; [ "$1" = api ] || return 3; case "$2" in '
                    '"repos/o/examplemod/actions/runs/$GITHUB_RUN_ID") cat "$THIS_RUN" ;; '
-                   '"repos/o/examplemod/actions/runs/$FROM_RUN") [ -f "$FROM_JSON" ] && cat "$FROM_JSON" ;; *) return 1 ;; esac; }\n')
-        good_run = {"repository": {"full_name": "o/examplemod"}, "workflow_id": 5, "status": "completed",
-                    "conclusion": "success", "event": "pull_request", "head_sha": a_}
-        cases = {"the same tree": ({}, "12", "yes", 0), "another tree": ({"head_sha": b_}, "12", "yes", 1),
-                 "a failed run": ({"conclusion": "failure"}, "12", "yes", 1),
-                 "a dispatch run (maybe dep_override)": ({"event": "workflow_dispatch"}, "12", "yes", 1),
-                 "another workflow": ({"workflow_id": 6}, "12", "yes", 1),
-                 "another repository": ({"repository": {"full_name": "x/y"}}, "12", "yes", 1),
-                 "running": ({"status": "in_progress"}, "12", "yes", 1), "no such run": (None, "12", "yes", 1),
-                 "not digits": ({}, "12; touch pwned", "yes", 1), "without release": ({}, "12", "", 1)}
-        for case, (patch, fr, release, rc_want) in cases.items():
+                   '"repos/o/examplemod/actions/runs/$FROM_RUN") [ -f "$FROM_JSON" ] && cat "$FROM_JSON" ;; '
+                   '"repos/o/examplemod/actions/runs/$FROM_RUN/jobs?filter=latest&per_page=100") '
+                   '[ -f "$JOBS_JSON" ] && cat "$JOBS_JSON" ;; *) return 1 ;; esac; }\n')
+        good_run = {"repository": {"full_name": "o/examplemod"}, "head_repository": {"full_name": "o/examplemod"},
+                    "workflow_id": 5, "status": "completed", "conclusion": "success", "event": "pull_request", "head_sha": a_}
+        green = [{"name": n, "conclusion": "success"} for n in ("gates (full)", "gates (minimal)", "gates (full, cf)",
+                                                                  "shipped jars")] + [{"name": "release", "conclusion": "skipped"}]
+        push = {"event": "push", "head_sha": c_}      # the push run of the very commit being released (issue #280)
+
+        def recolor(name, c):
+            return [dict(j, conclusion=c) if j["name"] == name else j for j in green]
+        # case: (run patch, its jobs, from_run, release, exit, words the refusal must say)
+        cases = {"the same tree": ({}, green, "12", "yes", 0, ""),
+                 "a push run of the same tree": (push, green, "12", "yes", 0, ""),
+                 "a push run of another commit, the same tree": (dict(push, head_sha=a_), green, "12", "yes", 0, ""),
+                 "another tree": ({"head_sha": b_}, green, "12", "yes", 1, "not the tree of"),
+                 "a push run of another tree": (dict(push, head_sha=b_), green, "12", "yes", 1, "not the tree of"),
+                 "a failed run": ({"conclusion": "failure"}, green, "12", "yes", 1, "did not succeed"),
+                 "a failed push run": (dict(push, conclusion="failure"), recolor("gates (minimal)", "failure"), "12", "yes", 1,
+                                       "did not succeed"),
+                 "a push run with a gates leg skipped": (push, recolor("gates (full, cf)", "skipped"), "12", "yes", 1,
+                                                         "gates (full, cf) skipped"),
+                 "a push run with the shipped jars cancelled": (push, recolor("shipped jars", "cancelled"), "12", "yes", 1,
+                                                                "shipped jars cancelled"),
+                 "a push run with no gates job": (push, [{"name": "release", "conclusion": "success"}], "12", "yes", 1,
+                                                  "ran no gates job"),
+                 "jobs not listed": (push, None, "12", "yes", 1, "cannot list run 12's jobs"),
+                 "a running push run": (dict(push, status="in_progress", conclusion=None), green, "12", "yes", 1,
+                                        "not completed"),
+                 "a dispatch run (maybe dep_override)": ({"event": "workflow_dispatch"}, green, "12", "yes", 1,
+                                                         "not a push or pull_request run"),
+                 "a schedule run": (dict(push, event="schedule"), green, "12", "yes", 1, "not a push or pull_request run"),
+                 "a pull request from another repository": ({"head_repository": {"full_name": "x/examplemod"}}, green, "12",
+                                                            "yes", 1, "head commit came from x/examplemod"),
+                 "another workflow": ({"workflow_id": 6}, green, "12", "yes", 1, "another workflow"),
+                 "another repository": ({"repository": {"full_name": "x/y"}}, green, "12", "yes", 1, "not a run of"),
+                 "running": ({"status": "in_progress"}, green, "12", "yes", 1, "not completed"),
+                 "no such run": (None, green, "12", "yes", 1, "no workflow run"),
+                 "not digits": ({}, green, "12; touch pwned", "yes", 1, "digits only"),
+                 "without release": ({}, green, "12", "", 1, "release = true")}
+        for case, (patch, jobs_, fr, release, rc_want, says) in cases.items():
             (tmp / "calls.txt").write_text("", encoding="utf-8")
-            fj = tmp / "from.json"
-            if fj.exists():
-                fj.unlink()
+            fj, jj = tmp / "from.json", tmp / "jobs.json"
+            for f_ in (fj, jj, tmp / "from-run-sha.txt", tmp / "from-run-event.txt", tmp / "summary.md"):
+                if f_.exists():
+                    f_.unlink()
             if patch is not None:
                 fj.write_text(json.dumps(dict(good_run, **patch)), encoding="utf-8")
+            if jobs_ is not None:
+                jj.write_text(json.dumps({"total_count": len(jobs_), "jobs": jobs_}), encoding="utf-8")
             (tmp / "this.json").write_text(json.dumps({"workflow_id": 5}), encoding="utf-8")
             env = dict(os.environ, RUNNER_TEMP=tmp.as_posix(), GITHUB_STEP_SUMMARY=(tmp / "summary.md").as_posix(),
                        GITHUB_REPOSITORY="o/examplemod", GITHUB_RUN_ID="99", GITHUB_SHA=c_, FROM_RUN=fr, RELEASE=release,
-                       THIS_RUN=(tmp / "this.json").as_posix(), FROM_JSON=fj.as_posix(), GH_CALLS=(tmp / "calls.txt").as_posix())
+                       THIS_RUN=(tmp / "this.json").as_posix(), FROM_JSON=fj.as_posix(), JOBS_JSON=jj.as_posix(),
+                       GH_CALLS=(tmp / "calls.txt").as_posix())
             r = subprocess.run([BASH, "-c", fake_gh + check_run], cwd=repo, env=env, capture_output=True, text=True,
                                encoding="utf-8", errors="replace")
             calls = (tmp / "calls.txt").read_text(encoding="utf-8")
-            good = r.returncode == rc_want and not (repo / "pwned").exists() and (rc_want == 0 or "::error::" in r.stdout + r.stderr)
+            out_ = r.stdout + r.stderr
+            good = r.returncode == rc_want and not (repo / "pwned").exists() and (rc_want == 0 or "::error::" in out_)
+            good &= says in out_ and (rc_want == 0 or "nothing released" in out_ or case in ("not digits", "without release"))
             good &= case != "not digits" or calls == ""
+            if rc_want == 0:      # what the logs step reads (the run's event), and the summary names the run released
+                ev_ = dict(good_run, **patch)["event"]
+                good &= (tmp / "from-run-event.txt").read_text(encoding="utf-8").strip() == ev_
+                good &= "Releasing the jars and gate logs of run 12" in (tmp / "summary.md").read_text(encoding="utf-8")
             if not good:
                 print(f"reuse: from_run check ({case}): exit {r.returncode}, want {rc_want}\n{(r.stdout + r.stderr)[-1200:]}")
             ok &= good
         # the gate logs must record this commit's tree, for every leg; jars and both environments must be there
-        for case, (legs, jars, rc_want) in {"recorded": ({"full": tree, "minimal": tree, "full-cf": tree}, True, 0),
-                                            "a leg built another tree": ({"full": tree, "minimal": tree, "full-cf": "0" * 40}, True, 1),
-                                            "no record (an older workflow)": ({"full": "", "minimal": tree}, True, 1),
-                                            "no minimal": ({"full": tree}, True, 1), "no jars": ({"full": tree, "minimal": tree}, False, 1)}.items():
+        for case, (legs, jars, rc_want, event) in {
+                "recorded": ({"full": tree, "minimal": tree, "full-cf": tree}, True, 0, "pull_request"),
+                "recorded by a push run": ({"full": tree, "minimal": tree, "full-cf": tree}, True, 0, "push"),
+                "a leg built another tree": ({"full": tree, "minimal": tree, "full-cf": "0" * 40}, True, 1, "pull_request"),
+                "a push run's leg built another tree": ({"full": tree, "minimal": "0" * 40}, True, 1, "push"),
+                "no record (an older workflow)": ({"full": "", "minimal": tree}, True, 1, "pull_request"),
+                "no minimal": ({"full": tree}, True, 1, "pull_request"),
+                "a push run with no minimal gate log": ({"full": tree}, True, 1, "push"),
+                "no jars": ({"full": tree, "minimal": tree}, False, 1, "pull_request"),
+                "a push run with no jars": ({"full": tree, "minimal": tree}, False, 1, "push")}.items():
             import shutil
             for x in ("logs", "jars"):
                 shutil.rmtree(repo / x, ignore_errors=True)
@@ -1602,12 +1648,12 @@ def reuse_check():
                     (repo / "logs" / f"gate-logs-{leg}" / "built-tree.txt").write_text(t_ + "\n", encoding="utf-8")
             if jars:
                 (repo / "jars").mkdir(); (repo / "jars/x.jar").write_bytes(b"")
-            (tmp / "from-run-event.txt").write_text("pull_request\n", encoding="utf-8")
+            (tmp / "from-run-event.txt").write_text(event + "\n", encoding="utf-8")
             r = subprocess.run([BASH, "-c", check_logs], cwd=repo, env=dict(os.environ, GITHUB_SHA=c_, FROM_RUN="12",
                                RUNNER_TEMP=tmp.as_posix()), capture_output=True, text=True, encoding="utf-8", errors="replace")
             if rc_want == 0:      # first line: this commit (the reader's `at `<sha>`` and "for Minecraft"), what was tested
                 new_ = (f"Gates for `examplemod` at `{c_}` for Minecraft 1.21.1 (full environment) -- run by CI with no model "
-                        "and no fixes applied: -- tested as abc1234 (pull_request run 12), the same tree").encode("utf-8")
+                        f"and no fixes applied: -- tested as abc1234 ({event} run 12), the same tree").encode("utf-8")
                 got_ = [(repo / "logs" / f"gate-logs-{leg}" / "gates.md").read_bytes() for leg in legs]
                 if got_ != [new_ + rest_] * len(legs):
                     print(f"reuse: gate summary header rewrite: {got_[:1]!r}"); ok = False

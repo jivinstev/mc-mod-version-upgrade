@@ -29,9 +29,11 @@
 # (gates-full.md, gates-minimal.md, gates-<env>-<variant>.md): the gate record of the commit it was built from.
 #
 # Reuse a run: release = true with from_run = <run id> releases the jars and gate logs of that earlier run -- a
-# successful push or pull_request run of this workflow that built the same tree as this commit -- instead of building
-# and gating again (no gates job runs). The release job checks the run (this repository, this workflow, completed,
-# success), that its head commit and the tree its gates recorded are this commit's tree, and releases nothing otherwise.
+# successful push or pull_request run of this workflow that built the same tree as this commit, e.g. the push run of
+# the commit being released -- instead of building and gating again (no gates job runs). The release job checks the
+# run (this repository, this workflow, a push or pull_request run whose head commit is this repository's -- never a
+# dispatch, never a pull request from another repository -- completed, success, every gates job and the shipped-jars
+# job green), that its head commit and the tree its gates recorded are this commit's tree, and releases nothing otherwise.
 # Each gate summary's first line then names this commit, adding the commit that was tested (a pull_request run tests
 # GitHub's merge commit, in no branch's history); the rest of it is unchanged.
 #
@@ -79,7 +81,7 @@ on:
         type: boolean
         default: false
       from_run:
-        description: "With release: release the jars and gate logs of this earlier run (a pull_request run of the same tree) instead of building again"
+        description: "With release: release the jars and gate logs of this earlier green push or pull_request run of the same tree instead of building again"
         type: string
         default: ""
       dep_override:
@@ -250,17 +252,27 @@ jobs:
             echo "::error::no workflow run $FROM_RUN in $GITHUB_REPOSITORY: nothing released"; exit 1
           fi
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$RUNNER_TEMP/this-run.json"
+          if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FROM_RUN/jobs?filter=latest&per_page=100" > "$RUNNER_TEMP/from-run-jobs.json"; then
+            echo "::error::cannot list run $FROM_RUN's jobs: nothing released"; exit 1
+          fi
           python3 - <<'PY'
           import json, os, re, sys
-          t = os.environ["RUNNER_TEMP"]
-          r, me = (json.load(open(os.path.join(t, f), encoding="utf-8")) for f in ("from-run.json", "this-run.json"))
-          why = ("it is not a run of " + os.environ["GITHUB_REPOSITORY"]
-                 if (r.get("repository") or {}).get("full_name") != os.environ["GITHUB_REPOSITORY"] else
+          t, repo = os.environ["RUNNER_TEMP"], os.environ["GITHUB_REPOSITORY"]
+          r, me, jobs = (json.load(open(os.path.join(t, f), encoding="utf-8"))
+                         for f in ("from-run.json", "this-run.json", "from-run-jobs.json"))
+          # the jobs whose output the release publishes: every gates leg (its gate log) and the shipped-jars boot
+          gated = [j for j in jobs.get("jobs") or [] if str(j.get("name")).startswith("gates (") or j.get("name") == "shipped jars"]
+          red = [str(j.get("name")) + " " + str(j.get("conclusion")) for j in gated if j.get("conclusion") != "success"]
+          why = ("it is not a run of " + repo if (r.get("repository") or {}).get("full_name") != repo else
                  "it is a run of another workflow" if r.get("workflow_id") != me.get("workflow_id") else
-                 "it has not completed" if r.get("status") != "completed" else
-                 "it did not succeed (" + str(r.get("conclusion")) + ")" if r.get("conclusion") != "success" else
                  "it was a " + str(r.get("event")) + " run, not a push or pull_request run (which gate the pinned jars)"
                  if r.get("event") not in ("push", "pull_request") else
+                 "its head commit came from " + str((r.get("head_repository") or {}).get("full_name")) + ", not " + repo
+                 if (r.get("head_repository") or {}).get("full_name") != repo else
+                 "it has not completed" if r.get("status") != "completed" else
+                 "it did not succeed (" + str(r.get("conclusion")) + ")" if r.get("conclusion") != "success" else
+                 "it ran no gates job" if not any(str(j.get("name")).startswith("gates (") for j in gated) else
+                 "not every gate job succeeded (" + ", ".join(red) + ")" if red else
                  "it names no head commit" if not re.fullmatch(r"[0-9a-f]{40}", str(r.get("head_sha"))) else None)
           if why:
               sys.exit("::error::will not release run " + os.environ["FROM_RUN"] + ": " + why + "; nothing released")

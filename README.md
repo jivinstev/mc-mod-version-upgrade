@@ -103,8 +103,11 @@ version was set up). Some fixes, checks and savings still reach
   every environment's gate summary as written by `ci-gates.py` (`gates-full.md`, `gates-minimal.md`,
   `gates-<env>-<variant>.md`), the gate record of the commit it was built from. Port CI's `release = true` with
   `from_run = <run id>` releases the jars and gate logs of an earlier successful push or pull_request run of the same
-  workflow instead of building again (no gates job runs): the release job checks that run's head commit and the tree
-  its gates recorded are this commit's tree, and releases nothing otherwise; each attached summary's first line
+  workflow instead of building again (no gates job runs) -- e.g. the green push run of the commit being released, so a
+  pushed branch or version-branch rung is not gated twice: the release job checks that run is of this workflow in this
+  repository, a push or pull_request run whose head commit is this repository's (never a dispatch, never a pull
+  request from another repository), with every gates job and the shipped-jars job green, that its head commit and the
+  tree its gates recorded are this commit's tree, and releases nothing otherwise; each attached summary's first line
   then names this commit and the one tested (a pull_request run tests GitHub's merge commit). `dep_override =
   "owner/repo@tag/asset.jar=group:artifact:version@sha256"` (a release asset) or
   `"owner/repo#RUN_ID/ARTIFACT/asset.jar=group:artifact:version@sha256"` (a jar in another repository's run artifact),

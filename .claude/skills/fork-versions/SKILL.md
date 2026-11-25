@@ -204,7 +204,8 @@ throwaway clone first.
 
 A dependent fork's version T is ported only after the library fork's T is **done** (its list above, the library rule's
 own reason aside) and **released**: the library's version branch cuts its own pre-release (Port CI's `release` on
-`neoforge-T`, tag `<mod>-<ver>-mcT`), and the dependent pins that release's jar by sha256 in `.port/T/branch.properties`
+`neoforge-T`, tag `<mod>-<ver>-mcT`; once the rung's push run is green, dispatch it with `from_run=<that push run's
+id>` so the release publishes that run's jars and gate logs instead of gating the same tree again), and the dependent pins that release's jar by sha256 in `.port/T/branch.properties`
 (`port_jar.<g:a>=<url> <sha256>` beside `substitute.<g:a>=<g:a:ver-mcT>`): `python3 tools/layer-deps.py resolve --repo
 DIR --target T --port-release owner/lib@<tag>` on the dependent's T checkout. **A pin is kept:** every later resolve
 (`fork-port.py`'s setup, a cascade's) keeps each CurseForge/Modrinth pin the block holds as it is, with no lookup; only
