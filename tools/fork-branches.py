@@ -240,8 +240,13 @@ def checkout_version(root):
     folder's gradle.properties: the one they all name."""
     mc = parse_props(read_file(pathlib.Path(root) / "gradle.properties")).get("minecraft_version")
     if not mc:
-        mcs = {parse_props(read_file(pathlib.Path(root) / m / "gradle.properties")).get("minecraft_version")
-               for m in mod_dirs(root)}
+        by = {m: parse_props(read_file(pathlib.Path(root) / m / "gradle.properties")).get("minecraft_version")
+              for m in mod_dirs(root)}
+        mcs = set(by.values())
+        if len(mcs) > 1 and any((rec_dir(root, x) / BRANCH_PROPS).is_file() for x in mcs if x):
+            raise SystemExit(f"{root}: the mod folders name different Minecraft versions in their gradle.properties ("
+                             + ", ".join(f"{m}: {x or 'none'}" for m, x in sorted(by.items()))
+                             + "): a version branch builds every mod for its one version; set minecraft_version alike")
         mc = mcs.pop() if len(mcs) == 1 else None
     return mc if mc and (rec_dir(root, mc) / BRANCH_PROPS).is_file() else None
 
