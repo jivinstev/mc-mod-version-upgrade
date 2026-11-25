@@ -103,6 +103,12 @@ def use_mod(name, mod_dir=None):
     WORKFLOW = f".github/workflows/port-ci-{name}.yml"
 
 
+def mod_tag(name, tag):
+    """Is `tag` one of mod `name`'s releases: `<name>-<digit>...`, never a prefix match alone (a mod `a` must not take
+    mod `a-b`'s `a-b-1.0-mc1.21.8`)?"""
+    return re.match(re.escape(name) + r"-[0-9]", tag or "") is not None
+
+
 def mod_ledger(repo, modid):
     """The known-issues ledger publishing reads: .port/KNOWN-ISSUES.json, or for one mod of several
     .port/<modid>/KNOWN-ISSUES.json (known-issues.py --mod) when the repository keeps one for it."""
@@ -1060,6 +1066,10 @@ def self_check():
         if not c:
             ok = False; print("FAIL:", msg)
     expect(minecraft_of("examplemod-1.0.0-mc1.21.1") == "1.21.1", "minecraft from tag")
+    # two mods `a` and `a-b` in one repository: each takes only its own releases, never the other's by prefix
+    expect(mod_tag("a", "a-1.0-mc1.21.8") and not mod_tag("a", "a-b-1.0-mc1.21.8") and mod_tag("a-b", "a-b-1.0-mc1.21.8")
+           and not mod_tag("a-b", "a-1.0-mc1.21.8") and not mod_tag("a.b", "aXb-1.0-mc1.21.8"),
+           "a mod's tags are <name>-<digit>..., never a prefix of another mod's")
     expect(page_title("Example Mod", "1.21.1") == "Example Mod - Community Port (1.21.1+)", "title carries the scope")
     expect(not re.search(r"\d+\.\d+", curseforge_name("Example Mod")), "the CurseForge name has no game version number")
     import contextlib, io
@@ -1423,6 +1433,9 @@ def main():
         cfg_ = load_config(a.repo) if a.cmd != "setup" else None
         if cfg_ and cfg_.get("mod_dir"):
             use_mod(a.mod, cfg_["mod_dir"])
+        tag_ = getattr(a, "tag", None)
+        if tag_ and not mod_tag(a.mod, tag_):
+            sys.exit(f"--mod {a.mod}: {tag_} is not one of its releases ({a.mod}-<version>-mc<minecraft>)")
     if getattr(a, "repo", None):
         import importlib.util
         spec = importlib.util.spec_from_file_location("fork_kind_pp", pathlib.Path(__file__).resolve().parent / "fork-kind.py")

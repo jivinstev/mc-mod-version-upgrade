@@ -634,14 +634,16 @@ def mod_values(values, mod_dir=None, name=None, also=()):
             "    # builds from or this workflow (GitHub evaluates path filters on branch pushes only, so a release tag still runs)\n"
             "    paths: [" + ", ".join(json.dumps(x) for x in paths) + "]")
     check = (f'          case "$TAG" in\n'
-             f'            "{name}-"*) ;;\n'
+             f'            "{name}-"[0-9]*) ;;\n'
              f'            *) echo "::error::$TAG is not a release of {name} ({name}-<version>-mc<minecraft>): promote it with '
              f'its own workflow, port-ci-<mod>.yml"; exit 1 ;;\n'
              f'          esac\n')
-    return dict(values, MOD_TITLE=f" {name}", TAG_GLOB=f"{name}-", MOD_DIR=mod_dir, LOGS=f"gate-logs-{name}-",
+    # a mod's releases are `<name>-<digit>...`: never by prefix alone, so a mod `a` never takes mod `a-b`'s tags
+    mine = " || ".join(f"startsWith(github.event.release.tag_name, '{name}-{n}')" for n in range(10))
+    return dict(values, MOD_TITLE=f" {name}", TAG_GLOB=f"{name}-[0-9]", MOD_DIR=mod_dir, LOGS=f"gate-logs-{name}-",
                 JARS=f"jars-{name}", LIBS=f"{mod_dir}/build/libs", MOD_PROPS=f"{mod_dir}/gradle.properties",
                 TAG_NAME=name, PROMOTE_TAG_CHECK=check,
-                PUBLISH_IF=f" && (github.event_name != 'release' || startsWith(github.event.release.tag_name, '{name}-'))",
+                PUBLISH_IF=f" && (github.event_name != 'release' || {mine})",
                 PUBLISH_MOD=f' --mod "{name}"', MOD_PUSH=push)
 
 
@@ -679,7 +681,7 @@ def recover_args(text):
     mod_dir = one(r'ci-gates\.py --repo (\S+) --modid ')
     if mod_dir and mod_dir != ".":                 # one mod of several (--mod-dir): its name, and what it builds from
         out += ["--mod-dir", mod_dir]
-        name = one(r'tags: \["([A-Za-z0-9][\w.-]*)-\*-mc')
+        name = one(r'tags: \["([A-Za-z0-9][\w.-]*?)-(?:\[0-9\])?\*-mc')
         if name and name != mod_dir.rsplit("/", 1)[-1]:
             out += ["--tag-name", name]
         paths = re.search(r"(?m)^    paths: (\[.*\])\s*$", text)
@@ -714,7 +716,7 @@ def recover_args(text):
         if d not in seen:
             seen.append(d); out += ["--dep", d]
     out += ["--gatec", one(r'--gatec "([^"]*)"')]
-    mc_suffix = re.search(r'tags: \["(?:[\w.-]+-)?\*-mc([\d.]+)([^"]*)"\]', text)
+    mc_suffix = re.search(r'tags: \["(?:[\w.-]+-(?:\[0-9\])?)?\*-mc([\d.]+)([^"]*)"\]', text)
     if mc_suffix and mc_suffix.group(2):
         out.append(f"--tag-suffix={mc_suffix.group(2)}")
     # a workflow generated with the removed --layer-branch also triggers on the layer branch: that is dropped here, so a
@@ -865,7 +867,7 @@ def promote(argv):
                     "workflow, port-ci-<NAME>.yml (port-ci.py --mod-dir); the tag must be <NAME>-...")
     a = ap.parse_args(argv)
     wfile = mod_workflow(a.mod)
-    if a.mod and (not MOD_NAME.fullmatch(a.mod) or not a.tag.startswith(a.mod + "-")):
+    if a.mod and (not MOD_NAME.fullmatch(a.mod) or not re.match(re.escape(a.mod) + r"-[0-9]", a.tag)):
         sys.exit(f"--mod {a.mod}: {a.tag} is not one of its releases ({a.mod}-<version>-mc<minecraft>)")
     wname = wfile.rsplit("/", 1)[-1]
     ref, inputs = promote_dispatch(a.fork, a.tag, a.played_by, a.notes, a.branch)
@@ -985,7 +987,6 @@ def multimod_check():
     wf = fixture(False, mod=("alpha", "alpha", ["shared/**"]))
     has = lambda case, s, text=wf: want(case, s in text, s, "(absent)")
     ok &= has("mod: workflow name", "name: Port CI alpha (NeoForge")
-    ok &= has("mod: its own tags only", 'tags: ["alpha-*-mc1.21.1"]')
     ok &= has("mod: push paths", '    paths: ["alpha/**", "shared/**", ".github/workflows/port-ci-alpha.yml"]')
     ok &= want("mod: no paths-ignore beside paths", "paths-ignore" not in wf, "none", "paths-ignore")
     ok &= has("mod: gates run on its folder", 'ci-gates.py --repo alpha --modid "examplemod"')
@@ -999,7 +1000,10 @@ def multimod_check():
                and "name: jars\n" not in wf, "none", "a single-mod artifact name")
     ok &= has("mod: release reads its gradle.properties", "sparse-checkout: alpha/gradle.properties")
     ok &= has("mod: tag from its gradle.properties", "//p' alpha/gradle.properties | head -1)\n            TAG=\"alpha-${v}-mc1.21.1\"")
-    ok &= has("mod: publish only its own releases", "startsWith(github.event.release.tag_name, 'alpha-')")
+    ok &= has("mod: publish only its own releases", "startsWith(github.event.release.tag_name, 'alpha-0') || "
+              "startsWith(github.event.release.tag_name, 'alpha-1')")
+    ok &= want("mod: no bare name- prefix test", "tag_name, 'alpha-')" not in wf, "none", "a bare prefix")
+    ok &= has("mod: its tags only, a version after the name", 'tags: ["alpha-[0-9]*-mc1.21.1"]')
     ok &= has("mod: publish with its config", 'port-publish.py publish --repo . --tag "$TAG" --mod "alpha" ${MANUAL:+--manual}')
     ok &= has("mod: publish setup with its config", 'port-publish.py modrinth-create --repo . --mod "alpha"')
     # the differences from the single-mod workflow are only these (no line of the single-mod one moves otherwise)
@@ -1012,10 +1016,23 @@ def multimod_check():
     ok &= has("mod: promote checks the tag first", mark)
     blk = wf.split(mark, 1)[-1].split("          esac\n", 1)[0] if mark in wf else "*) exit 9 ;;\n"
     script = 'case "$TAG" in\n' + blk + "esac\n"
-    for tag, rc in (("alpha-2.0.5-mc1.21.1", 0), ("beta-2.0.4-mc1.21.1", 1), ("alphabet-1-mc1.21.1", 1)):
+    for tag, rc in (("alpha-2.0.5-mc1.21.1", 0), ("beta-2.0.4-mc1.21.1", 1), ("alphabet-1-mc1.21.1", 1),
+                    ("alpha-extra-1.0-mc1.21.1", 1)):
         r = subprocess.run([_load_tool("gitbash", "gitbash.py").BASH, "-c", script], env=dict(os.environ, TAG=tag),
                            capture_output=True, text=True, encoding="utf-8")
         ok &= want(f"mod: promote {tag}", r.returncode == rc, rc, (r.returncode, r.stdout))
+    # mods `a` and `a-b` side by side: each workflow's tag trigger, promote check and publish test take only its own
+    wa, wab = fixture(False, mod=("a", "a", [])), fixture(False, mod=("a-b", "a-b", []))
+    ok &= want("mods a and a-b: tag triggers", 'tags: ["a-[0-9]*-mc1.21.1"]' in wa and 'tags: ["a-b-[0-9]*-mc1.21.1"]' in wab,
+               "a-[0-9]* / a-b-[0-9]*", "other")
+    for wf_, tag, rc in ((wa, "a-1.0-mc1.21.1", 0), (wa, "a-b-1.0-mc1.21.1", 1), (wab, "a-b-1.0-mc1.21.1", 0),
+                         (wab, "a-1.0-mc1.21.1", 1)):
+        blk_ = wf_.split(mark, 1)[-1].split("          esac\n", 1)[0] if mark in wf_ else "*) exit 9 ;;\n"
+        r = subprocess.run([_load_tool("gitbash", "gitbash.py").BASH, "-c", 'case "$TAG" in\n' + blk_ + "esac\n"],
+                           env=dict(os.environ, TAG=tag), capture_output=True, text=True, encoding="utf-8")
+        ok &= want(f"mods a and a-b: promote {tag}", r.returncode == rc, rc, (r.returncode, r.stdout))
+    ok &= want("mods a and a-b: publish tests", "tag_name, 'a-0')" in wa and "tag_name, 'a-b')" not in wa
+               and "tag_name, 'a-b-0')" in wab, "a-<digit> / a-b-<digit>", "other")
     # read back: the arguments it was generated with (args / check)
     rec = recover_args(wf)
     ok &= want("mod: read back", rec[:2] == ["--modid", "examplemod"] and rec[2:6] == ["--mod-dir", "alpha", "--also-path", "shared"],
