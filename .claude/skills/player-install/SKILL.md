@@ -82,8 +82,16 @@ run them with `gh api repos/OWNER/mc-mod-version-upgrade/actions/workflows/playe
 
 ## Acceptance on every release
 
-A mod repository proves its own releases install by running the published one-liner on itself in its release
-workflow, the way a player does (its own workflow names it, so this repository still names no mod):
+A fork on the Port CI kit gets this for free: its generated workflow (`tools/port-ci.py`) has a `player-install`
+job that runs after every promote (and after a release promoted in the GitHub UI). It downloads the published
+bootstrap of the release `PLAYER_INSTALL` in `tools/port-ci.py` names, checks its sha256 (pinned like the kit), and
+installs exactly the tag just promoted (`--release TAG --yes`) into a fresh Minecraft folder on headless Linux, then
+boots it to the title screen with the mods loaded (`--boot-test`). A red job means players cannot install what was
+promoted; the promotion itself stands. One workflow per mod (`--mod-dir`) checks its own mod's tags only; a private
+repository skips the job. Moving the kit to a newer `player-install-vN` is one edit of `PLAYER_INSTALL` (tag and
+sha256 together), to a release whose acceptance passed.
+
+A repository not on the kit can run the same thing in its own release workflow:
 
 ```yaml
   player-install:
@@ -93,14 +101,15 @@ workflow, the way a player does (its own workflow names it, so this repository s
       - run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0
       - env:
           GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           curl -fsSL https://github.com/jivinstev/mc-mod-version-upgrade/releases/download/player-install-vN/install.sh \
-            | xvfb-run -a -s "-screen 0 1280x720x24" bash -s -- ${{ github.repository }} --yes \
+            | xvfb-run -a -s "-screen 0 1280x720x24" bash -s -- ${{ github.repository }} --release "$TAG" --yes \
                 --minecraft-dir "$RUNNER_TEMP/minecraft" --boot-test
 ```
 
-It installs the newest full release for the newest Minecraft version (add `--mc X` for another, `--pre` for a
-pre-release) and boots it to the title screen with the mods loaded; a failure fails the job.
+`--release TAG` installs exactly that release, for the Minecraft version its tag names; without it, the newest full
+release for the newest Minecraft version.
 
 ## When a repository doesn't fit
 
