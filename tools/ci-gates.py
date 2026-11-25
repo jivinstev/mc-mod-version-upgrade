@@ -604,7 +604,9 @@ def multimod_check():
                   ("the unlisted mixins", pu.author_unlisted_mixins(m, "HEAD") == ["Parked"], pu.author_unlisted_mixins(m, "HEAD"))]
         pu.gradle(m, ["build"], r / "g.log", timeout=60)
         ran = (r / "ran-in.txt").read_text(encoding="utf-8").strip() if (r / "ran-in.txt").is_file() else ""
-        checks.append(("gradle ran in the folder", bool(ran) and pathlib.Path(ran).resolve() == m, ran))
+        # Git Bash's pwd prints /c/Users/... for C:/Users/...: read back as a Windows path before comparing
+        win = lambda x: re.sub(r"^/([A-Za-z])/", lambda m_: m_.group(1) + ":/", x) if os.name == "nt" else x
+        checks.append(("gradle ran in the folder", bool(ran) and pathlib.Path(win(ran)).resolve() == m, ran))
         for what, good, got in checks:
             if not good:
                 ok = False
