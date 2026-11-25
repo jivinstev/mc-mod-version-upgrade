@@ -22,6 +22,11 @@ Several mods in one repository (opt-in; without it the workflow is byte-for-byte
   --also-path PATH (repeat)    a folder or file the mod builds from (a shared folder): a push to it runs this workflow.
   `promote --mod NAME` dispatches port-ci-<NAME>.yml.
 
+A release gate of the fork's own (opt-in, a file rather than an option; without it the workflow is byte-for-byte what it
+was): .github/port-release-gate.json, {"schema": 1, "script": "<path>.py|.sh", "args": [...], "timeout_minutes": N},
+read here and refused when bad (release_gate), adds a `release-gate` job that runs the script as an argv on the release
+commit; the release needs it to succeed (release_gate_values).
+
 Per-platform jars (both opt-in; without them the workflow is byte-for-byte what it was, tools/golden/port-ci-*.yml):
   --variant-jar GLOB (repeat)  a mod whose build ships several jars (e.g. '*_mr.jar', '*_cf.jar'): a `shipped jars`
                                job builds once and boots EACH in a real NeoForge server (tools/shipped-gate.py, the
@@ -34,7 +39,8 @@ Per-platform jars (both opt-in; without them the workflow is byte-for-byte what 
 
 `check` warns -- never blocks, exit 0 -- when the checkout's installed workflow pins a Port CI kit older than the newest
 published (a fork only gets a new gate from the first kit that ships it), its push trigger ignores none of the round's
-records, or it was rendered before the from_run / dep_override workflow_dispatch inputs, and prints the command that regenerates it at the newest kit with its own options read back (on a version-branch
+records, or it was rendered before the from_run / dep_override workflow_dispatch inputs, or it does not run the release gate
+the checkout's .github/port-release-gate.json names (or runs one it no longer has), and prints the command that regenerates it at the newest kit with its own options read back (on a version-branch
 fork, tools/fork-kind.py detect, `fork-branches.py ci --head --run` instead). It is the check
 tools/fork-branches.py ci-check makes for a version-branch fork's head branch (stale_workflow), for a single-version
 fork's port branch.
@@ -236,13 +242,14 @@ def missing_digests(wf):
     return "\n  workflow_dispatch:\n" in wf and JAR_DIGESTS_MARK not in wf
 
 
-def stale_workflow(wf, newest):
+def stale_workflow(wf, newest, gate=None):
     """Why a port branch's installed workflow is out of date -- the one check for a single-version fork's port branch
     (`port-ci.py check`) and a version-branch fork's head (tools/fork-branches.py ci-check): it pins a Port CI kit older
     than `newest` (None: not compared), or its push trigger ignores none of the round's records (every known-issues
     ledger or README Ports-block commit is then a full Port CI run), or it lacks the from_run / dep_override
-    workflow_dispatch inputs (missing_inputs) or the jar digest annotations (missing_digests). -> [reasons], [] when
-    current."""
+    workflow_dispatch inputs (missing_inputs) or the jar digest annotations (missing_digests), or -- when `gate` is the
+    text of the fork's .github/port-release-gate.json ("" when it has none; None: not known, not compared) -- it does
+    not run that release gate (release_gate_stale). -> [reasons], [] when current."""
     why = []
     kits = [int(k) for k in re.findall(r"port-ci-kit-v(\d+)", wf)]
     if newest is not None and (not kits or min(kits) < newest):
@@ -255,6 +262,8 @@ def stale_workflow(wf, newest):
                    + "): it can neither release an earlier run's jars nor run the dependent gate")
     elif missing_digests(wf):
         why.append(DIGESTS_STALE)
+    if gate is not None:
+        why += release_gate_stale(wf, gate)
     return why
 
 
@@ -273,7 +282,8 @@ def check(repo, file=None, kit_version=None, say=print):
             newest = newest_kit([wf], say=say)
         except (Exception, SystemExit) as e:    # noqa: BLE001 -- offline: say so, compare the records ignore only
             say(f"port-ci: check: cannot read the newest Port CI kit ({e}); pass --kit-version N")
-    why = stale_workflow(wf, newest)
+    gf = repo / RELEASE_GATE_FILE
+    why = stale_workflow(wf, newest, gf.read_text(encoding="utf-8", errors="replace") if gf.is_file() else "")
     branch = git(repo, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip() or "the port branch"
     hand = hand_gradle_args(wf, repo, props(repo).get("minecraft_version"))
     if hand:
@@ -602,6 +612,152 @@ def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_o
         v.update(SHIPPED_JOB="\n\n" + render(SHIPPED_TEMPLATE.read_text(encoding="utf-8"), sv).rstrip("\n"),
                  RELEASE_NEEDS="[gates, shipped]", RELEASE_SHIPPED_IF=RELEASE_SHIPPED_IF)
     return v
+
+
+
+# The fork's own release gate (issue #306), opt-in by a file in the fork, read when the workflow is generated:
+#   .github/port-release-gate.json  {"schema": 1, "script": "tools/gate/gate.py", "args": ["release-gate"],
+#                                    "timeout_minutes": 180}
+# With it a `release-gate` job runs that script (python3 for .py, bash for .sh: an argv, never a shell string; every
+# argument a quoted literal validated here) between the gates and the release, which needs it to SUCCEED: a failed,
+# skipped or cancelled gate releases nothing. It holds contents: read and actions: write (to find or start a workflow
+# run of its own), never the release's contents: write. Without the file every placeholder is empty and the workflow is
+# byte for byte what it was (tools/golden/port-ci-*.yml).
+RELEASE_GATE_FILE = ".github/port-release-gate.json"
+RELEASE_GATE_ARG = re.compile(r"[A-Za-z0-9_.:=/@+-]+")
+RELEASE_GATE_KEYS = {"schema", "script", "args", "timeout_minutes"}
+RELEASE_GATE_TIMEOUT = (1, 360, 60)                 # minutes: least, most, default
+RELEASE_GATE_IF = " && needs.release-gate.result == 'success'"
+# the release-gate job's condition: exactly the release's (RELEASE_IF, + RELEASE_SHIPPED_IF with --variant-jar) less its
+# own result, and never on a dep_override run (which never releases)
+RELEASE_GATE_RUNS = ("!cancelled() && github.event_name != 'release' && (startsWith(github.ref, 'refs/tags/') || "
+                     "inputs.release || inputs.from_run) && !inputs.dep_override && (needs.gates.result == 'success' || "
+                     "(inputs.from_run && needs.gates.result == 'skipped'))")
+
+
+def release_gate(repo=None, text=None):
+    """The fork's release gate: None when it has no .github/port-release-gate.json, else {script, args,
+    timeout_minutes}, validated -- SystemExit naming the file and what is wrong. `text`: the file's text (default: read
+    from `repo`); `repo` None: the script's existence is not checked (stale_workflow may read the file at a git ref)."""
+    if text is None:
+        f = pathlib.Path(repo) / RELEASE_GATE_FILE
+        if not f.is_file():
+            return None
+        text = f.read_text(encoding="utf-8", errors="replace")
+
+    def bad(why):
+        return SystemExit(f"{RELEASE_GATE_FILE}: {why} -- expected "
+                          '{"schema": 1, "script": "<path>.py|.sh", "args": ["..."], "timeout_minutes": N}')
+    try:
+        cfg = json.loads(text)
+    except ValueError as e:
+        raise bad(f"not JSON ({e})")
+    if not isinstance(cfg, dict):
+        raise bad("not a JSON object")
+    if set(cfg) - RELEASE_GATE_KEYS:
+        raise bad("unknown key(s) " + ", ".join(sorted(set(cfg) - RELEASE_GATE_KEYS)))
+    if cfg.get("schema") != 1 or isinstance(cfg.get("schema"), bool):
+        raise bad(f"schema must be 1, got {cfg.get('schema')!r}")
+    script = cfg.get("script")
+    if not isinstance(script, str) or not script.endswith((".py", ".sh")):
+        raise bad(f"script must be a .py or .sh file in the repository, got {script!r}")
+    if not REL_PATH.fullmatch(script) or any(x in (".", "..") or x.startswith("-") for x in script.split("/")):
+        raise bad(f"script must be a path inside the repository, relative to its root (no '..', no component "
+                  f"starting with '-'), got {script!r}")
+    if repo is not None and not (pathlib.Path(repo) / script).is_file():
+        raise bad(f"script {script}: no such file in the repository")
+    args = cfg.get("args", [])
+    if not isinstance(args, list) or len(args) > 32:
+        raise bad("args must be a list of at most 32 strings")
+    for x in args:
+        if not isinstance(x, str) or len(x) > 200 or not RELEASE_GATE_ARG.fullmatch(x):
+            raise bad(f"each of args must be 1-200 characters of [A-Za-z0-9_.:=/@+-], got {x!r}")
+    lo, hi, default = RELEASE_GATE_TIMEOUT
+    t = cfg.get("timeout_minutes", default)
+    if not isinstance(t, int) or isinstance(t, bool) or not lo <= t <= hi:
+        raise bad(f"timeout_minutes must be a whole number of minutes from {lo} to {hi}, got {t!r}")
+    return {"script": script, "args": list(args), "timeout_minutes": t}
+
+
+def release_gate_argv(gate):
+    """The gate step's command line: the interpreter, the script and its arguments, each a single-quoted literal (the
+    charsets release_gate allows have no quote, `$`, `{` or space, so nothing in it is shell or an expression)."""
+    return " ".join(["python3" if gate["script"].endswith(".py") else "bash",
+                     *(f"'{x}'" for x in [gate["script"], *gate["args"]])])
+
+
+def release_gate_values(values, gate=None):
+    """RELEASE_GATE_JOB / RELEASE_GATE_IF, and the release's needs: empty and unchanged without a gate (byte for byte the
+    old workflow); with one, the `release-gate` job (needing what the release needs, running when it would) and the
+    release needing it to succeed. After variant_values, which sets RELEASE_NEEDS."""
+    if not gate:
+        return dict(values, RELEASE_GATE_JOB="", RELEASE_GATE_IF="")
+    needs = values["RELEASE_NEEDS"]
+    runs = RELEASE_GATE_RUNS + (values.get("RELEASE_SHIPPED_IF") or "")
+    s = gate["script"]
+    job = f"""
+
+  release-gate:
+    # The fork's own check before a release ({RELEASE_GATE_FILE}, read when this workflow was
+    # generated: regenerate it after changing that file). Its script is the fork's own code, trusted like its Gradle
+    # build; it runs as an argv with the commit being released (GATE_SHA: on a from_run release this dispatch's commit,
+    # the tree released) and may find or start a workflow run of this repository (actions: write), never holding the
+    # release's contents: write. The release needs it to succeed: a failure, a skip or a cancel here releases nothing.
+    # It runs exactly when the release would, except on a dep_override run, which never releases.
+    needs: {needs}
+    if: ${{{{ {runs} }}}}
+    runs-on: ubuntu-24.04
+    timeout-minutes: {gate["timeout_minutes"]}
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.sha }}}}
+      - name: Release gate ({s})
+        env:
+          GATE_SHA: ${{{{ github.sha }}}}
+          GATE_REF: ${{{{ github.ref_name }}}}
+          GH_TOKEN: ${{{{ github.token }}}}
+        run: |
+          set +e                       # GITHUB_REPOSITORY: the runner's own
+          log="$RUNNER_TEMP/release-gate.log"
+          {release_gate_argv(gate)} 2>&1 | tee "$log"
+          rc=${{PIPESTATUS[0]}}
+          if [ "$rc" -ne 0 ]; then
+            {{
+              echo "### Release gate failed: {s} exited $rc, nothing released"
+              echo
+              echo '```'
+              tail -n 50 "$log"
+              echo '```'
+            }} >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::release gate {s} exited $rc: nothing released"
+            exit "$rc"
+          fi
+          echo "Release gate passed: {s} at $GATE_SHA" >> "$GITHUB_STEP_SUMMARY\""""
+    return dict(values, RELEASE_GATE_JOB=job, RELEASE_GATE_IF=RELEASE_GATE_IF,
+                RELEASE_NEEDS="[" + needs.strip("[]") + ", release-gate]")
+
+
+def release_gate_stale(wf, text):
+    """Why the workflow does not run the release gate the fork's .github/port-release-gate.json (its text: "" when the
+    fork has none) describes -- [] when it does. A re-render reads the file again, so the regenerate command fixes it."""
+    has = "\n  release-gate:\n" in wf
+    if not text:
+        return ["its workflow has a release-gate job but the fork has no " + RELEASE_GATE_FILE] if has else []
+    try:
+        gate = release_gate(None, text)
+    except SystemExit as e:
+        return [f"its {e}"]
+    if not has:
+        return [f"the fork has {RELEASE_GATE_FILE} but its workflow has no release-gate job"]
+    job = wf.split("\n  release-gate:\n", 1)[1].split("\n\n  release:\n", 1)[0]
+    if (f"\n    timeout-minutes: {gate['timeout_minutes']}\n" not in job
+            or f"\n          {release_gate_argv(gate)} 2>&1 | tee" not in job):
+        return [f"its release-gate job does not run what {RELEASE_GATE_FILE} says (script, args or timeout)"]
+    return []
 
 
 # A repository that ships SEVERAL mods (each a folder with its own settings.gradle, build.gradle and gradle.properties,
@@ -939,7 +1095,7 @@ GOLDEN_CASES = (("single-nodeps", False), ("single-deps", True))
 FIX_DEP = "o/lib@lib-1.0-mc1.21.1/lib-1.0_mr.jar=com.example.lib:lib:1.0"
 
 
-def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False, owned=False, mod=None):
+def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False, owned=False, mod=None, gate=None):
     """The workflow for fixed, invented values (no network: every sha256 is fake). The two option-free cases are
     recorded in tools/golden/port-ci-<case>.yml, captured from port-ci.py BEFORE --variant-jar/--dep-jar-variant
     existed: an option a fork does not use must not change one byte of its workflow."""
@@ -951,6 +1107,7 @@ def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False, o
               "KIT_SHA256": "b" * 64, "GATEC": "launch,spawn", "TAG_SUFFIX": "", "PRE_BUILD": pre,
               "UPSTREAM": "https://github.com/a/examplemod"}
     values = variant_values(values, list(variant_jars), list(dep_variants), [FIX_DEP] if deps else [], sha)
+    values = release_gate_values(values, gate)      # gate: release_gate()'s dict, None for none
     values = records_values(kind_values(values, owned), version_branch)
     values = mod_values(values, *(mod or ()))       # mod: (mod_dir, name, also) for one mod of several
     return mod_push(render(TEMPLATE.read_text(encoding="utf-8"), values), values)
@@ -1973,6 +2130,277 @@ def reuse_check():
     return ok
 
 
+
+def _gh_if(expr, ctx):
+    """A workflow `if:` evaluated as GitHub would for the operators the release conditions use (!, &&, ||, ==, !=,
+    parentheses, cancelled(), startsWith(github.ref, 'refs/tags/')); `ctx`: {"needs.gates.result": ..., "inputs.release":
+    ..., "github.event_name": ..., "github.ref": ..., "cancelled": bool}. A context value not given is '' (GitHub's
+    null)."""
+    e = expr.strip()
+    if e.startswith("${{") and e.endswith("}}"):
+        e = e[3:-2]
+    e = e.replace("startsWith(github.ref, 'refs/tags/')", "TAG_REF").replace("cancelled()", "C['cancelled']")
+    e = re.sub(r"\b((?:needs|inputs|github)\.[\w.-]*\w)", lambda m: f"S('{m.group(1)}')", e)
+    e = re.sub(r"\bfalse\b", "False", e)
+    e = e.replace("TAG_REF", "S('github.ref').startswith('refs/tags/')")
+    e = e.replace("&&", " and ").replace("||", " or ")
+    e = re.sub(r"!(?!=)", " not ", e)
+    if re.search(r"[^\w\s.()'=!<>-]", re.sub(r"'[^']*'", "''", e).replace("C['']", "")):
+        raise ValueError(f"an operator _gh_if does not know: {expr}")
+    return bool(eval(e, {"__builtins__": {}}, {"S": lambda k: ctx.get(k, ""), "C": ctx}))   # exec-ok: a test's own expression
+
+
+GATE_FIX = {"script": "tools/gate/gate.py", "args": ["release-gate", "--wait", "150", "--repo=o/examplemod",
+                                                     "a.b:c@d+e"], "timeout_minutes": 180}
+
+
+def release_gate_check():
+    """The fork's release gate (issue #306, .github/port-release-gate.json): (a) without the file the workflow is the
+    golden, byte for byte, on both fork kinds; (b) with it, a release-gate job with its needs, permissions, timeout,
+    checkout, env and argv, and the release needing it; (c) every bad file refused at generation, by name; (d) the
+    release condition: a skipped, failed or cancelled gate never releases (from_run included, where the gates are
+    skipped), and the gate runs exactly when the release would; (e) the gate step's own shell, run with a fake script
+    exiting 0 and 1; (f) stale_workflow sees a workflow that does not run the fork's gate; (g) main() on a
+    single-version and a version-branch checkout."""
+    import tempfile
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gitbash import BASH
+    ok = True
+    job = lambda wf, j: (("\n" + wf.split("\njobs:\n", 1)[1]).split(f"\n  {j}:\n", 1) + [""])[1].split("\n\n  ", 1)[0]
+    cond = lambda j: (j.split("\n    if: ", 1) + ["${{ false }}"])[1].split("\n", 1)[0]   # no job: never runs
+    # (a) no file: the golden, byte for byte, and no trace of the gate
+    for name, deps in GOLDEN_CASES:
+        g_ = (GOLDEN / f"port-ci-{name}.yml").read_text(encoding="utf-8")
+        ok &= want(f"gate: no file, {name} is the golden", fixture(deps) == g_ and fixture(deps, gate=None) == g_
+                   and "release-gate" not in g_, "the golden", "a diff")
+    # (b) the job
+    wf = fixture(False, gate=GATE_FIX)
+    rg, rel = job(wf, "release-gate"), job(wf, "release")
+    argv = "python3 'tools/gate/gate.py' 'release-gate' '--wait' '150' '--repo=o/examplemod' 'a.b:c@d+e'"
+    for case, s in (("needs the gates", "\n    needs: gates\n"),
+                    ("permissions", "\n    permissions:\n      contents: read\n      actions: write\n    steps:\n"),
+                    ("timeout", "\n    timeout-minutes: 180\n"),
+                    ("checks out the release commit", "      - uses: actions/checkout@v4\n        with:\n          ref: ${{ github.sha }}\n"),
+                    ("env", "        env:\n          GATE_SHA: ${{ github.sha }}\n          GATE_REF: ${{ github.ref_name }}\n"
+                            "          GH_TOKEN: ${{ github.token }}\n        run: |\n"),
+                    ("argv", f"\n          {argv} 2>&1 | tee \"$log\"\n"),
+                    ("if", f"\n    if: ${{{{ {RELEASE_GATE_RUNS} }}}}\n")):
+        ok &= want(f"gate: job {case}", s in rg, s, rg[:1500])
+    code = "\n".join(ln for ln in rg.splitlines() if not ln.lstrip().startswith("#"))
+    ok &= want("gate: no contents: write", "contents: write" not in code and "secrets." not in code, "absent", code)
+    ok &= want("gate: release needs it", "\n    needs: [gates, release-gate]\n" in rel, "[gates, release-gate]", rel[:400])
+    ok &= want("gate: release condition", RELEASE_IF.format(RELEASE_GATE_IF) in rel, RELEASE_IF.format(RELEASE_GATE_IF), rel[:900])
+    ok &= want("gate: nothing but the gate added", wf.replace(rg, "").replace("\n\n  release-gate:\n", "")
+               .replace("[gates, release-gate]", "gates").replace(RELEASE_GATE_IF, "") == fixture(False), "the golden", "a diff")
+    ok &= want("gate: nothing spliced into its script", not any("${{" in b for b in run_blocks(rg)) and len(run_blocks(rg)) == 1,
+               "env only", run_blocks(rg))
+    sh = fixture(True, gate=dict(GATE_FIX, script="ci/gate.sh", args=[]), variant_jars=["*_mr.jar"])
+    rg_s, rel_s = job(sh, "release-gate"), job(sh, "release")
+    ok &= want("gate: .sh runs with bash", "\n          bash 'ci/gate.sh' 2>&1 | tee" in rg_s, "bash 'ci/gate.sh'", rg_s[-900:])
+    ok &= want("gate: with --variant-jar, needs and runs like the release", "\n    needs: [gates, shipped]\n" in rg_s
+               and f"if: ${{{{ {RELEASE_GATE_RUNS}{RELEASE_SHIPPED_IF} }}}}" in rg_s
+               and "\n    needs: [gates, shipped, release-gate]\n" in rel_s
+               and RELEASE_IF.format(RELEASE_SHIPPED_IF + RELEASE_GATE_IF) in rel_s, "shipped too", rg_s[:900])
+    # the other readers of a workflow are not disturbed by the job
+    ok &= want("gate: read back the same", recover_args(wf) == recover_args(fixture(False)) and
+               recover_args(sh) == recover_args(fixture(True, variant_jars=["*_mr.jar"])), "same args", recover_args(wf))
+    ok &= want("gate: inputs only in if/env/with", not [ln for ln in wf.splitlines() if re.search(
+        r"inputs\.(from_run|dep_override)", ln) and not re.match(r"\s*(if|needs|run-id|github-token|[A-Z_]+): ", ln)], [], "an input")
+    # (c) refusals, each naming the file and the field
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d)
+        (r / "tools/gate").mkdir(parents=True)
+        (r / "tools/gate/gate.py").write_text("pass\n", encoding="utf-8")
+        (r / "tools/gate/dir.py").mkdir()
+        (r / "tools/gate/notes.txt").write_text("x\n", encoding="utf-8")
+        ok &= want("gate: no file, no gate", release_gate(r) is None, None, release_gate(r))
+        good = {"schema": 1, "script": "tools/gate/gate.py", "args": ["release-gate"]}
+        ok &= want("gate: the default timeout", release_gate(r, json.dumps(good))
+                   == {"script": "tools/gate/gate.py", "args": ["release-gate"], "timeout_minutes": 60}, 60, release_gate(r, json.dumps(good)))
+        ok &= want("gate: the cap", (release_gate(r, json.dumps(dict(good, timeout_minutes=360))) or {}).get("timeout_minutes") == 360, 360, "other")
+        for case, text, says in (
+                ("not JSON", "{schema: 1", "not JSON"), ("not an object", "[]", "not a JSON object"),
+                ("unknown key", json.dumps(dict(good, shell="x")), "unknown key(s) shell"),
+                ("no schema", json.dumps({k: v for k, v in good.items() if k != "schema"}), "schema must be 1"),
+                ("schema 2", json.dumps(dict(good, schema=2)), "schema must be 1"),
+                ("schema true", json.dumps(dict(good, schema=True)), "schema must be 1"),
+                ("no script", json.dumps({"schema": 1}), "script must be a .py or .sh"),
+                ("script .txt", json.dumps(dict(good, script="tools/gate/notes.txt")), "script must be a .py or .sh"),
+                ("script outside (..)", json.dumps(dict(good, script="../gate.py")), "inside the repository"),
+                ("script ../ inside", json.dumps(dict(good, script="tools/../tools/gate/gate.py")), "inside the repository"),
+                ("script absolute", json.dumps(dict(good, script="/tmp/gate.py")), "inside the repository"),
+                ("script ./", json.dumps(dict(good, script="./tools/gate/gate.py")), "inside the repository"),
+                ("script with a space", json.dumps(dict(good, script="tools/gate/my gate.py")), "inside the repository"),
+                ("script an option", json.dumps(dict(good, script="-c.py")), "starting with '-'"),
+                ("script missing", json.dumps(dict(good, script="tools/gate/none.py")), "no such file"),
+                ("script a folder", json.dumps(dict(good, script="tools/gate/dir.py")), "no such file"),
+                ("args a string", json.dumps(dict(good, args="release-gate")), "args must be a list"),
+                ("args too many", json.dumps(dict(good, args=["x"] * 33)), "args must be a list"),
+                ("arg a number", json.dumps(dict(good, args=[150])), "each of args"),
+                ("arg empty", json.dumps(dict(good, args=[""])), "each of args"),
+                ("arg a space", json.dumps(dict(good, args=["a b"])), "each of args"),
+                ("arg a $", json.dumps(dict(good, args=["$HOME"])), "each of args"),
+                ("arg an expression", json.dumps(dict(good, args=["${{ github.token }}"])), "each of args"),
+                ("arg a quote", json.dumps(dict(good, args=["a'b"])), "each of args"),
+                ("arg a semicolon", json.dumps(dict(good, args=["a;b"])), "each of args"),
+                ("arg a newline", json.dumps(dict(good, args=["a\nb"])), "each of args"),
+                ("arg too long", json.dumps(dict(good, args=["a" * 201])), "each of args"),
+                ("timeout 0", json.dumps(dict(good, timeout_minutes=0)), "timeout_minutes must be"),
+                ("timeout over the cap", json.dumps(dict(good, timeout_minutes=361)), "timeout_minutes must be"),
+                ("timeout a string", json.dumps(dict(good, timeout_minutes="60")), "timeout_minutes must be"),
+                ("timeout a float", json.dumps(dict(good, timeout_minutes=1.5)), "timeout_minutes must be"),
+                ("timeout true", json.dumps(dict(good, timeout_minutes=True)), "timeout_minutes must be")):
+            try:
+                got = release_gate(r, text)
+                ok &= want(f"gate: refuses {case}", False, "refused", got)
+            except SystemExit as e:
+                ok &= want(f"gate: refuses {case}", str(e).startswith(RELEASE_GATE_FILE + ": ") and says in str(e), says, str(e))
+    # (d) the release condition, evaluated: every event x gates result x gate outcome
+    for shipped, w_ in ((False, wf), (True, sh)):
+        rel_if, gate_if = cond(job(w_, "release")), cond(job(w_, "release-gate"))
+        events = {"tag push": {"github.event_name": "push", "github.ref": "refs/tags/examplemod-1.0-mc1.21.1"},
+                  "branch push": {"github.event_name": "push", "github.ref": "refs/heads/neoforge-1.21.1"},
+                  "pull request": {"github.event_name": "pull_request", "github.ref": "refs/pull/3/merge"},
+                  "release = true": {"github.event_name": "workflow_dispatch", "inputs.release": True},
+                  "from_run": {"github.event_name": "workflow_dispatch", "inputs.release": True, "inputs.from_run": "123"},
+                  "dep_override": {"github.event_name": "workflow_dispatch", "inputs.release": True,
+                                   "inputs.dep_override": "o/l@t/l.jar=g:a:1@" + "a" * 64},
+                  "promote": {"github.event_name": "workflow_dispatch", "inputs.promote": "x-1-mc1.21.1"},
+                  "released event": {"github.event_name": "release", "github.ref": "refs/tags/x"}}
+        for ev, base in events.items():
+            for gates in ("success", "failure", "skipped", "cancelled"):
+                for cancelled in (False, True):
+                    ctx = dict(base, cancelled=cancelled, **{"needs.gates.result": gates, "needs.shipped.result": gates})
+                    old = _gh_if(RELEASE_IF.format(RELEASE_SHIPPED_IF if shipped else "").strip()[len("if: "):], ctx)
+                    runs = _gh_if(gate_if, ctx)
+                    tag = f"{'shipped, ' if shipped else ''}{ev}, gates {gates}{', cancelled' if cancelled else ''}"
+                    # the gate runs exactly when the release would have, except on dep_override (which never releases)
+                    ok &= want(f"gate: runs when the release would ({tag})", runs == (old and ev != "dep_override"), old, runs)
+                    outcomes = ("success", "failure", "cancelled") if runs else ("skipped",)
+                    for out in outcomes:
+                        rel_runs = _gh_if(rel_if, dict(ctx, **{"needs.release-gate.result": out}))
+                        ok &= want(f"gate: release with gate {out} ({tag})", rel_runs == (old and out == "success"),
+                                   old and out == "success", rel_runs)
+        # the cases the issue names, spelt out: from_run (gates skipped) and a skipped or failed gate
+        fr = dict(events["from_run"], cancelled=False, **{"needs.gates.result": "skipped", "needs.shipped.result": "skipped"})
+        ok &= want("gate: from_run runs the gate", _gh_if(gate_if, fr), True, False)
+        for out in ("skipped", "failure", "cancelled", ""):
+            ok &= want(f"gate: from_run, gate {out or 'absent'}: no release",
+                       not _gh_if(rel_if, dict(fr, **{"needs.release-gate.result": out})), False, True)
+        ok &= want("gate: from_run, gate green: release", _gh_if(rel_if, dict(fr, **{"needs.release-gate.result": "success"})), True, False)
+        ok &= want("gate: the old condition lets a skipped gate through (why it is checked)",
+                   _gh_if(RELEASE_IF.format("").strip()[len("if: "):], fr), True, False)
+    # (e) the gate step, run: a fake gate script exiting 0, then 1; a .sh one
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        repo, tmp = d / "repo", d / "tmp"
+        (repo / "tools/gate").mkdir(parents=True); tmp.mkdir()
+        (repo / "tools/gate/gate.py").write_text(
+            "import json, os, sys\n"
+            "json.dump({'argv': sys.argv[1:], 'env': {k: os.environ.get(k) for k in ('GATE_SHA', 'GATE_REF', "
+            "'GITHUB_REPOSITORY', 'GH_TOKEN')}}, open(os.path.join(os.environ['RUNNER_TEMP'], 'seen.json'), 'w'))\n"
+            "for i in range(1, 61):\n    print('gate line', i)\n"
+            "sys.exit(int(os.environ.get('FAKE_RC', '0')))\n", encoding="utf-8")
+        (repo / "ci").mkdir()
+        (repo / "ci/gate.sh").write_text('echo "sh gate $# $GATE_REF"\nexit "${FAKE_RC:-0}"\n', encoding="utf-8")
+        py = f'"{pathlib.Path(sys.executable).as_posix()}" '
+        for label, w_, step, rc in (("py 0", wf, "Release gate (tools/gate/gate.py)", 0),
+                                    ("py 1", wf, "Release gate (tools/gate/gate.py)", 1),
+                                    ("py 3", wf, "Release gate (tools/gate/gate.py)", 3),
+                                    ("sh 0", sh, "Release gate (ci/gate.sh)", 0), ("sh 1", sh, "Release gate (ci/gate.sh)", 1)):
+            summary = tmp / "summary.md"
+            summary.write_text("", encoding="utf-8")
+            (tmp / "seen.json").unlink() if (tmp / "seen.json").exists() else None
+            script = _step_script(w_, step).replace("python3 ", py, 1) if f"- name: {step}\n" in w_ else "exit 99\n"
+            env = dict(os.environ, RUNNER_TEMP=tmp.as_posix(), GITHUB_STEP_SUMMARY=summary.as_posix(), GATE_SHA="c" * 40,
+                       GATE_REF="neoforge-1.21.1", GITHUB_REPOSITORY="o/examplemod", GH_TOKEN="t0ken", FAKE_RC=str(rc))
+            res = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", script], cwd=str(repo), env=env,   # Actions' own bash -e
+                                 capture_output=True, text=True, encoding="utf-8")
+            s_ = summary.read_text(encoding="utf-8")
+            if label.startswith("py"):
+                seen = json.loads((tmp / "seen.json").read_text(encoding="utf-8")) if (tmp / "seen.json").exists() else {}
+                ok &= want(f"gate step {label}: argv and env", seen == {"argv": GATE_FIX["args"], "env": {
+                    "GATE_SHA": "c" * 40, "GATE_REF": "neoforge-1.21.1", "GITHUB_REPOSITORY": "o/examplemod", "GH_TOKEN": "t0ken"}},
+                           GATE_FIX["args"], seen)
+                ok &= want(f"gate step {label}: output shown", "gate line 60" in res.stdout, "the gate's output", res.stdout[-200:])
+            if rc == 0:
+                ok &= want(f"gate step {label}: passes", res.returncode == 0 and "Release gate passed" in s_
+                           and "failed" not in s_, 0, (res.returncode, s_, res.stderr[-300:]))
+            else:
+                ok &= want(f"gate step {label}: fails with its exit code", res.returncode == rc
+                           and f"exited {rc}: nothing released" in res.stdout, rc, (res.returncode, res.stdout[-300:], res.stderr[-300:]))
+                tail = ("gate line 60" in s_ and "gate line 11\n" in s_ and "gate line 10\n" not in s_) if label.startswith("py") \
+                    else "sh gate 0 neoforge-1.21.1" in s_
+                ok &= want(f"gate step {label}: the last lines in the summary", "### Release gate failed" in s_ and tail
+                           and "passed" not in s_, "the tail", s_[-600:])
+    # (f) stale: the workflow does not run the gate the fork's file names
+    text = json.dumps({"schema": 1, **GATE_FIX})
+    plain = fixture(False)
+    for case, w_, t_, want_ in (("no file, no job", plain, "", []), ("not compared", plain, None, []),
+                                ("file, the job", wf, text, []),
+                                ("file, no job", plain, text, [f"the fork has {RELEASE_GATE_FILE} but its workflow has no release-gate job"]),
+                                ("no file, a job", wf, "", [f"its workflow has a release-gate job but the fork has no {RELEASE_GATE_FILE}"]),
+                                ("other args", wf, json.dumps({"schema": 1, **dict(GATE_FIX, args=["x"])}),
+                                 [f"its release-gate job does not run what {RELEASE_GATE_FILE} says (script, args or timeout)"]),
+                                ("other timeout", wf, json.dumps({"schema": 1, **dict(GATE_FIX, timeout_minutes=60)}),
+                                 [f"its release-gate job does not run what {RELEASE_GATE_FILE} says (script, args or timeout)"])):
+        ok &= want(f"gate: stale, {case}", stale_workflow(w_, 7, t_) == want_, want_, stale_workflow(w_, 7, t_))
+    bad = stale_workflow(wf, 7, '{"schema": 2}')
+    ok &= want("gate: stale, a bad file", len(bad) == 1 and bad[0].startswith(f"its {RELEASE_GATE_FILE}: schema must be 1"), "named", bad)
+    # (g) main() on a single-version checkout and a version branch: the file read from the checkout, a bad one refused,
+    # and `check` naming a workflow rendered before the file
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        for case, mc, files in (("single", "1.21.1", {}),
+                                ("version-branch", "1.21.4", {".port/1.21.4/branch.properties": "minecraft_version=1.21.4\n"})):
+            r = d / case
+            (r / "tools/gate").mkdir(parents=True)
+            g = lambda *a, r=r: subprocess.run(["git", "-c", "gc.auto=0", "-C", str(r), *a], capture_output=True, text=True,
+                                               encoding="utf-8")
+            g("init", "-q", "-b", f"neoforge-{mc}")
+            (r / "gradle.properties").write_text(f"minecraft_version={mc}\nneo_version=21.1.100\n", encoding="utf-8")
+            (r / "build.gradle").write_text("// no toolchain line\n", encoding="utf-8")
+            (r / "tools/gate/gate.py").write_text("pass\n", encoding="utf-8")
+            for f, t_ in files.items():
+                (r / f).parent.mkdir(parents=True, exist_ok=True)
+                (r / f).write_text(t_, encoding="utf-8")
+            g("add", "-A"); g("-c", "user.email=x@example.com", "-c", "user.name=x", "commit", "-q", "-m", "x")
+            run = lambda *extra, r=r: subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()), "--repo", str(r),
+                                                      "--modid", "examplemod", "--gatec", "launch", "--kit-version", "7",
+                                                      "--kit-sha", "b" * 64, *extra], capture_output=True, text=True, encoding="utf-8")
+            before = run("--print")
+            (r / ".github").mkdir()
+            (r / RELEASE_GATE_FILE).write_text(text, encoding="utf-8")
+            after = run("--print")
+            ok &= want(f"gate: main() on the {case} checkout", before.returncode == 0 and after.returncode == 0
+                       and "release-gate" not in before.stdout and "\n  release-gate:\n" in after.stdout
+                       and f"\n          {argv} 2>&1 | tee" in after.stdout and "needs: [gates, release-gate]" in after.stdout,
+                       "the gate with the file only", (before.stderr[-300:], after.stderr[-300:]))
+            ok &= want(f"gate: main() on the {case} checkout adds only the gate", after.stdout.replace(
+                job(after.stdout, "release-gate"), "").replace("\n\n  release-gate:\n", "").replace("[gates, release-gate]", "gates")
+                       .replace(RELEASE_GATE_IF, "") == before.stdout, "before + the gate", "a diff")
+            # a re-render keeps it: the file is read again; and the regenerate command needs no option for it
+            ok &= want(f"gate: {case} read back needs no option for it", recover_args(after.stdout) == recover_args(before.stdout),
+                       recover_args(before.stdout), recover_args(after.stdout))
+            (r / RELEASE_GATE_FILE).write_text(json.dumps({"schema": 1, "script": "../gate.py"}), encoding="utf-8")
+            refused = run("--print")
+            ok &= want(f"gate: main() refuses a bad file ({case})", refused.returncode != 0 and RELEASE_GATE_FILE in refused.stderr
+                       and "inside the repository" in refused.stderr and not refused.stdout, "refused", refused.stderr[-300:])
+            if case == "single":            # port-ci.py check: the installed workflow predates the file
+                (r / RELEASE_GATE_FILE).write_text(text, encoding="utf-8")
+                (r / WORKFLOW).parent.mkdir(parents=True)
+                (r / WORKFLOW).write_text(before.stdout, encoding="utf-8")
+                said = []
+                check(r, kit_version=7, say=said.append)
+                ok &= want("gate: check names the missing job", any("has no release-gate job" in x for x in said), "a warning", said)
+                (r / WORKFLOW).write_text(after.stdout, encoding="utf-8")
+                said = []
+                check(r, kit_version=7, say=said.append)
+                ok &= want("gate: check, current", any("its workflow is current" in x for x in said), "current", said)
+    print(f"port-ci self-check: release gate: {'OK' if ok else 'FAIL'}")
+    return ok
+
+
 def run_blocks(text):
     """The body of every `run: |` script in a workflow fragment: inputs reach a script only through env, so none of
     these may contain `${{ }}`."""
@@ -1994,7 +2422,7 @@ def self_check():
     v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", t))}
     v["PRE_BUILD"] = pre_build(["owner/lib@neoforge-1.21.1"])
     v["BRANCH"], v["BASE"] = "neoforge-1.21.1", "master"
-    v = mod_values(records_values(variant_values(v)))
+    v = mod_values(records_values(release_gate_values(variant_values(v))))
     plain = render(t, v)
     out = plain
     ok = "${{ github.sha }}" in out and "{{" not in out.replace("${{", "")    # GitHub's own ${{ }} survive
@@ -2199,6 +2627,7 @@ def self_check():
     ok &= reuse_check()
     ok &= default_branch_check()
     ok &= multimod_check()
+    ok &= release_gate_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -2300,6 +2729,7 @@ def main():
               "BASE": base, "JAVA": java_version(repo, mc, proj), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
               "GATEC": a.gatec, "TAG_SUFFIX": a.tag_suffix, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}
     values = variant_values(values, a.variant_jar, a.dep_jar_variant, a.dep_jar)
+    values = release_gate_values(values, release_gate(repo))     # .github/port-release-gate.json, refused when bad
     fk = _load_tool("fork_kind", "fork-kind.py")
     owned = fk.is_owned(repo, config=fk.publish_config(name)) if name else fk.is_owned(repo)
     values = records_values(kind_values(values, owned), is_version_branch(repo, mc))
