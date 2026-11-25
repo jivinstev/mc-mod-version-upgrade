@@ -3147,7 +3147,7 @@ def cascade_nodes(repo, spec):
     to = to[len("neoforge-"):] if to.startswith("neoforge-") else to
     port, versions = versions_to(repo, to)
     nodes = [None] + versions
-    if frm in ("port", port):
+    if frm in ("port", port) or branch_name(frm) == port:      # a version-named port branch by its bare version too
         i = 0
     elif frm in versions:
         i = nodes.index(frm)
@@ -5309,6 +5309,12 @@ def _check_port_taken(expect):
     # t6: a second stop on the same file keeps the first change in the entry (HEAD->TAIL and tick->tock)
     with tempfile.TemporaryDirectory() as d:
         r, g, _run = _migrated_fixture(d)
+        # #263: a port branch named for its version (the fixture's neoforge-1.21.1) is FROM by its bare version too
+        port0 = cascade_nodes(r, "port..1.21.5")[0]
+        spans = {sp: cascade_nodes(r, sp)[2] for sp in ("port..1.21.5", f"{port0}..1.21.5", f"{port0[len('neoforge-'):]}..1.21.5")}
+        expect(port0.startswith("neoforge-") and set(spans.values()) == {0},
+               f"cascade FROM: the version-named port branch {port0} by its name, `port` or its bare version starts the chain: {spans}")
+        expect(cascade_nodes(r, "1.21.4..1.21.5")[2] == 2, "cascade FROM: a version branch's bare version still names that branch")
         w5, _w = worktree_for(r, "1.21.5")
         (w5 / am).write_bytes((w5 / am).read_bytes().replace(b"void h() {}", b"void h() { mine(); }").replace(b"\n", b"\r\n"))
         git(w5, "commit", "-qam", "1.21.5's own AMixin (CRLF)", check=True)
