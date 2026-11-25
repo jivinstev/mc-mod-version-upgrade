@@ -96,7 +96,10 @@ own words -- their description and credits -- and the permission link are exempt
    - a repository that ships several mods (one Port CI workflow per mod, `port-ci.py --mod-dir`): run setup once per
      mod with `--mod <NAME> [--mod-dir <folder>]` (NAME: the mod's name in its tags; folder default NAME). It writes
      `.github/port-publish-<NAME>.json` and `.github/port-publish/description-<NAME>.md` from that folder's
-     `gradle.properties` and mods.toml; the config records `modid`, `tag_name` (NAME) and `mod_dir`. `own_mod` or
+     `gradle.properties` and mods.toml (the folder's own `src/main/{resources,templates}/META-INF/`, else the one
+     shared template no Gradle project owns -- e.g. `shared/resources/META-INF/neoforge.mods.toml` -- else the file
+     `--mods-toml PATH` names; `${...}` filled from the mod's own `gradle.properties`); the config records `modid`,
+     `tag_name` (NAME) and `mod_dir`. `own_mod` or
      `permission` is each config's own. The mod's workflow passes `--mod <NAME>` to `publish` and `modrinth-create`;
      `publish --mod` refuses a tag that does not start with `<NAME>-`, and reads `.port/<modid>/KNOWN-ISSUES.json` when
      the repository keeps one for the mod (else `.port/KNOWN-ISSUES.json`). A single-mod repository keeps the one

@@ -225,21 +225,54 @@ def gradle_props(repo, ref="HEAD"):
     return out
 
 
+MODS_TOML = None                         # setup --mods-toml: the metadata template's path from the repository root
+
+
+def shared_mods_toml(repo, ref="HEAD"):
+    """One mod of several whose folder holds no mods.toml: the single neoforge.mods.toml / mods.toml at ref that belongs
+    to no Gradle project -- no folder above it holds a gradle.properties (a shared template each mod's build expands,
+    e.g. shared/resources/META-INF/neoforge.mods.toml); another mod's own file does not count. -> path, None when there
+    is none; SystemExit naming them when there are several (pick one with --mods-toml)."""
+    names = git(repo, "ls-tree", "-r", "--name-only", ref).stdout.splitlines()
+    projects = {n.rsplit("/", 1)[0] for n in names if n.endswith("/gradle.properties")} | (
+        {""} if "gradle.properties" in names else set())
+    def owned_by_project(path):
+        parts = path.split("/")[:-1]
+        return any("/".join(parts[:i]) in projects for i in range(1, len(parts) + 1))
+    found = sorted(n for n in names if re.search(r"(^|/)META-INF/(neoforge\.)?mods\.toml$", n)
+                   and "/build/" not in f"/{n}" and not owned_by_project(n))
+    if len(found) > 1:
+        raise SystemExit("several shared mods.toml files (" + ", ".join(found) + "): name the mod's with --mods-toml")
+    return found[0] if found else None
+
+
 def mods_toml(repo, ref="HEAD"):
-    for p in ("src/main/resources/META-INF/neoforge.mods.toml", "src/main/resources/META-INF/mods.toml",
-              "src/main/templates/META-INF/neoforge.mods.toml", "src/main/templates/META-INF/mods.toml"):
-        r = git(repo, "show", f"{ref}:{MOD_PREFIX}{p}")
+    """The mod's metadata (neoforge.mods.toml / mods.toml), its ${...} filled from the mod's gradle.properties: the file
+    --mods-toml names, else the mod's own resources or templates, else (one mod of several) the one shared template."""
+    paths = [MODS_TOML] if MODS_TOML else [
+        MOD_PREFIX + p for p in ("src/main/resources/META-INF/neoforge.mods.toml", "src/main/resources/META-INF/mods.toml",
+                                 "src/main/templates/META-INF/neoforge.mods.toml", "src/main/templates/META-INF/mods.toml")]
+    for p in paths:
+        r = git(repo, "show", f"{ref}:{p}")
         if r.returncode == 0:
-            try:
-                import tomllib
-            except ImportError:                 # Python < 3.11 (setup runs on the user's machine; CI never reads TOML)
-                sys.path.insert(0, str(ROOT))
-                import minitoml as tomllib
-            text = r.stdout
-            if "${" in text:
-                text = expand_properties(text, gradle_props(repo, ref))
-            return tomllib.loads(text)
-    raise SystemExit("no neoforge.mods.toml in the port branch")
+            break
+    else:
+        shared = shared_mods_toml(repo, ref) if MOD_PREFIX and not MODS_TOML else None
+        r = git(repo, "show", f"{ref}:{shared}") if shared else None
+        if not r or r.returncode != 0:
+            raise SystemExit(f"no {MODS_TOML} in the port branch" if MODS_TOML else
+                             "no neoforge.mods.toml in the port branch" + (
+                                 f" (looked in {MOD_PREFIX}src/main/{{resources,templates}}/META-INF/ and for one shared "
+                                 "template; name it with --mods-toml)" if MOD_PREFIX else ""))
+    try:
+        import tomllib
+    except ImportError:                 # Python < 3.11 (setup runs on the user's machine; CI never reads TOML)
+        sys.path.insert(0, str(ROOT))
+        import minitoml as tomllib
+    text = r.stdout
+    if "${" in text:
+        text = expand_properties(text, gradle_props(repo, ref))
+    return tomllib.loads(text)
 
 
 def minecraft_of(tag):
@@ -1374,6 +1407,31 @@ def multimod_check():
             expect(owned(r), "the mod's own config says own_mod: owned")
             expect(gradle_props(r).get("mod_version") == "2.0.5", "gradle.properties read from the mod's folder")
             expect(mods_toml(r)["mods"][0]["version"] == "2.0.5", "mods.toml read (and expanded) from the mod's folder")
+            # #299: a mod whose folder has no mods.toml reads the one shared template, expanded with ITS gradle.properties;
+            # another mod's own file is not shared; several shared ones refuse; --mods-toml names one explicitly
+            global MODS_TOML
+            (r / "mods/beta").mkdir(parents=True)
+            (r / "mods/beta/gradle.properties").write_text("mod_id=exampleb\nmod_version=0.3.1\n", encoding="utf-8")
+            (r / "shared/resources/META-INF").mkdir(parents=True)
+            (r / "shared/resources/META-INF/neoforge.mods.toml").write_text(
+                'license="MIT"\n[[mods]]\nmodId="${mod_id}"\nversion="${mod_version}"\n', encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "beta, shared template")
+            use_mod("beta", "mods/beta")
+            m_ = mods_toml(r)["mods"][0]
+            expect((m_["modId"], m_["version"]) == ("exampleb", "0.3.1"),
+                   f"the shared template, filled from the mod's own gradle.properties: {m_}")
+            (r / "shared2/META-INF").mkdir(parents=True)
+            (r / "shared2/META-INF/mods.toml").write_text('license="MIT"\n[[mods]]\nmodId="x"\n', encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "a second shared one")
+            try:
+                mods_toml(r); expect(False, "two shared templates must refuse")
+            except SystemExit as e:
+                expect("--mods-toml" in str(e) and "shared2/META-INF/mods.toml" in str(e), f"two shared: refused: {e}")
+            MODS_TOML = "shared/resources/META-INF/neoforge.mods.toml"
+            expect(mods_toml(r)["mods"][0]["modId"] == "exampleb", "--mods-toml names the template")
+            MODS_TOML = None
+            use_mod("alpha", "mods/alpha")
+            expect(mods_toml(r)["mods"][0]["version"] == "2.0.5", "a mod with its own mods.toml still reads its own")
             expect(mod_keys() == {"tag_name": "alpha", "mod_dir": "mods/alpha"}, f"setup writes the mod's keys: {mod_keys()}")
             expect(mod_ledger(r, "examplemod") == ".port/examplemod/KNOWN-ISSUES.json", "the mod's own known-issues ledger")
             buf = io.StringIO()
@@ -1413,6 +1471,9 @@ def main():
     s.add_argument("--mod", metavar="NAME", help="one mod of a repository that ships several: its own config "
                    ".github/port-publish-<NAME>.json (NAME: its name in tags, port-ci.py --mod-dir/--tag-name)")
     s.add_argument("--mod-dir", metavar="DIR", help="with --mod: the mod's folder (default: NAME)")
+    s.add_argument("--mods-toml", metavar="PATH", help="the mod's metadata template, from the repository root (default: "
+                   "its folder's src/main/{resources,templates}/META-INF/, else the one shared template); its ${...} "
+                   "are filled from the mod's gradle.properties")
     c = sub.add_parser("modrinth-create"); c.add_argument("--repo", default=".")
     c.add_argument("--mod", metavar="NAME", help="one mod of several: .github/port-publish-<NAME>.json")
     p = sub.add_parser("publish"); p.add_argument("--repo", default="."); p.add_argument("--tag", required=True)
@@ -1428,6 +1489,12 @@ def main():
         return self_check()
     if getattr(a, "mod_dir", None) and not getattr(a, "mod", None):
         sys.exit("--mod-dir goes with --mod")
+    if getattr(a, "mods_toml", None):
+        global MODS_TOML
+        mt = a.mods_toml.replace("\\", "/").strip("/")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", mt) or ".." in mt.split("/"):
+            sys.exit(f"--mods-toml must be a path relative to the repository root, got {a.mods_toml!r}")
+        MODS_TOML = mt
     if getattr(a, "mod", None):
         use_mod(a.mod, getattr(a, "mod_dir", None))
         cfg_ = load_config(a.repo) if a.cmd != "setup" else None
