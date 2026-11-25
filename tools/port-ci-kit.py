@@ -92,6 +92,15 @@ def trace(repo, modid, base, gatec):
     return 0
 
 
+# The workflow a kit goes with: not shipped (a fork's CI never reads them), but hashed into MANIFEST.txt, so a change
+# to what port-ci.py renders -- the templates, or the rendered goldens that show every step's text -- publishes a new
+# kit, and a fork's workflow pinned to the older kit is stale (port-ci.py stale_workflow) and is rendered again. A
+# template-only change (a new job, a step's text) otherwise never reached an installed workflow.
+def workflow_sources():
+    return sorted(str(q.relative_to(ROOT).as_posix()) for q in
+                  list((ROOT / "templates/upstream-harness").glob("port-ci*.yml")) + list((ROOT / "tools/golden").glob("port-ci-*.yml")))
+
+
 def build_bytes(version):
     files = read_list()
     missing = [f for f in files if not (ROOT / f).is_file()]
@@ -103,7 +112,10 @@ def build_bytes(version):
     with tarfile.open(fileobj=raw, mode="w", format=tarfile.PAX_FORMAT) as t:
         manifest = (f"Port CI kit v{version}: the runtime for a ported fork's CI gates (tools/ci-gates.py).\n"
                     "Not a release of the migrator. Built from the files listed in tools/port-ci-kit.txt.\n\n"
-                    + "".join(f"{hashlib.sha256((ROOT / f).read_bytes()).hexdigest()}  {f}\n" for f in files))
+                    + "".join(f"{hashlib.sha256((ROOT / f).read_bytes()).hexdigest()}  {f}\n" for f in files)
+                    + "\nThe workflow this kit goes with (hashed, not shipped):\n"
+                    + "".join(f"{hashlib.sha256((ROOT / f).read_bytes()).hexdigest()}  workflow:{f}\n"
+                              for f in workflow_sources()))
         for name, data, mode in [("MANIFEST.txt", manifest.encode("utf-8"), 0o644)] + \
                 [(f, (ROOT / f).read_bytes(), 0o755 if os.access(ROOT / f, os.X_OK) else 0o644) for f in files]:
             ti = tarfile.TarInfo(name)
@@ -157,6 +169,11 @@ def self_check():
     ok &= a == b                                         # deterministic: the published sha can be reproduced
     names = tarfile.open(fileobj=io.BytesIO(a), mode="r:gz").getnames()
     ok &= names[0] == "MANIFEST.txt" and set(names[1:]) == set(read_list())
+    # the workflow sources are hashed into the manifest (a template change publishes a kit) and never shipped
+    man = tarfile.open(fileobj=io.BytesIO(a), mode="r:gz").extractfile("MANIFEST.txt").read().decode("utf-8")
+    srcs = workflow_sources()
+    ok &= "templates/upstream-harness/port-ci.yml" in srcs and any(x.startswith("tools/golden/") for x in srcs)
+    ok &= all(f"  workflow:{x}\n" in man for x in srcs) and not any(x in names for x in srcs)
     ok &= not any(n.startswith(("mods/", "docs/", "CATALOG")) for n in names)
     # every layer target's harness rename table ships: a layer fork's CI gates its newest target from the kit alone,
     # and a table left off the list fails there ("the gate harness has no rename table for Minecraft <t>") -- as the
