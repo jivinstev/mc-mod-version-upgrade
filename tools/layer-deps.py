@@ -83,7 +83,8 @@ LIBRARY FIRST
 
 A REPOSITORY OF SEVERAL MODS (no mod_id in the root gradle.properties; top-level folders that each name one, each with
 its own Port CI workflow `.github/workflows/port-ci-<NAME>.yml` from port-ci.py --mod-dir) is read whole: the sibling
-pins are the union of every mod's workflow (the same coordinate pinned differently by two of them is refused, exit 2,
+pins are the union of every mod's workflow (the same coordinate pinned differently by two of them, or a CurseForge/Modrinth
+dependency two mods' builds pin at different builds, is refused, exit 2,
 naming both), the dependencies the union of the root build.gradle (when there is one) and each mod folder's, and the
 version branch is the one every mod folder's gradle.properties names. A --dep-jar coordinate no build names (the build
 reads the jar from mavenLocal through a `${...}` version, or as a file) gets its row all the same, on every kind of
@@ -226,15 +227,21 @@ def build_files(repo):
 
 
 def fork_gradle_deps(repo):
-    """gradle_deps over every build of the checkout (build_files): the first build that pins a group:module gives its
-    row, in build_files' order (the root's, then each mod's by folder name)."""
-    out, seen = [], set()
-    for _path, text in build_files(repo):
+    """gradle_deps over every build of the checkout (build_files), one row per group:module in build_files' order (the
+    root's, then each mod's by folder name). A CurseForge/Modrinth dependency two builds pin at different coordinates
+    raises ValueError naming both: one mod would be built and gated against a version it never asked for."""
+    out, seen = [], {}
+    for path, text in build_files(repo):
         for d in gradle_deps(text):
             ga = f"{d['group']}:{d['module']}"
-            if ga not in seen:
-                seen.add(ga)
-                out.append(d)
+            if ga in seen:
+                p0, d0 = seen[ga]
+                if d["kind"] in ("curse", "modrinth") and d0["coord"] != d["coord"]:
+                    raise ValueError(f"{ga} is pinned differently by {p0} ({d0['coord']}) and {path} ({d['coord']}): pin "
+                                     "one build of it in both")
+                continue
+            seen[ga] = (path, d)
+            out.append(d)
     return out
 
 
@@ -2512,6 +2519,31 @@ def _check_several_mods(expect):
             rc = cmd_resolve(argparse.Namespace(repo=str(c), target="1.21.4", port_checkout=[], port_release=[],
                                                 dry_run=True, bump=[], bump_all=False))
         expect(rc == 2 and "port-ci-zeta.yml" in buf.getvalue(), f"resolve refuses it (exit 2): {rc} {buf.getvalue()}")
+        # a CurseForge/Modrinth dependency two mods' builds pin at different files: refused, naming both builds; the
+        # same file in both is one row
+        r_ = pathlib.Path(td) / "registry"
+        several_mods_fixture(r_, "1.21.4")
+        zb = r_ / "zeta/build.gradle"
+        zb.write_text(zb.read_text(encoding="utf-8").replace("dependencies {\n", "dependencies {\n    implementation "
+                                                             "\"curse.maven:somelib-111:999\"\n"), encoding="utf-8")
+        expect([f"{d['group']}:{d['module']}" for d in fork_gradle_deps(r_)].count("curse.maven:somelib-111") == 1,
+               "the same registry build pinned by two mods: one row, no error")
+        zb.write_text(zb.read_text(encoding="utf-8").replace("somelib-111:999", "somelib-111:998"), encoding="utf-8")
+        try:
+            fork_gradle_deps(r_)
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        expect("alpha/build.gradle" in err and "zeta/build.gradle" in err and "curse.maven:somelib-111" in err
+               and ":999" in err and ":998" in err,
+               f"a registry dependency two mods pin at different builds: an error naming both builds and both: {err!r}")
+        (r_ / ".port/1.21.4").mkdir(parents=True)
+        (r_ / ".port/1.21.4/branch.properties").write_text("x=1\n", encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_resolve(argparse.Namespace(repo=str(r_), target="1.21.4", port_checkout=[], port_release=[],
+                                                dry_run=True, bump=[], bump_all=False))
+        expect(rc == 2 and "zeta/build.gradle" in buf.getvalue(), f"resolve refuses it (exit 2): {rc} {buf.getvalue()}")
         # head-repin: each mod's workflow that pins the library regenerated with its new release's assets
         h = pathlib.Path(td) / "head"
         several_mods_fixture(h, "1.21.1")
