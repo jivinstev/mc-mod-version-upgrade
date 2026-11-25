@@ -594,17 +594,21 @@ def multimod_check():
         (r / ".port/1.21.4/gate-gradle-args.txt").write_text("-Pshard=ci\n", encoding="utf-8")
         (r / "gradlew").write_text('#!/usr/bin/env bash\npwd > "$(dirname "$0")/ran-in.txt"\n', encoding="utf-8")
         g("add", "-A"); g("commit", "-qm", "fixture")
-        ok &= port_root(m) == r and port_root(r) == r
-        ok &= branch_version(m) == "1.21.4" and is_library(m, "1.21.4")
-        ok &= shipped_jar_file(m, "1.21.4") == r / ".port/1.21.4/shipped-jar.txt"
-        ok &= pu.gate_gradle_args(m, "1.21.4") == ["-Pshard=ci"]
-        ok &= wiring_ref(m, "1.21.4", None) is None           # parent=main: no such ref here, nothing else asked
-        ok &= pu.author_unlisted_mixins(m, "HEAD") == ["Parked"]
+        rp = lambda x: pathlib.Path(x).resolve() if x else x     # macOS: /var -> /private/var, compared resolved
+        checks = [("the git root", rp(port_root(m)) == r and rp(port_root(r)) == r, (port_root(m), port_root(r))),
+                  ("the version", branch_version(m) == "1.21.4" and is_library(m, "1.21.4"), branch_version(m)),
+                  ("the shipped-jar file", rp(shipped_jar_file(m, "1.21.4")) == r / ".port/1.21.4/shipped-jar.txt",
+                   shipped_jar_file(m, "1.21.4")),
+                  ("the gate arguments", pu.gate_gradle_args(m, "1.21.4") == ["-Pshard=ci"], pu.gate_gradle_args(m, "1.21.4")),
+                  ("no wiring ref", wiring_ref(m, "1.21.4", None) is None, wiring_ref(m, "1.21.4", None)),
+                  ("the unlisted mixins", pu.author_unlisted_mixins(m, "HEAD") == ["Parked"], pu.author_unlisted_mixins(m, "HEAD"))]
         pu.gradle(m, ["build"], r / "g.log", timeout=60)
         ran = (r / "ran-in.txt").read_text(encoding="utf-8").strip() if (r / "ran-in.txt").is_file() else ""
-        ok &= bool(ran) and pathlib.Path(ran).resolve() == m
-        if not ok:
-            print(f"ci-gates self-check FAIL [multi-mod --repo <folder>]: gradle ran in {ran!r}")
+        checks.append(("gradle ran in the folder", bool(ran) and pathlib.Path(ran).resolve() == m, ran))
+        for what, good, got in checks:
+            if not good:
+                ok = False
+                print(f"ci-gates self-check FAIL [multi-mod --repo <folder>]: {what}: {got!r}")
     return ok
 
 
