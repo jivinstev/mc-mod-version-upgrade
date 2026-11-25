@@ -132,6 +132,35 @@ version was set up). Some fixes, checks and savings still reach
 
 Forge 1.20.1 → NeoForge 1.21.1 is proven on three MIT-licensed forks. 26.2 is wired but not yet proven.
 
+## Installing a mod as a player: one command
+
+The `player-install` skill (`tools/player-install.py`) gives a mod's README one line a player pastes to install the
+mod from its GitHub releases into their **own** Minecraft: NeoForge, the mod's newest release for their Minecraft
+version, and the mods it depends on. The line downloads a pinned `player-install-vN` release of this repository and
+checks its sha256, so the player needs no checkout (on Windows it offers to install Python 3.12 for the user when
+there is none):
+
+```
+# macOS / Linux (add --yes to take every default)
+curl -fsSL https://github.com/jivinstev/mc-mod-version-upgrade/releases/download/player-install-vN/install.sh | bash -s -- OWNER/REPO
+# Windows PowerShell (add --yes to take every default)
+& ([scriptblock]::Create((irm https://github.com/jivinstev/mc-mod-version-upgrade/releases/download/player-install-vN/install.ps1))) OWNER/REPO
+```
+
+- **Interactive by default:** it asks which Minecraft version (from the released ones; a version with only
+  pre-releases is labelled so), whether to use a **new launcher profile** with its own folder (the default) or an
+  existing NeoForge profile, shows the plan, and asks before writing anything. `q` at any question stops with nothing
+  written. `--yes` asks nothing.
+- **Dependencies** come from what the release pins at its tag: a `*.lock` file (`<name>_repo/_tag/_asset/_sha256`) or
+  a fork port's `port-install.json` (under `.github`), so a world that pins a core installs exactly that core. `OWNER/REPO:MOD`
+  picks one mod of a repository that releases several.
+- **Every jar is sha256-checked** (GitHub's asset digest, or the release's `SHA256SUMS`) before anything is written;
+  NeoForge is installed headless with its own installer and the Launcher's Java; a re-run updates the jars in place
+  and touches nothing else. Options: `--mc`, `--release`, `--pre`, `--instance`, `--dry-run`, `--list`,
+  `--with python`, `--boot-test`.
+- **An optional note**: a `player-install.txt` at the release's tag (the mod's folder, or `.github`) is printed after
+  the install, up to 12 lines, e.g. how to turn on an optional feature in game.
+
 ## Testing released ports on real installs
 
 CI tests a port in a dev client. The `test-installs` skill tests the **released jars** in the real game instead, on
@@ -306,6 +335,7 @@ In short -- what to ask, and the command it runs (the full detail is in the tabl
 | Skill | Ask | Command |
 |---|---|---|
 | **install-mod** | `> Install Sodium` | `python3 tools/mod-registry/modreg.py search --query "Sodium"`; fork ports: `python3 tools/install-port.py owner/Repo` |
+| **player-install** | `> Give players a one-line install for owner/Repo` / `> Install owner/Repo into my Minecraft` | `python3 tools/player-install.py OWNER/REPO[:MOD] [--yes]`; players: the `curl … install.sh \| bash -s -- OWNER/REPO` / `irm … install.ps1` one-liner |
 | **migrate-mod** | `> Migrate <mod name> to 26.2` | `python3 tools/port.py "<mod name or jar>" --to 26.2` |
 | **port-fork** | `> Port my fork <github url> to 1.21.1` | `python3 tools/port-upstream.py --repo DIR --modid ID`, then `python3 tools/port-ci.py --repo DIR --modid ID` |
 | **fork-versions** | `> Make my fork build for 1.21.4 too` | `python3 tools/fork-branches.py add-target --repo DIR --target 1.21.4`, then `python3 tools/fork-port.py --repo DIR --target 1.21.4`; the 26.1.2 entityCutout swap: `python3 tools/fork-branches.py cutout-check --repo DIR --branch neoforge-26.1.2 [--fix]` |
@@ -419,6 +449,7 @@ included (`--keep-existing` keeps them).
 |---|---|---|
 | **install-mod**: install a mod and its dependencies from Modrinth or CurseForge | `> Install Sodium` or `/install-mod Sodium` | `python3 tools/guard-names.py ensure --jar JAR` for each jar it migrates, then `python3 tools/mod-registry/modreg.py search --query "Sodium"`, then `versions`, `deps` and `download` (`ports --name "Sodium"` finds a native port on another project when the mod's own has none) (see [tools/mod-registry/README.md](tools/mod-registry/README.md)) |
 | **install-mod**: install fork ports from GitHub, with their dependencies and NeoForge | `> Install these mods from owner/RepoA owner/RepoB` or `/install-mod owner/RepoA owner/RepoB` | `python3 tools/install-port.py owner/RepoA owner/RepoB [--with-optional | --with-untested] [--dry-run] [--replace] [--mods-dir DIR]` (installs the files each port's manifest names, which CI tested together; when a manifest names an older release than the fork's newest full Release, the output opens with `NOT THE NEWEST RELEASE` naming both); one version of a fork of version branches: `owner/repo@neoforge-<mc> --mc <mc>` (that branch's own manifest), then optionally `tools/boot-mods.sh DIR` to boot the folder headless first |
+| **player-install**: one command a player pastes to install a mod from its GitHub releases into their own Minecraft -- NeoForge, the newest release for their Minecraft version and the mods its release pins -- interactive (version, release, a new profile or an existing NeoForge one, a plan before any write) or headless | `> Give players a one-line install for owner/Repo`, `> Install owner/Repo:mod into my Minecraft`, `> Publish a new player-install release` | `python3 tools/player-install.py OWNER/REPO[:MOD[,MOD]] [--mc V] [--release TAG] [--pre] [--instance new\|PROFILE\|FOLDER] [--yes] [--dry-run] [--list] [--with python] [--boot-test]`; release bundle: `python3 tools/player-install.py --bundle DIR --tag player-install-vN` (published by the `player-install` workflow on main) |
 | **test-installs**: test fork ports' released jars on real Launcher installs of every version they support -- NeoForge installed headless, one instance per version (optionally a Launcher profile each and the Gate C carrier), a boot test and the Gate C phases per version, no Gradle | `> Test my forks' releases on real installs of every version` or `/test-installs owner/Lib owner/Mod` | `python3 tools/real-install.py plan --fork owner/Lib --fork owner/Mod[:name] (--mc 1.21.1 ... \| --all-versions) [--prerelease] [--variant mr\|cf] [--prefer-pins] [--with-carrier [--carrier-release TAG \| --carrier-dir DIR \| --carrier-jar [MC=]JAR]] [--margin-gb 5]` (read-only; prints jars, sizes and the disk check), then `real-install.py install [--profiles] [--use-installed] [--dry-run]` and `real-install.py test [--phases launch,spawn,battle,gauntlet] [--boot-only] [--timeout 300] [--phase-timeout 900] [--report DIR]` (exit 0 only when every boot and phase passed) |
 | **playtest-plan**: plan two tracks by default, the top N (default 10) scenarios by distinct code paths reached and, when the mod has a quest line, one story-progression script that plays it stage by stage (`--no-story`, `--story-only`), grounded in what the mod's jars register, with the user's must-cover list first and their never-touch ids forbidden; `--build` writes, runs and debugs each one in a loop | `> Plan playtests for my mod and build them` or `/playtest-plan --build` | `python3 tools/playtest.py inventory --jar MOD.jar [--jar DEP.jar ...] [--json]` (entities, items, blocks, sound events, attribute, effect and enchantment ids, lang keys by kind, data files, and the advancement tree as `progression`: its longest chains and the stages the mod's code grants, per namespace) |
 | **playtest-write**: turn a scenario into a `.playtest` script (Minecraft commands plus `@` directives) with its intent and each step's purpose; `--until-pass` runs and debugs it in a loop | `> Write a playtest: summon the boss, kill it with the sword` or `/playtest-write` | `python3 tools/playtest.py lint SCRIPT [--jar JAR ...] [--forbid NS:ID ...]` (directives and durations; with `--jar`, every id the mod's namespace names must be registered) |

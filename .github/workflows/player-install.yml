@@ -1,0 +1,171 @@
+# The player install (tools/player-install.py, the player-install skill): one command a player pastes to install a
+# repository's mod, its dependencies and NeoForge into their own Minecraft.
+#
+#   check       every PR that touches it: the installer's self-check; the macOS/Linux bootstrap piped into bash as a
+#               player runs it (a good bundle runs the installer, a tampered one is refused); the Windows bootstrap the
+#               same way in PowerShell.
+#   acceptance  the same PRs, and every release: real installs from real releases on headless Linux into a fresh
+#               Minecraft folder, each then booted to the title screen with the mods loaded (--boot-test), and re-run
+#               to show a re-run changes nothing. Which repositories: the repository variable
+#               PLAYER_INSTALL_ACCEPTANCE, a JSON list of argument strings (["OWNER/REPO --mc 1.21.8 --pre", ...]),
+#               kept in the settings because this repository names no mod in its files; unset, the job says so and
+#               is skipped.
+#   release     a manual run on main with a tag (player-install-v<N>): the bundle, the two bootstraps with that tag and
+#               the bundle's sha256 written in, and SHA256SUMS, published as a GitHub release. A README's one-liner
+#               names that tag, so a published release is never replaced.
+name: player-install
+
+on:
+  pull_request:
+    paths:
+      - tools/player-install.py
+      - tools/real-install.py
+      - tools/install-port.py
+      - tools/find-minecraft.py
+      - tools/port-manifest.py
+      - player-install/**
+      - .github/workflows/player-install.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Publish this release (player-install-v<N>); empty runs the checks only"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: player-install-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: The installer's self-check
+        run: python3 tools/player-install.py --self-check
+      - name: The macOS/Linux bootstrap, piped into bash as a player runs it
+        run: |
+          python3 tools/player-install.py --bundle "$RUNNER_TEMP/rel" --tag player-install-v0
+          cat "$RUNNER_TEMP/rel/install.sh" | PLAYER_INSTALL_ZIP="$RUNNER_TEMP/rel/player-install.zip" \
+            MMVU_HOME="$RUNNER_TEMP/home" bash -s -- --self-check
+          cp "$RUNNER_TEMP/rel/player-install.zip" "$RUNNER_TEMP/bad.zip" && printf x >> "$RUNNER_TEMP/bad.zip"
+          if cat "$RUNNER_TEMP/rel/install.sh" | PLAYER_INSTALL_ZIP="$RUNNER_TEMP/bad.zip" \
+               MMVU_HOME="$RUNNER_TEMP/home2" bash -s -- --help 2> "$RUNNER_TEMP/bad.txt"; then
+            echo "a tampered bundle was run"; exit 1
+          fi
+          grep -q "nothing was installed" "$RUNNER_TEMP/bad.txt"
+          test ! -e "$RUNNER_TEMP/home2/player-install/player-install-v0/tools"
+
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: The Windows bootstrap, as a player runs it
+        shell: pwsh
+        run: |
+          python tools/player-install.py --bundle "$env:RUNNER_TEMP\rel" --tag player-install-v0
+          $env:PLAYER_INSTALL_ZIP = "$env:RUNNER_TEMP\rel\player-install.zip"
+          $env:LOCALAPPDATA = "$env:RUNNER_TEMP\home"
+          & ([scriptblock]::Create((Get-Content -Raw "$env:RUNNER_TEMP\rel\install.ps1"))) --self-check
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  acceptance-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      cases: ${{ steps.c.outputs.cases }}
+    steps:
+      - id: c
+        env:
+          CASES: ${{ vars.PLAYER_INSTALL_ACCEPTANCE }}
+        run: |
+          if [ -z "$CASES" ]; then
+            echo "::notice::PLAYER_INSTALL_ACCEPTANCE is not set: no real-release acceptance install runs"
+            echo 'cases=[]' >> "$GITHUB_OUTPUT"
+          else
+            echo "cases=$(printf '%s' "$CASES" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)))')" >> "$GITHUB_OUTPUT"
+          fi
+
+  acceptance:
+    needs: acceptance-plan
+    if: ${{ needs.acceptance-plan.outputs.cases != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        args: ${{ fromJSON(needs.acceptance-plan.outputs.cases) }}
+    name: acceptance -- ${{ matrix.args }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: A virtual display and software OpenGL for the boot test
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0
+      - name: What the repository has released (full and pre-release, per Minecraft version)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARGS: ${{ matrix.args }}
+        run: |
+          # shellcheck disable=SC2086
+          python3 tools/player-install.py ${ARGS%% *} --list | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Install from the real releases, then boot it
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARGS: ${{ matrix.args }}
+        run: |
+          # shellcheck disable=SC2086
+          xvfb-run -a -s "-screen 0 1280x720x24" python3 tools/player-install.py $ARGS --yes \
+            --minecraft-dir "$RUNNER_TEMP/minecraft" --boot-test
+      - name: A re-run updates in place and touches nothing else
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARGS: ${{ matrix.args }}
+        run: |
+          inst=$(ls -d "$RUNNER_TEMP"/minecraft/instances/*)
+          echo keep > "$inst/mods/player-note.txt"
+          before=$(cd "$inst" && find . -type f -not -path './logs/*' -not -path './crash-reports/*' -newer /dev/null -printf '%p %T@\n' | sort)
+          # shellcheck disable=SC2086
+          python3 tools/player-install.py $ARGS --yes --minecraft-dir "$RUNNER_TEMP/minecraft"
+          after=$(cd "$inst" && find . -type f -not -path './logs/*' -not -path './crash-reports/*' -printf '%p %T@\n' | sort)
+          test "$before" = "$after"
+
+  release:
+    # acceptance is skipped (not failed) when no case is configured, and a skipped need skips a job by default: say
+    # which results count instead
+    needs: [check, check-windows, acceptance-plan, acceptance]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.tag != '' && github.ref == 'refs/heads/main'
+      && needs.check.result == 'success' && needs.check-windows.result == 'success'
+      && needs.acceptance-plan.result == 'success'
+      && (needs.acceptance.result == 'success' || needs.acceptance.result == 'skipped') }}
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: player-install-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish ${{ inputs.tag }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1 \
+             || git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "$TAG exists already: a player-install release is never replaced (READMEs name it)"; exit 1
+          fi
+          python3 tools/player-install.py --bundle dist --tag "$TAG"
+          gh release create "$TAG" dist/player-install.zip dist/install.sh dist/install.ps1 dist/SHA256SUMS \
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "Player install ${TAG#player-install-}" \
+            --notes-file dist/RELEASE-NOTES.md --latest=false
