@@ -99,7 +99,7 @@ jobs:
           for f in /usr/bin/* /bin/* /usr/sbin/* /sbin/*; do
             n=${f##*/}
             case $n in python*|pydoc*|idle*|2to3*|pip*) continue ;; esac
-            [ -e "$R/nopy/$n" ] || ln -s "$f" "$R/nopy/$n"
+            [ -e "$R/nopy/$n" ] || [ -L "$R/nopy/$n" ] || ln -s "$f" "$R/nopy/$n"    # first on the PATH wins
           done
           if PATH="$R/nopy" /bin/sh -c 'command -v python3 || command -v python'; then echo "a Python is still reachable"; exit 1; fi
           run() {    # MMVU_HOME, then the bootstrap's arguments; stdout+stderr to $R/out.txt
@@ -181,6 +181,7 @@ jobs:
           $env:PLAYER_INSTALL_PYTHON_FILE = ''
           if ($rc -eq 0 -or $out -notmatch 'is not the pinned one' -or $out -notmatch 'nothing was run') { throw 'a tampered portable Python was not refused' }
           if ((Test-Path "$R\p3\mmvu\player-install") -or @(Get-ChildItem "$R\ptmp").Count -ne 0) { throw 'something was written' }
+          exit 0     # the refused run left LASTEXITCODE at 1, which the step would report as its own
 
   acceptance-plan:
     runs-on: ubuntu-latest
@@ -350,7 +351,7 @@ jobs:
           for f in /usr/bin/* /bin/* /usr/sbin/* /sbin/*; do
             n=${f##*/}
             case $n in python*|pydoc*|idle*|2to3*|pip*) continue ;; esac
-            [ -e "$R/nopy/$n" ] || ln -s "$f" "$R/nopy/$n"
+            [ -e "$R/nopy/$n" ] || [ -L "$R/nopy/$n" ] || ln -s "$f" "$R/nopy/$n"    # first on the PATH wins
           done
           if PATH="$R/nopy" /bin/sh -c 'command -v python3 || command -v python'; then echo "a Python is still reachable"; exit 1; fi
           # shellcheck disable=SC2086
