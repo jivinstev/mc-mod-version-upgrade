@@ -2623,25 +2623,42 @@ def t_repin(st, it, log):
                       for m in [fb.PIN_URL.match((val.split() or [""])[0])] if m and m.group(1) == lb})
         if got and got != [tag]:
             raise StepError(f"{lb} {v}: the re-pin left {', '.join(got)} pinned, not this round's release {tag}")
-    after_repin(st, it, d, log)         # the fork's own derived pin files, in the re-pin's commit
-    # the re-pin committed BEFORE ci --run: ci reads the committed branch.properties (an uncommitted re-pin left it
-    # rendering the old pin, warning of a newer re-cut) and refuses a dirty worktree -- measured, weekly round
-    # 2026-10-27: a fixer job at every dependent version until this commit moved here
-    c = commit_paths(d, ["."], f"Re-pin {', '.join(pins) or 'dependencies'} at {v} (keep-current round)")
-    if pins:
-        if fb.mod_dirs(d):
-            # a version branch of several mods: ci renders each mod's workflow, each mod's id from its own folder
-            sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--run"], log)
-        else:
-            modid = fb.parse_props(fb.read_file(pathlib.Path(d) / "gradle.properties")).get("mod_id")
-            if not modid:
-                raise StepError("no mod_id in gradle.properties: run fork-branches.py ci --target <v> --modid ID --run")
-            sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--modid", modid,
-                        "--run"], log)
-        c = commit_paths(d, ["."], f"Re-pin {', '.join(pins)} at {v}: what ci --run left (keep-current round)") or c
+    # the order (issue #304): the re-pin, then ci --run renders the version's workflows from it, then the fork's
+    # after_repin commands -- which read the VERSION's rendered workflows, never the head's merged up -- then ONE commit.
+    # The re-pin is committed first as a step: ci reads the committed branch.properties (an uncommitted re-pin left it
+    # rendering the old pin, warning of a newer re-cut) and refuses a dirty worktree (measured, weekly round 2026-10-27);
+    # that commit is folded into the one commit at the end, and undone if a later step fails
+    pre = head(d)
+    msg = f"Re-pin {', '.join(pins) or 'dependencies'} at {v} (keep-current round)"
+    commit_paths(d, ["."], msg)
+    # ci --run after a library release, and whenever the version's workflows are not what ci renders for it (a stale
+    # variant job, the head's merged up, a mod's missing: fork-branches.py ci_check / workflows_not_own), release or not
+    stale = [] if pins else [ln for ln in fb.ci_check(d, [v], kit_version=False) if "WARNING" in ln]
+    try:
+        if pins or stale:
+            if stale:
+                say_to(log)(f"round: repin: {v}'s workflows are not its own: {stale[0][:300]}; ci --run renders them")
+            if fb.mod_dirs(d):
+                # a version branch of several mods: ci renders each mod's workflow, each mod's id from its own folder
+                sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--run"], log)
+            else:
+                modid = fb.parse_props(fb.read_file(pathlib.Path(d) / "gradle.properties")).get("mod_id")
+                if not modid:
+                    raise StepError("no mod_id in gradle.properties: run fork-branches.py ci --target <v> --modid ID --run")
+                sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--modid",
+                            modid, "--run"], log)
+        after_repin(st, it, d, log)     # the fork's own derived pin files, from the version's workflows, in the commit
+    except (StepError, OSError):
+        if head(d) != pre:
+            git(d, "reset", "-q", pre, check=True)  # nothing committed; the re-pin stays in the tree as it was
+        raise
+    if head(d) != pre:
+        git(d, "reset", "-q", "--soft", pre, check=True)
+    c = commit_paths(d, ["."], msg + (": its workflows re-rendered" if stale else ""))
     return (("re-pinned " + ", ".join(pins) if pins else f"{len(it['extra']['bumps'])} bump(s)") + (f", {c[:12]}" if c else "")
+            + ("; its workflows re-rendered (not its own)" if stale else "")
             + (f"; the plan's bump(s) {', '.join(skipped)} superseded by this round's release" if skipped else "")), {
-        "pins": pins, "superseded_bumps": skipped}
+        "pins": pins, "superseded_bumps": skipped, **({"rerendered": stale[0][:300]} if stale else {})}
 
 
 def sv_gate_cmds(d, upstream_commit=None, base_ref=None, gatec=None):
@@ -8082,20 +8099,35 @@ def self_check():
                     pin_("lib-1.0-mc1.21.4-r2"); order_.append("resolve")
                 elif "write-pins.py" in " ".join(c_):
                     expect(k_.get("cwd") == str(rp_) and c_[0] == sys.executable, f"after_repin: in the checkout: {k_} {c_}")
+                    wf_ = rp_ / ".github/workflows/port-ci-alpha.yml"      # what the derived files are computed from
                     with open(rp_ / "derived-pins.txt", "a", encoding="utf-8") as fh:
-                        fh.write(c_[-1] + "\n")
+                        fh.write(c_[-1] + " " + (wf_.read_text(encoding="utf-8").strip() if wf_.is_file() else "-") + "\n")
                     order_.append(c_[-1])
                 elif "--run" in c_:
                     order_.append(("ci", "--modid" in c_, git(rp_, "status", "--porcelain").stdout.strip()))
+                    # ci --run renders the VERSION's workflow from the re-pin (port-ci.py writes it, uncommitted)
+                    (rp_ / ".github/workflows").mkdir(parents=True, exist_ok=True)
+                    (rp_ / ".github/workflows/port-ci-alpha.yml").write_text("rendered for neoforge-1.21.4\n", encoding="utf-8")
                 return rec_out("")(st_, it_, cmd, log, **k_)
             sh = sh_ar_
             rpa = dict(rpi, extra=dict(rpi["extra"], bumps=[], after_repin=[["python3", "scripts/write-pins.py", "first"],  # exec-ok: fixture data (a key/argv in a test), not a program run
                                                                              ["python3", "scripts/write-pins.py", "second"]]))  # exec-ok: fixture data (a key/argv in a test), not a program run
+            (rp_ / ".github/workflows").mkdir(parents=True, exist_ok=True)
+            (rp_ / ".github/workflows/port-ci-alpha.yml").write_text("the head's, merged up\n", encoding="utf-8")
+            git(rp_, "add", "-A"); git(rp_, "commit", "-qm", "the head's workflow came up by merge")
+            pre_ = git(rp_, "rev-parse", "HEAD").stdout.strip()
             note, r_ = t_repin(_St5(), rpa, log_)
-            expect(order_ == ["resolve", "first", "second", ("ci", False, "")]
-                   and "derived-pins.txt" in git(rp_, "show", "--name-only", "--format=", "HEAD").stdout
+            files_ = sorted(git(rp_, "show", "--name-only", "--format=", "HEAD").stdout.split())
+            expect(order_ == ["resolve", ("ci", False, ""), "first", "second"]
+                   and files_ == [".github/workflows/port-ci-alpha.yml", ".port/1.21.4/branch.properties", "derived-pins.txt"]
+                   and git(rp_, "rev-parse", "HEAD~1").stdout.strip() == pre_
                    and "Re-pin o/lib@lib-1.0-mc1.21.4-r2" in git(rp_, "log", "-1", "--format=%s").stdout,
-                   f"after_repin: in order, after the re-pin, in its commit; several mods: ci with no --modid: {order_}")
+                   f"#304: resolve, then ci --run (on a clean, committed re-pin; several mods: no --modid), then "
+                   f"after_repin, then ONE commit with the pin, the workflow and the derived files: {order_} {files_}")
+            expect((rp_ / "derived-pins.txt").read_text(encoding="utf-8").splitlines()
+                   == ["first rendered for neoforge-1.21.4", "second rendered for neoforge-1.21.4"],
+                   "after_repin reads the version's rendered workflow, not the head's merged up: "
+                   + (rp_ / "derived-pins.txt").read_text(encoding="utf-8"))
             pin_("lib-1.0-mc1.21.4")
             git(rp_, "add", "-A"); git(rp_, "commit", "-qm", "back again")
             def sh_fail_(st_, it_, cmd, log, **k_):
@@ -8112,6 +8144,53 @@ def self_check():
                    and "Re-pin o/lib" not in git(rp_, "log", "-1", "--format=%s").stdout,
                    f"a failing after_repin command: a StepError naming it, nothing committed: {err_}")
             git(rp_, "checkout", "--", "."); git(rp_, "clean", "-qfd")
+            # #304: no library release this round (its release skipped), but the version's workflow is the head's,
+            # merged up: ci --run re-renders it all the same, in the step's one commit; its own workflow: ci not run
+            vb_ = tmp / "repin-vb"
+            git(tmp, "init", "-q", "-b", "neoforge-1.21.1", str(vb_), check=True)
+            (vb_ / "gradle.properties").write_text("mod_id=examplemod\n", encoding="utf-8")
+            (vb_ / ".github/workflows").mkdir(parents=True)
+            wf_head = ('name: Port CI\non:\n  push:\n    branches: ["neoforge-1.21.1"]\n'      # current on every other count
+                       '    paths-ignore: ["README.md", ".port/*.md", ".port/*/*.md"]\n  pull_request:\n'
+                       '    branches: ["neoforge-1.21.1"]\n  workflow_dispatch:\n    inputs:\n      from_run:\n'
+                       '        description: a run\n      dep_override:\n        description: a jar\npermissions:\n'
+                       '  contents: read\njobs:\n  gates:\n    steps:\n      - run: echo "::notice title=jar sha256::x"\n')
+            (vb_ / ".github/workflows/port-ci.yml").write_text(wf_head, encoding="utf-8")
+            git(vb_, "add", "-A"); git(vb_, "commit", "-qm", "head", check=True)
+            git(vb_, "checkout", "-q", "-b", "neoforge-1.21.4", check=True)
+            (vb_ / ".port/1.21.4").mkdir(parents=True)
+            (vb_ / ".port/1.21.4/branch.properties").write_text("parent=neoforge-1.21.1\nport_branch=neoforge-1.21.1\n",
+                                                                encoding="utf-8")
+            git(vb_, "add", "-A"); git(vb_, "commit", "-qm", "1.21.4, the head's workflow merged up", check=True)
+
+            class _St5n(_St5):
+                def item(self, _):
+                    return {"result": {"skipped": True}}
+            ran_ci = []
+            def sh_vb_(st_, it_, cmd, log, **k_):
+                c_ = [str(x) for x in cmd]
+                if "--run" in c_:
+                    ran_ci.append(c_)
+                    (vb_ / ".github/workflows/port-ci.yml").write_text(wf_head.replace("1.21.1", "1.21.4"), encoding="utf-8")
+                return rec_out("")(st_, it_, cmd, log, **k_)
+            sh, keep_vco = sh_vb_, G["vco"]
+            G["vco"] = lambda st_, f_, v_: str(vb_)
+            rpn = {"fork": "o/dep", "version": "1.21.4", "extra": {"libraries": ["o/lib"], "bumps": []}}
+            try:
+                pre_ = git(vb_, "rev-parse", "HEAD").stdout.strip()
+                note, r_ = t_repin(_St5n(), rpn, log_)
+                wf_now = git(vb_, "show", "HEAD:.github/workflows/port-ci.yml").stdout
+                expect(len(ran_ci) == 1 and "--modid" in ran_ci[0] and ran_ci[0][ran_ci[0].index("--modid") + 1] == "examplemod"
+                       and r_["pins"] == [] and "neoforge-1.21.4" in wf_now and "not neoforge-1.21.4" in r_.get("rerendered", "")
+                       and git(vb_, "rev-parse", "HEAD~1").stdout.strip() == pre_ and "re-rendered" in note,
+                       f"#304: no library release, the head's workflow on the version: ci --run re-renders it: {note} {r_} {ran_ci}")
+                ran_ci.clear()
+                pre_ = git(vb_, "rev-parse", "HEAD").stdout.strip()
+                note, r_ = t_repin(_St5n(), rpn, log_)
+                expect(not ran_ci and git(vb_, "rev-parse", "HEAD").stdout.strip() == pre_ and "rerendered" not in r_,
+                       f"its own workflow and no release: ci not run, nothing committed: {note} {r_} {ran_ci}")
+            finally:
+                G["vco"] = keep_vco
             # the ci-check fixer's regeneration on a branch with no PR item (the head) is pushed; a code commit is not
             cr_ = tmp / "ci-fork"
             cr_.mkdir()

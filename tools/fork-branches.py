@@ -5059,6 +5059,8 @@ def ci_check(repo, versions=None, kit_version=None):
                 w_.append("its workflow boots no " + ", ".join(f"*_{v}.jar" for v in miss) + " although .port/" + t
                           + "/" + ", ".join(f"shipped-expect-{v}.txt" for v in miss) + " expects it (CI green, that jar unchecked)")
             why += [f"{path}: {x}" for x in w_] if name else w_
+        if wfs:
+            why += workflows_not_own(repo, t, ref)       # the head's merged up, or a mod's missing: not t's own (#304)
         if why:
             stale += 1
             out.append(f"fork-branches: ci-check: WARNING {branch_name(t)}: " + "; ".join(why))
@@ -5071,6 +5073,33 @@ def ci_check(repo, versions=None, kit_version=None):
                   if stale else "")
                + (f"{';' if stale else ' --'} the head: python3 tools/fork-branches.py ci --repo {repo} --head --run, then "
                   "push it" if head_lines else ""))
+    return out
+
+
+PUSH_BRANCHES = re.compile(r"(?m)^\s+push:[ \t]*\n(?:[ \t]*#[^\n]*\n)*\s+branches:[ \t]*\[([^\]\n]*)\]")
+
+
+def workflows_not_own(repo, t, ref=None):
+    """Why version branch t's Port CI workflows are not the ones `ci` renders for it (issue #304): a workflow whose push
+    trigger names other branches than neoforge-<t> (another branch's, merged up), or -- a version branch of several
+    mods -- a mod's workflow the port branch has and t lacks. Read at `ref` (default t's newest commit). [] when every
+    one is t's own."""
+    ref = ref or fresh_branch(repo, branch_name(t))
+    if not ref:
+        return []
+    fk, out = fork_kind(), []
+    have = fk.port_ci_workflows(repo, ref)
+    for _n, path in have:
+        m = PUSH_BRANCHES.search(fk.workflow_text(repo, path, ref))
+        names = re.findall(r"[^\s\"',]+", m.group(1)) if m else []
+        if m and branch_name(t) not in names:
+            out.append(f"{path}: its push trigger names {', '.join(names) or 'no branch'}, not {branch_name(t)} (another "
+                       "branch's workflow, merged up)")
+    if mod_dirs(repo, ref):
+        port = parse_props(reader_of_ref(repo, ref)(f"{REC}/{t}/{BRANCH_PROPS}")).get("port_branch")
+        port_ref = fresh_branch(repo, port) if port else None
+        want = {p for n, p in (fk.port_ci_workflows(repo, port_ref) if port_ref else []) if n}
+        out += [f"{p}: missing (the port branch {port} has it)" for p in sorted(want - {p for _n, p in have})]
     return out
 
 
@@ -6072,6 +6101,18 @@ def _check_cascade_mod_workflows(expect):
         expect(rc == 0 and got["1.21.3"] == own["1.21.3"] and got["1.21.4"] == own["1.21.4"]
                and all(wf_at("1.21.5", p) is None for p in wfs),
                f"--apply after the head's change: each version's own kept: {got} {out[-600:]}")
+        # not the version's own (#304): a mod's workflow missing, or the head's carried up by hand; ci-check says so
+        miss = workflows_not_own(r, "1.21.5")
+        expect(workflows_not_own(r, "1.21.3") == [] and len(miss) == 2 and all("missing" in x for x in miss),
+               f"workflows_not_own: 1.21.3's are its own; 1.21.5 lacks both mods' workflows: {miss}")
+        w5, _w = worktree_for(r, "1.21.5")
+        _hand(w5, {p: _mod_workflow(n, "neoforge-1.21.1", "head v2") for n, p in zip(("alpha", "zeta"), wfs)},
+              "1.21.5: the head's workflows copied by hand")
+        merged = workflows_not_own(r, "1.21.5")
+        lines = ci_check(r, ["1.21.5"], kit_version=False)
+        expect(len(merged) == 2 and all("names neoforge-1.21.1, not neoforge-1.21.5" in x for x in merged)
+               and any("WARNING neoforge-1.21.5" in l and "not neoforge-1.21.5" in l for l in lines),
+               f"the head's workflow on a version branch: not its own, and ci-check warns: {merged} {lines}")
 
 
 def _check_ci_check(expect):
@@ -6100,6 +6141,16 @@ def _check_ci_check(expect):
         old = [l for l in ci_check(r, ["1.21.4"], kit_version=7) if "neoforge-1.21.4" in l and "WARNING" in l]
         expect(len(old) == 1 and "annotates no jar sha256" in old[0] and "from_run/dep_override" not in old[0],
                f"ci-check names a version branch's workflow rendered before the jar digests: {old}")
+        _hand(w4, {".github/workflows/port-ci.yml": wf}, "1.21.4: CI again")
+        # the golden is the port branch's workflow (push: neoforge-1.21.1): on 1.21.4 it is not the version's own (#304)
+        nown = workflows_not_own(r, "1.21.4")
+        own4 = wf.replace('branches: ["neoforge-1.21.1"]', 'branches: ["neoforge-1.21.4"]')
+        expect(len(nown) == 1 and "names neoforge-1.21.1, not neoforge-1.21.4" in nown[0]
+               and any("not neoforge-1.21.4" in l for l in ci_check(r, ["1.21.4"], kit_version=False))
+               and workflows_not_own(r, "1.21.4", ref=None) == nown,
+               f"a one-mod version branch carrying the head's port-ci.yml: not its own, ci-check says so: {nown}")
+        _hand(w4, {".github/workflows/port-ci.yml": own4}, "1.21.4: its own CI")
+        expect(workflows_not_own(r, "1.21.4") == [], f"its own trigger: nothing said: {workflows_not_own(r, '1.21.4')}")
         _hand(w4, {".github/workflows/port-ci.yml": wf}, "1.21.4: CI again")
         # the release list refused (a 403 from api.github.com, downloads working; weekly round 2026-10-19): the newest kit
         # is probed from the highest one the branches pin (v7), and the fallback is said
