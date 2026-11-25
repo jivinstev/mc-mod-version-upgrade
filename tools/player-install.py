@@ -496,10 +496,10 @@ def ensure_game(src, plat, mcdir, mc, neo, dry, log=print, full=False):
         log(f"  NeoForge {have} is installed" if have else f"  would install NeoForge {neo} (its installer, headless)")
         return f"neoforge-{have or neo}", comp
     if need:
-        # thousands of small asset files: 16 at a time (one at a time took over 15 minutes for 1.21.8's assets)
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=16) as pool:
-            list(pool.map(lambda n: RI.download_to(n[1], mcdir / n[2], sha1=n[3]), need))
+        # thousands of small asset files, 16 at a time (real-install.py fetch_all_parallel; #309)
+        bad = RI.fetch_all_parallel(need, lambda n: RI.download_to(n[1], mcdir / n[2], sha1=n[3]))
+        if bad:
+            raise Refuse(f"{len(bad)} Minecraft file(s) could not be fetched, e.g. {bad[0][0][2]}: {bad[0][1]}")
         log(f"  fetched {len(need)} Minecraft file(s)")
     if not RI.java_exe(mcdir, comp, plat):
         RI.install_runtime(mcdir, comp, src, plat, log)
