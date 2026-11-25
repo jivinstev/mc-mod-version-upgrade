@@ -47,7 +47,8 @@ round's table).
    `.github/weekly-plan.json` (setup writes it exactly when the owner allowed `merge-fork-prs`). The user may allow it
    for every fork whose releases they promote by hand: the pre-release a merge produces is not what players are
    pointed at until a person has played it and promoted it, so merging on green is safe.
-4. **Never**: promoting a release (a person must have played it -- `port-ci.py promote` is theirs), publishing to
+4. **Never**: promoting a release (a person must have played it -- `port-ci.py promote`, or their `/promote` comment
+   on the plan issue, is theirs; no comment the round posts has a line that starts with `/promote`), publishing to
    Modrinth/CurseForge, pushing to or commenting on the authors' repository, force-pushing.
 
 ## The fork set and its order
@@ -361,6 +362,20 @@ and version-branch forks alike:
 - **Wednesday morning America/Los_Angeles: the round** ("The weekly round" below), a Claude scheduled task with a fresh
   session each fire, at `round.time` in `.github/weekly-plan.json` (a minute below 08:30, jittered per fork set from the
   task's name -- read it there, never assume a fixed time). It reads the plan issue once, at its start, posts progress on it and closes it with the outcome.
+- **Promote by comment: after the owner played the round's pre-releases, with no model.** The owner comments `/promote`
+  on the plan issue (closed or open), or `/promote 1.21.1 26.3` for those Minecraft versions only.
+  `.github/workflows/weekly-plan-promote.yml` (`issue_comment`, from `templates/weekly-plan-promote.yml`) runs
+  `tools/plan-promote.py`: only on an issue the plan workflow opened, only for the plan owner (`plan_owner`, a login, or
+  an active member of the `@org/team`, which the workflow's token may be unable to read: then use `port-ci.py promote`);
+  anyone else gets one reply naming who may. `/promote` alone takes the versions of the pre-releases published since the
+  plan opened and of the pre-release tags a comment on it names. Per version it picks the newest non-draft release
+  tagged `-mc<v>` or `-mc<v>-rN` and promotes it only when that is a Port CI pre-release (a full Release newer than any
+  pre-release is refused, never skipped over), by dispatching this repository's Port CI on `neoforge-<v>` (the head
+  branch for the head's version) with promote, played_by = the commenter and played_notes = "promoted from <issue>";
+  Port CI's promote and same-run publish then run as for `port-ci.py promote`. It replies once, tag -> run link. The
+  token reaches only the library's repository: the reply names the `port-ci.py promote` command for the dependents.
+  `plan_owner` is read from the head branch's `.github/weekly-plan.json`, so whoever can push to the head branch can
+  change who may promote; that is no wider than today, since push access can already run Port CI's promote.
 - **No answer:** the defaults apply. **No round** (no quota, the session never started): nothing is lost -- next
   Tuesday's workflow sees the plan issue no round closed, carries its ticks and replies into the new issue, says "last
   week's round did not run", and closes the old one as superseded.
@@ -853,7 +868,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
    last plan issue under "New in the ledger since the last plan" (a plan with none is unchanged).
    **A round that stops** (a missing clone, a stop that needs the owner, no quota) **leaves the plan issue open**: say why in
    one comment; next Tuesday's plan carries its ticks and replies forward. Only step 6 closes it.
-6. **Close.** On the plan issue, one closing comment with the outcome -- per fork: the merged PRs, the pre-releases cut,
+6. **Close.** On the plan issue, one closing comment with the outcome -- per fork: the merged PRs, the pre-releases cut
+   (each by its full tag, which the owner's `/promote` reads; the comment says, mid-line, that once they have played
+   them the owner comments `/promote` on this issue, or `/promote <version> ...` for some versions only),
    the ledger changes and the new findings with their grades -- and the **cost and time table**:
    `python3 tools/port-cost.py round-table --since <round start> --session-cwd <the round's working directory>` (this
    session's own requests, its subagents included, per fork and version at the `mark`s, with totals; the COST.md form,
@@ -945,12 +962,14 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    names the flag to re-pass; re-pass it, or add `--keep-existing` to keep every such value (a flag given still wins).
    Read the warnings before pushing. An agent passes its session's attribution trailers with `--trailer` (one per line), so the commit
    carries them; without it, amend the commit's message before pushing. It commits `.github/workflows/weekly-plan.yml`
-   (this repository pinned at origin/main's commit, recorded as `migrator_sha`) and `.github/weekly-plan.json` in one
+   (this repository pinned at origin/main's commit, recorded as `migrator_sha`), `.github/workflows/weekly-plan-promote.yml`
+   (from `templates/weekly-plan-promote.yml`, pinned the same way: "Promote by comment" above) and
+   `.github/weekly-plan.json` in one
    `[skip ci]` commit, on the library's repository only (the dependents get nothing); an unchanged set commits
    nothing. It refuses an organization-owned fork without `--plan-owner`, and exits 3 when the head branch
    is not the repository's default branch (GitHub runs a schedule only from the default branch): ask the user to make
-   the head branch the default, or rerun with `--default-branch-too`, which commits the same workflow file to the
-   default branch too. Push what it names. The other forks must be public (the workflow reads them without a token).
+   the head branch the default, or rerun with `--default-branch-too`, which commits the same two workflow files to the
+   default branch too (GitHub also runs the promote workflow, an `issue_comment` one, only from the default branch). Push what it names. The other forks must be public (the workflow reads them without a token).
    **An owned first fork** (the author's own mod: its upstream is its own default branch) can make every take a new
    version: `--release-bump gradle.properties:mod_version` (the file and the key naming the mod's version; refused for
    a port, for a head that is its own upstream, and for a key with no dotted-number version). Ask the owner at stop 1.

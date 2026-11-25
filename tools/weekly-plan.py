@@ -56,12 +56,17 @@ issue.
 INSTALL (on a checkout of the first fork's head branch) writes and commits there, in one `[skip ci]` commit:
   .github/workflows/weekly-plan.yml   templates/weekly-plan.yml with this repository and a PINNED commit of it (default:
                                       origin/main), so the planner runs the reviewed tools; golden tools/golden/weekly-plan.yml
+  .github/workflows/weekly-plan-promote.yml
+                                      templates/weekly-plan-promote.yml, pinned the same way (golden
+                                      tools/golden/weekly-plan-promote.yml): the plan owner's `/promote` comment on a
+                                      plan issue dispatches Port CI's promote per version (tools/plan-promote.py)
   .github/weekly-plan.json            the fork set, the budget, the round's time and `plan_owner`
 Who the plan is addressed to (assigned and @mentioned): `plan_owner` (setup passes whoever ran it), else the
 repository's owner when that is a user. An organization-owned fork without --plan-owner is refused: a plan is never
 addressed to nobody. GitHub runs a scheduled workflow only from the repository's DEFAULT branch: when that is not the
-head branch, install refuses (exit 3) unless --default-branch-too, which also commits the same workflow file to the
-default branch (a local commit; push both). Nothing is pushed. An unchanged file set makes no commit. --trailer adds
+head branch, install refuses (exit 3) unless --default-branch-too, which also commits the same two workflow files to
+the default branch (a local commit; push both): GitHub runs an issue_comment workflow, the promote one, only from
+the default branch too. Nothing is pushed. An unchanged file set makes no commit. --trailer adds
 a `Key: value` line to the end of the commit message (an agent passes its session's attribution trailers).
 Install builds the config from its flags only, so a re-run drops what it is not given again: when a config exists,
 each per-fork `ledger_issues` and `depends_on`, and the set's `allow` and `plan_owner`, that it holds and the new
@@ -124,6 +129,10 @@ ROOT = TOOLS.parent
 TEMPLATE = ROOT / "templates/weekly-plan.yml"
 GOLDEN = TOOLS / "golden/weekly-plan.yml"
 WORKFLOW = ".github/workflows/weekly-plan.yml"
+# the plan owner's `/promote` on the plan issue (tools/plan-promote.py), installed beside the plan workflow
+PROMOTE_TEMPLATE = ROOT / "templates/weekly-plan-promote.yml"
+PROMOTE_GOLDEN = TOOLS / "golden/weekly-plan-promote.yml"
+PROMOTE_WORKFLOW = ".github/workflows/weekly-plan-promote.yml"
 CONFIG = ".github/weekly-plan.json"
 TZ = "America/Los_Angeles"
 ROUND_WEEKDAY = 2              # Wednesday (date.weekday())
@@ -244,17 +253,25 @@ def render(text, values):
     return out
 
 
-def workflow(migrator_repo, sha, head):
+def workflow(migrator_repo, sha, head, template=TEMPLATE):
     if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
         raise Fail(f"the pinned commit must be a full 40-digit sha, not {sha!r}")
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", migrator_repo or ""):
         raise Fail(f"--migrator-repo {migrator_repo!r} is not owner/repo")
-    return render(TEMPLATE.read_text(encoding="utf-8"), {"MIGRATOR_REPO": migrator_repo, "MIGRATOR_SHA": sha,
+    return render(template.read_text(encoding="utf-8"), {"MIGRATOR_REPO": migrator_repo, "MIGRATOR_SHA": sha,
                                                          "HEAD_BRANCH": head})
+
+
+def promote_workflow(migrator_repo, sha, head):
+    return workflow(migrator_repo, sha, head, PROMOTE_TEMPLATE)
 
 
 def fixture():
     return workflow("owner/migrator", "a" * 40, "neoforge-1.21.1")
+
+
+def promote_fixture():
+    return promote_workflow("owner/migrator", "a" * 40, "neoforge-1.21.1")
 
 
 def gate_script(wf):
@@ -537,6 +554,7 @@ def install(a, say=print, repo_info=None):
     mrepo = a.migrator_repo or migrator_repo()
     sha = a.migrator_sha or git(ROOT, "rev-parse", "origin/main").stdout.strip()
     wf = workflow(mrepo, sha, head)
+    pwf = promote_workflow(mrepo, sha, head)
     flags = {"ledger_issues": per_fork(a.ledger_issues, forks, "--ledger-issues"),
              "depends_on": per_fork(a.depends_on, forks, "--depends-on")}
 
@@ -562,6 +580,7 @@ def install(a, say=print, repo_info=None):
     cfg_text = json.dumps(cfg, indent=2, sort_keys=True) + "\n"
     if a.print:
         say(wf, end="")
+        say(pwf, end="")
         say(cfg_text, end="")
         return 0
     dflt = default_branch(repo)
@@ -570,13 +589,14 @@ def install(a, say=print, repo_info=None):
         if not a.default_branch_too:
             say(f"weekly-plan: REFUSED: GitHub runs a scheduled workflow only from the default branch, which is {dflt}, "
                 f"not the head branch {head}. Either make {head} the default branch (Settings -> Branches) and rerun, or "
-                f"rerun with --default-branch-too to commit the same {WORKFLOW} to {dflt} as well. Nothing was written.")
+                f"rerun with --default-branch-too to commit the same {WORKFLOW} and {PROMOTE_WORKFLOW} to {dflt} as "
+                "well. Nothing was written.")
             return 3
         also = dflt
     elif not dflt:
         say("weekly-plan: note: origin/HEAD is unknown (git remote set-head origin -a): make sure the head branch is the "
             "default branch, or the schedule will not fire")
-    files = {WORKFLOW: wf, CONFIG: cfg_text}
+    files = {WORKFLOW: wf, PROMOTE_WORKFLOW: pwf, CONFIG: cfg_text}
     changed = []
     for p, text in files.items():
         f = repo / p
@@ -589,11 +609,12 @@ def install(a, say=print, repo_info=None):
            f"Every Tuesday at 08:00 {TZ} a GitHub Actions workflow, with no model and no secrets, opens one plan\n"
            "issue for the fork owner: the authors' new commits, the cascade plan and the known issues the Wednesday\n"
            f"round takes. Generated by {mrepo}'s tools/weekly-plan.py install (keep-current setup) with the tools\n"
-           f"pinned at {sha[:12]}; re-run setup to change it, do not edit by hand.\n")
+           f"pinned at {sha[:12]}; re-run setup to change it, do not edit by hand. The plan owner's `/promote`\n"
+           "comment on a plan issue promotes the played pre-releases (weekly-plan-promote.yml).\n")
     if trailers:
         msg += "\n" + "\n".join(trailers) + "\n"
     if not changed:
-        say(f"weekly-plan: {WORKFLOW} and {CONFIG} unchanged on {head}")
+        say(f"weekly-plan: {WORKFLOW}, {PROMOTE_WORKFLOW} and {CONFIG} unchanged on {head}")
     elif a.no_commit:
         say(f"weekly-plan: wrote {', '.join(changed)} (not committed)")
     else:
@@ -601,8 +622,8 @@ def install(a, say=print, repo_info=None):
         git(repo, "commit", "-q", "-m", msg, check=True)
         say(f"weekly-plan: committed {', '.join(changed)} on {head} ({git(repo, 'rev-parse', '--short', 'HEAD').stdout.strip()})")
     if also:
-        c = commit_to(repo, also, {WORKFLOW: wf}, msg)
-        say(f"weekly-plan: {WORKFLOW} on {also}: " + (f"committed {c[:12]}" if c else "unchanged"))
+        c = commit_to(repo, also, {WORKFLOW: wf, PROMOTE_WORKFLOW: pwf}, msg)
+        say(f"weekly-plan: {WORKFLOW} and {PROMOTE_WORKFLOW} on {also}: " + (f"committed {c[:12]}" if c else "unchanged"))
     say(f"weekly-plan: plan issues go to {k.mention(k.resolve_owner(plan_owner, owner_login, otype or ''))} on "
         f"{forks[0]['repo']}; the round: {cfg['round']['cron']}. Push: git push origin {head}" + (f" {also}" if also else ""))
     for f in forks:
@@ -1225,6 +1246,43 @@ def self_check():
                "the workflow parses as YAML, with its triggers, permissions and steps")
     except ImportError:
         pass
+    # the promote workflow (templates/weekly-plan-promote.yml): its golden, on issue comments only, the least
+    # permissions that dispatch a workflow and reply, nothing from the event spliced into a shell, the pinned tool
+    pwf = promote_fixture()
+    pgold = PROMOTE_GOLDEN.read_text(encoding="utf-8") if PROMOTE_GOLDEN.is_file() else ""
+    expect(pwf == pgold, "the rendered promote workflow differs from tools/golden/weekly-plan-promote.yml (regenerate "
+                         "with --regen-golden after reading the diff)")
+    pperms = pwf.split("\npermissions:\n", 1)[-1].split("\n\n", 1)[0]
+    expect(pperms == "  contents: read\n  issues: write\n  actions: write",
+           f"promote: permissions contents: read, issues: write, actions: write only: {pperms!r}")
+    pon = pwf.split("\non:\n", 1)[-1].split("\n\n", 1)[0]
+    expect(pon == "  issue_comment:\n    types: [created]", f"promote: on a new issue comment only: {pon!r}")
+    pif = re.search(r"\n    if: \$\{\{ (.*) \}\}\n", pwf)
+    expect(bool(pif) and all(x in pif.group(1) for x in ("!github.event.issue.pull_request",
+                                                          "github.event.issue.user.login == 'github-actions[bot]'",
+                                                          "github.event.comment.user.type != 'Bot'",
+                                                          "startsWith(github.event.comment.body, '/promote')")),
+           "promote: the job runs only for a /promote comment by a person on an issue the bot opened")
+    runs = [l for l in pwf.splitlines() if l.lstrip().startswith("run:")]
+    expect(len(runs) == 1 and "${{" not in runs[0] and '--event "$GITHUB_EVENT_PATH"' in runs[0]
+           and "mmvu/tools/plan-promote.py" in runs[0] and "secrets." not in pwf and "${{ github.token }}" in pwf,
+           f"promote: one step runs plan-promote.py, the comment read from the event file, never spliced: {runs}")
+    expect("ref: " + "a" * 40 in pwf and "repository: owner/migrator" in pwf and "ref: neoforge-1.21.1" in pwf
+           and "sparse-checkout: .github/weekly-plan.json" in pwf, "promote: the tool pinned, the config from the head")
+    try:
+        import yaml
+        py_ = yaml.safe_load(pwf)
+        expect(py_[True] == {"issue_comment": {"types": ["created"]}} and len(py_["jobs"]["promote"]["steps"]) == 3,
+               "the promote workflow parses as YAML")
+    except ImportError:
+        pass
+    import importlib.util as _ilu
+    _s = _ilu.spec_from_file_location("plan_promote_wp", TOOLS / "plan-promote.py")
+    pp = _ilu.module_from_spec(_s); _s.loader.exec_module(pp)
+    with contextlib.redirect_stdout(io.StringIO()) as _o:
+        _rc = pp.self_check()
+    expect(_rc == 0, "tools/plan-promote.py --self-check (the owner check, /promote parsing, tag selection): "
+                     + "; ".join(l for l in _o.getvalue().splitlines() if l.startswith("FAIL:"))[:800])
     for bad_sha in ("abc", "g" * 40):
         try:
             workflow("o/m", bad_sha, "neoforge-1.21.1"); bad.append(f"a pinned commit {bad_sha!r} is refused")
@@ -1517,6 +1575,9 @@ def self_check():
                and json.loads((fork / CONFIG).read_text(encoding="utf-8"))["plan_owner"] == "someone",
                f"install commits the golden workflow and plan_owner on the head branch, [skip ci], no warning with no "
                f"existing config: {rc} {o}")
+        expect((fork / PROMOTE_WORKFLOW).is_file() and (fork / PROMOTE_WORKFLOW).read_text(encoding="utf-8") ==
+               promote_fixture() and PROMOTE_WORKFLOW in gq(fork, "show", "--name-only", "--format=", "HEAD"),
+               "install commits the golden promote workflow beside the plan workflow, in the same commit")
         n = gq(fork, "rev-list", "--count", "HEAD")
         rc, o = inst("--plan-owner", "someone")
         expect(rc == 0 and "unchanged" in o and gq(fork, "rev-list", "--count", "HEAD") == n,
@@ -1536,6 +1597,7 @@ def self_check():
                f"head is not the default branch: refused, nothing written: {rc} {o}")
         rc, o = inst("--plan-owner", "other", "--default-branch-too")
         expect(rc == 0 and gq(fork, "show", f"main:{WORKFLOW}") == fixture().rstrip("\n")
+               and gq(fork, "show", f"main:{PROMOTE_WORKFLOW}") == promote_fixture().rstrip("\n")
                and gq(fork, "show", "main:README.md") == "x" and gq(fork, "status", "--porcelain") == "",
                f"--default-branch-too: the workflow also committed to the default branch, no checkout touched: {o}")
         # trailers, the allow list and the derived upstream, through install
@@ -2068,7 +2130,8 @@ def main(argv=None):
         return self_check()
     if a.regen_golden:
         GOLDEN.write_text(fixture(), encoding="utf-8")
-        print(f"wrote {GOLDEN.relative_to(ROOT)}")
+        PROMOTE_GOLDEN.write_text(promote_fixture(), encoding="utf-8")
+        print(f"wrote {GOLDEN.relative_to(ROOT)} and {PROMOTE_GOLDEN.relative_to(ROOT)}")
         return 0
     try:
         if a.cmd == "install":

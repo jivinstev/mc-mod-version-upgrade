@@ -1,0 +1,57 @@
+# Promote by comment: the plan owner's `/promote` on the weekly plan issue promotes the round's played pre-releases --
+# no model, no secrets, no cost.
+#
+# Installed by tools/weekly-plan.py install (the keep-current skill's setup) beside weekly-plan.yml, from
+# owner/migrator's templates/weekly-plan-promote.yml; re-running setup regenerates it, so do not edit it by hand.
+# GitHub runs an issue_comment workflow from the repository's DEFAULT branch, so install commits it there too when the
+# head branch is not the default (--default-branch-too). The plan owner is read from .github/weekly-plan.json on the
+# head branch.
+#
+# On a comment whose first line is `/promote` (every pre-release the round cut) or `/promote 1.21.8 26.3` (those
+# Minecraft versions only), on an issue the plan workflow opened, from the plan owner (`plan_owner`: a login, or an
+# active member of an @org/team), tools/plan-promote.py dispatches this repository's Port CI (port-ci.yml) on
+# `neoforge-<version>` with promote = the newest pre-release tag of that version (`-mc<version>` or `-mc<version>-rN`),
+# played_by = the commenter and played_notes = "promoted from <the issue>", then replies once with each tag and its
+# run. It never promotes a tag that is not a Port CI pre-release; anyone else gets one reply saying who may promote.
+# A dispatch made with this workflow's token starts the run, so Port CI's promote, and its publish in the same run,
+# work as they do for `port-ci.py promote`. The comment reaches the tool only as the event file, never a shell.
+name: Weekly plan promote
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: weekly-plan-promote-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: ${{ !github.event.issue.pull_request && github.event.issue.user.login == 'github-actions[bot]' && github.event.comment.user.type != 'Bot' && startsWith(github.event.comment.body, '/promote') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: The plan's config (the head branch)
+        uses: actions/checkout@v4
+        with:
+          ref: neoforge-1.21.1
+          path: fork
+          sparse-checkout: .github/weekly-plan.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: The promote tool (owner/migrator at a pinned commit)
+        uses: actions/checkout@v4
+        with:
+          repository: owner/migrator
+          ref: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          path: mmvu
+          persist-credentials: false
+      - name: Promote what the owner played (tools/plan-promote.py)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 mmvu/tools/plan-promote.py --config fork/.github/weekly-plan.json --event "$GITHUB_EVENT_PATH"
