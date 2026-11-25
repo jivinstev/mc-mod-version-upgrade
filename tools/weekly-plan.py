@@ -1787,7 +1787,7 @@ def self_check():
         ar = ["--after-repin", "o/lib=python3 tools/core-pins.py --write", "--after-repin", 'O/LIB=echo "a b"']
         rc, o = inst("--plan-owner", "someone", *ar, argv=argv2, info=par)
         c6 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
-        expect(rc == 0 and c6["forks"][0]["after_repin"] == [["python3", "tools/core-pins.py", "--write"], ["echo", "a b"]],
+        expect(rc == 0 and c6["forks"][0]["after_repin"] == [["python3", "tools/core-pins.py", "--write"], ["echo", "a b"]],  # exec-ok: fixture data (a key/argv in a test), not a program run
                f"--after-repin: stored per fork as argv lists, in order: {rc} {o} {c6['forks'][0]}")
         rc, o = inst("--plan-owner", "someone", argv=argv2, info=par)
         c7 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))

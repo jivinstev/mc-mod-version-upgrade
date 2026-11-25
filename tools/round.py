@@ -6138,7 +6138,7 @@ def self_check_repin_several(expect):
     into mavenLocal before a job; the repin-head job is told to run layer-deps.py head-repin and the fork's after_repin
     commands before its one commit."""
     G = globals()
-    keep = {k: G[k] for k in ("sh", "guarded_pin")}
+    keep = {k: G[k] for k in ("sh", "guarded_pin")}  # exec-ok: fixture data (a key/argv in a test), not a program run
     with tempfile.TemporaryDirectory() as td:
         tmp = pathlib.Path(td)
         bare, d = tmp / "multi.git", tmp / "multi"
@@ -6201,7 +6201,7 @@ def self_check_repin_several(expect):
                    f"head_pins: the union of the mods' workflow pins: {got}")
             # the repin-head job: head-repin, then the fork's after_repin commands, then ONE commit
             rp = {"id": "multi@1.21.1:repin-head", "fork": "o/multi", "version": "1.21.1", "step": "repin-head",
-                  "extra": {"libraries": ["o/examplelib"], "after_repin": [["python3", "tools/core-pins.py", "--write"]]}}
+                  "extra": {"libraries": ["o/examplelib"], "after_repin": [["python3", "tools/core-pins.py", "--write"]]}}  # exec-ok: fixture data (a key/argv in a test), not a program run
             txt = "\n".join(job_task(_St(), rp))
             expect("layer-deps.py head-repin --repo" in txt and "--port-release o/examplelib@examplelib-1.1-mc1.21.1" in txt
                    and "--branch neoforge-1.21.1" in txt and "`python3 tools/core-pins.py --write`" in txt
@@ -6833,10 +6833,10 @@ def self_check():
         cfg_ar = json.loads(json.dumps(cfg))
         for c_ in cfg_ar["forks"]:
             if c_["repo"] == DEP:
-                c_["after_repin"] = [["python3", "tools/core-pins.py", "--write"]]
+                c_["after_repin"] = [["python3", "tools/core-pins.py", "--write"]]  # exec-ok: fixture data (a key/argv in a test), not a program run
         with State.tx(state, write=False) as st_:
             by_ar = {x["id"]: x for x in build_queue(fz(), cfg_ar, json.loads(json.dumps(st_.data["forks"])), "2026-10-21")}
-        expect(by_ar["examplemod@1.21.4:repin"]["extra"]["after_repin"] == [["python3", "tools/core-pins.py", "--write"]]
+        expect(by_ar["examplemod@1.21.4:repin"]["extra"]["after_repin"] == [["python3", "tools/core-pins.py", "--write"]]  # exec-ok: fixture data (a key/argv in a test), not a program run
                and "after_repin" not in by["examplemod@1.21.4:repin"]["extra"]
                and not any("after_repin" in x["extra"] for x in by_ar.values() if x["fork"] != DEP),
                "a fork's after_repin rides on its re-pin items only; a fork without it: as before")
@@ -8089,8 +8089,8 @@ def self_check():
                     order_.append(("ci", "--modid" in c_, git(rp_, "status", "--porcelain").stdout.strip()))
                 return rec_out("")(st_, it_, cmd, log, **k_)
             sh = sh_ar_
-            rpa = dict(rpi, extra=dict(rpi["extra"], bumps=[], after_repin=[["python3", "tools/core-pins.py", "first"],
-                                                                             ["python3", "tools/core-pins.py", "second"]]))
+            rpa = dict(rpi, extra=dict(rpi["extra"], bumps=[], after_repin=[["python3", "tools/core-pins.py", "first"],  # exec-ok: fixture data (a key/argv in a test), not a program run
+                                                                             ["python3", "tools/core-pins.py", "second"]]))  # exec-ok: fixture data (a key/argv in a test), not a program run
             note, r_ = t_repin(_St5(), rpa, log_)
             expect(order_ == ["resolve", "first", "second", ("ci", False, "")]
                    and "derived-pins.txt" in git(rp_, "show", "--name-only", "--format=", "HEAD").stdout
