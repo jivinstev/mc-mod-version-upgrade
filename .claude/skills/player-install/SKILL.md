@@ -74,8 +74,33 @@ is running, because the Launcher rewrites its profiles file.
 The bundle is built by `python3 tools/player-install.py --bundle DIR --tag player-install-vN` (the installer and the
 tools it composes, deterministic; both bootstraps with that tag and the bundle's sha256 written in). Publish it by
 running the `player-install` workflow on `main` with `tag` = the next `player-install-vN`: it runs the checks and the
-real-release acceptance installs first, and refuses a tag that already exists. A README keeps naming its tag until
-its owner moves it.
+real-release acceptance installs given in its `acceptance` input first, and refuses a tag that already exists. A
+README keeps naming its tag until its owner moves it. Nothing in this repository reads a repository variable: a run's
+acceptance installs are its input (a JSON list of argument strings, `["OWNER/REPO --mc 1.21.8"]`), so an agent can
+run them with `gh api repos/OWNER/mc-mod-version-upgrade/actions/workflows/player-install.yml/dispatches -f ref=main
+-f 'inputs[acceptance]=[...]'` and nobody sets anything by hand.
+
+## Acceptance on every release
+
+A mod repository proves its own releases install by running the published one-liner on itself in its release
+workflow, the way a player does (its own workflow names it, so this repository still names no mod):
+
+```yaml
+  player-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL https://github.com/jivinstev/mc-mod-version-upgrade/releases/download/player-install-vN/install.sh \
+            | xvfb-run -a -s "-screen 0 1280x720x24" bash -s -- ${{ github.repository }} --yes \
+                --minecraft-dir "$RUNNER_TEMP/minecraft" --boot-test
+```
+
+It installs the newest full release for the newest Minecraft version (add `--mc X` for another, `--pre` for a
+pre-release) and boots it to the title screen with the mods loaded; a failure fails the job.
 
 ## When a repository doesn't fit
 
