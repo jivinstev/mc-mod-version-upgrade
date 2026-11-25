@@ -13,7 +13,9 @@ A fork is one of two kinds:
 
 `detect` prints `kind=single-version` or `kind=version-branches versions=<v>,<v>,...`, with `legacy_layer=<branch>,...`
 added when branches still carry the removed `.multiversion/` layer (a `.multiversion/targets/<t>/target.properties`):
-they are history, and ignored; and `owned=yes` added for an OWNED repository. Exit 0.
+they are history, and ignored; `owned=yes` added for an OWNED repository; and `mods=<dir>,<dir>` added for a
+repository of SEVERAL SEPARATE MODS: no mod_id in the root gradle.properties, and top-level folders that each hold a
+gradle.properties naming one (mod_dirs()). Exit 0.
 
 OWNED, on either kind: a repository whose maintainer is the mod's own author -- not a port of somebody else's mod --
 says so in the same record a fork keeps its authors' permission in, its publishing config `.github/port-publish.json`:
@@ -34,7 +36,7 @@ files (shipped-jar.txt, shipped-expect*.txt, which the layer era kept there) com
 kind of fork -- so a gate would otherwise run without them, silently. A migrated fork (version branches exist) checked out on its legacy layer branch is refused too, exit 2, but told to check
 out its head branch instead (LEGACY_CHECKOUT): it needs no migration. Standard library only.
 """
-import argparse, json, pathlib, re, subprocess, sys, tempfile
+import argparse, contextlib, io, json, pathlib, re, subprocess, sys, tempfile
 
 LAST_LAYER_COMMIT = "baa092b62eae1832d354065edadf9e289bf95ca4"
 LAYER_REMOVED = (
@@ -103,6 +105,28 @@ def is_owned(repo, ref="HEAD", config=PUBLISH_CONFIG):
     except ValueError:
         return False
     return isinstance(cfg, dict) and cfg.get("own_mod") is True
+
+
+def all_mods_owned(repo, ref="HEAD"):
+    """A repository of several mods with no PUBLISH_CONFIG: is every per-mod config (`.github/port-publish-<mod>.json`)
+    owned, and is there at least one? What `detect` prints as owned=yes for it; is_owned keeps asking one config."""
+    if git(repo, "show", f"{ref}:{PUBLISH_CONFIG}").returncode == 0:
+        return False
+    per = sorted(p_ for p_ in git(repo, "ls-tree", "--name-only", ref, ".github/").stdout.split()
+                 if re.match(r"^\.github/port-publish-[\w.-]+\.json$", p_))
+    return bool(per) and all(is_owned(repo, ref, p_) for p_ in per)
+
+def mod_dirs(repo, ref="HEAD"):
+    """A repository of several separate mods: its top-level folders whose own gradle.properties names a mod_id, sorted
+    -- [] for a repository whose root gradle.properties names one (the one-mod layout every tool assumes) or that has
+    fewer than one such folder. Read from git at ref."""
+    def mod_id(path):
+        r = git(repo, "show", f"{ref}:{path}")
+        return r.returncode == 0 and re.search(r"(?m)^\s*mod_id\s*[=:]\s*\S", r.stdout) is not None
+    if mod_id("gradle.properties"):
+        return []
+    tops = git(repo, "ls-tree", "-d", "--name-only", ref).stdout.split()
+    return sorted(t for t in tops if not t.startswith(".") and mod_id(f"{t}/gradle.properties"))
 
 
 def head_of(repo, vb):
@@ -177,8 +201,10 @@ def cmd_detect(a):
     if why:
         print(why); return 2
     kind, versions, legacy = detect(repo)
+    mods = mod_dirs(repo)
     print(f"kind={kind}" + (f" versions={','.join(versions)}" if versions else "")
-          + (f" legacy_layer={','.join(legacy)}" if legacy else "") + (" owned=yes" if is_owned(repo) else ""))
+          + (f" legacy_layer={','.join(legacy)}" if legacy else "") + (" owned=yes" if is_owned(repo) or all_mods_owned(repo) else "")
+          + (f" mods={','.join(mods)}" if mods else ""))
     if legacy:
         print(f"fork-kind: {', '.join(legacy)} still carr{'ies' if len(legacy) == 1 else 'y'} the removed .multiversion/ "
               "layer: history, ignored" + ("" if versions else
@@ -272,6 +298,37 @@ def self_check():
         subprocess.run(["git", "clone", "-q", "-b", "neoforge-1.21.1", str(r), str(c2)], check=True, capture_output=True)
         expect(detect(c2)[:2] == ("version-branches", ["1.21.4"]) and detect(c2)[2] == ["origin/neoforge-1.21.x"],
                f"origin's version branches count: {detect(c2)}")
+    # SEVERAL SEPARATE MODS: top-level folders each naming a mod_id, none at the root (mods=, sorted); one per-mod
+    # publishing config each, owned only when every one says so; a one-mod repository prints exactly what it did
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d) / "multi"; r.mkdir()
+        g = lambda *a: subprocess.run(["git", "-C", str(r), *a], capture_output=True, text=True, encoding="utf-8", check=True)
+        def w(p, t):
+            f = r / p; f.parent.mkdir(parents=True, exist_ok=True); f.write_text(t, encoding="utf-8")
+        g("init", "-q", "-b", "main"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
+        w("gradle.properties", "org.gradle.jvmargs=-Xmx2G\n"); w("shared/level.gradle", "// shared\n")
+        w("zeta/gradle.properties", "mod_id=examplezeta\nmod_version=0.1.0\n")
+        w("alpha/gradle.properties", "mod_id = examplealpha\nmod_version=0.2.0\n"); w("docs/README.md", "x\n")
+        g("add", "-A"); g("commit", "-qm", "two mods")
+        expect(mod_dirs(r) == ["alpha", "zeta"], f"two mod folders, the shared and docs folders not: {mod_dirs(r)}")
+        expect(not is_owned(r) and not all_mods_owned(r), "no publishing config at all: not owned")
+        w(".github/port-publish-alpha.json", '{"schema": 1, "own_mod": true}\n'); g("add", "-A"); g("commit", "-qm", "a")
+        expect(all_mods_owned(r) and not is_owned(r), "every per-mod config (one) says own_mod: all mods owned; the "
+                                                      "repository's own config (none) still is not")
+        w(".github/port-publish-zeta.json", '{"schema": 1, "permission": "https://example.invalid/agreed"}\n')
+        g("add", "-A"); g("commit", "-qm", "z")
+        expect(not all_mods_owned(r), "one per-mod config is a port's: not every mod owned")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_detect(argparse.Namespace(repo=str(r)))
+        expect(rc == 0 and buf.getvalue() == "kind=single-version mods=alpha,zeta\n", f"detect names the mods: {buf.getvalue()!r}")
+        w(".github/port-publish-zeta.json", '{"schema": 1, "own_mod": true}\n'); g("add", "-A"); g("commit", "-qm", "z2")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_detect(argparse.Namespace(repo=str(r)))
+        expect(buf.getvalue() == "kind=single-version owned=yes mods=alpha,zeta\n", f"every mod owned: {buf.getvalue()!r}")
+        w("gradle.properties", "mod_id=examplemod\n"); g("add", "-A"); g("commit", "-qm", "one mod at the root")
+        expect(mod_dirs(r) == [], "a root mod_id: the one-mod layout, whatever the folders hold")
     expect(mc_key("1.21.11") > mc_key("1.21.8") and mc_key("26.1.2") > mc_key("1.21.11"), "versions sort as numbers")
     with tempfile.TemporaryDirectory() as d:     # one mod of several (issue #274): own_mod is each mod's config's
         r = pathlib.Path(d)
