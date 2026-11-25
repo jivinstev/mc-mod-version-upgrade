@@ -2115,6 +2115,11 @@ def _check_library_first_names_tag(expect):
     """The library-first refusal of `--port-release owner/repo@TAG` (library_done_branch_release, issue #305): it names
     TAG and what TAG's gate record lacks -- never the oldest release its search of the library's releases read last."""
     global _fb
+    if not (ROOT / "tools/fork-branches.py").is_file():
+        # the Port CI kit ships layer-deps.py without fork-branches.py (library-first runs in the round, from a full
+        # checkout): this check builds a version-branch fixture with it, so the kit's verify skips it, saying so
+        print("layer-deps: library-first check skipped: tools/fork-branches.py is not here (the Port CI kit)")
+        return
     fb_once = _fb()
     keep_fb, keep_env = _fb, {k: os.environ.get(k) for k in (GIT_URL_ENV, CACHE_ENV)}
     with tempfile.TemporaryDirectory() as td:
