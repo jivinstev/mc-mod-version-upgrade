@@ -1605,7 +1605,7 @@ BRANCH_OWNED = (".github/workflows/port-ci.yml", ".github/port-install.json")
 # (`git show <head>:.port/KNOWN-ISSUES.json`), so a merge up the chain never carries a copy (issue #135, section 3)
 LEDGER_PATH = re.compile(r"^\.port/(?:[^/]+/)?KNOWN-ISSUES\.json$")
 # the weekly plan workflow and its config (tools/weekly-plan.py install) belong to the head branch alone, like the ledger
-HEAD_ONLY = (".github/workflows/weekly-plan.yml", ".github/weekly-plan.json")
+HEAD_ONLY = (".github/workflows/weekly-plan.yml", ".github/workflows/weekly-plan-promote.yml", ".github/weekly-plan.json")
 
 
 def head_only(path):
