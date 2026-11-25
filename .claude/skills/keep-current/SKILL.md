@@ -221,6 +221,8 @@ run is green, and it is then gated against the dependency's NEW build.
    dependency's PR is merged and its CI has cut a pre-release: put the exact re-pin command in the dependent's
    PR as a blocking item, and re-pin then (`port-ci.py args --repo DIR` gives the current command; change the tag
    and asset of `--dep-jar` AND of any `--dep-jar-variant` together -- a mismatch is refused -- and rerun it).
+   A repository that ships several mods has one workflow per mod (`.github/workflows/port-ci-<NAME>.yml`,
+   `port-ci.py --mod-dir`): `port-ci.py args --repo DIR --file .github/workflows/port-ci-<NAME>.yml` reads each one back.
    **Don't exceed your dependency.** A dependent MAY cut its own pre-release pinned to the dependency's
    pre-release -- do it: a library is only really tested through a dependent, so that pair of pre-releases is what
    the owner plays. A dependent MUST NOT be promoted to a full Release, nor published, while a dependency it pins

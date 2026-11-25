@@ -5,6 +5,7 @@
     port-publish.py setup   --repo <own repository> [--branch neoforge-<mc>]  # the author's own mod: no --permission
     port-publish.py modrinth-create --repo .           # CI: create the Modrinth draft project (MODRINTH_TOKEN)
     port-publish.py publish --repo . --tag <tag> [--dry-run] [--manual] [--platform mr|cf|both]   # CI: one release
+    port-publish.py setup|modrinth-create|publish ... --mod NAME     # one mod of a repository that ships several
     port-publish.py --self-check
 
 The fork carries its publishing config as .github/port-publish.json (written by `setup`, reviewed, committed):
@@ -21,6 +22,14 @@ The fork carries its publishing config as .github/port-publish.json (written by 
    clicks Release on the website; for a port whose required library's file for the same version is still in review)
 
 A version branch (tools/fork-branches.py) publishes each version's release from its own branch, the same way.
+
+A repository that ships SEVERAL mods (one Port CI workflow per mod, port-ci.py --mod-dir) keeps one config per mod:
+`--mod NAME` on setup, modrinth-create and publish reads and writes .github/port-publish-<NAME>.json (and
+.github/port-publish/description-<NAME>.md) instead. setup's `--mod-dir DIR` (default NAME) is the mod's folder: its
+gradle.properties and mods.toml are read there, and the config records "modid", "tag_name": NAME and "mod_dir": DIR.
+own_mod / permission are each config's own. publish --mod refuses a tag that does not start with <NAME>-, reads the
+workflow at the tag from port-ci-<NAME>.yml, and the known-issues ledger from .port/<modid>/KNOWN-ISSUES.json when the
+repository keeps one for the mod (else .port/KNOWN-ISSUES.json). Without --mod nothing changes.
 
 `setup` writes that file and the project page from data the port already has (neoforge.mods.toml, the
 author's own project on Modrinth, the tested dependencies in .github/port-install.json, the fix ledgers), and
@@ -69,6 +78,43 @@ import urllib.parse, urllib.request, uuid
 ROOT = pathlib.Path(__file__).resolve().parent
 CONFIG = ".github/port-publish.json"
 BODY = ".github/port-publish/description.md"
+SINGLE_CONFIG = CONFIG                   # a dependency port's config, read from its repository (port_config)
+WORKFLOW = ".github/workflows/port-ci.yml"
+LEDGER = ".port/KNOWN-ISSUES.json"
+MOD = None                               # one mod of a repository that ships several (--mod NAME, use_mod)
+MOD_PREFIX = ""                          # ... and its folder, "<dir>/", where its gradle.properties and sources are
+MOD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+
+def use_mod(name, mod_dir=None):
+    """Work on one mod of a repository that ships several (port-ci.py --mod-dir): its config is
+    .github/port-publish-<NAME>.json (own_mod / permission are that mod's), its page
+    .github/port-publish/description-<NAME>.md, its workflow port-ci-<NAME>.yml, its tags <NAME>-<version>-mc<mc>, and
+    its gradle.properties and sources are in `mod_dir` (the config's "mod_dir"; default NAME). Without it, nothing
+    changes: one .github/port-publish.json for the repository."""
+    global CONFIG, BODY, WORKFLOW, MOD, MOD_PREFIX
+    if not MOD_NAME.fullmatch(name or ""):
+        raise SystemExit(f"--mod must be the mod's name in its tags ([A-Za-z0-9_.-]), got {name!r}")
+    d = (mod_dir or name).strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", d) or ".." in d.split("/"):
+        raise SystemExit(f"--mod-dir must be a folder relative to the repository root, got {mod_dir!r}")
+    MOD, MOD_PREFIX = name, d + "/"
+    CONFIG, BODY = f".github/port-publish-{name}.json", f".github/port-publish/description-{name}.md"
+    WORKFLOW = f".github/workflows/port-ci-{name}.yml"
+
+
+def mod_ledger(repo, modid):
+    """The known-issues ledger publishing reads: .port/KNOWN-ISSUES.json, or for one mod of several
+    .port/<modid>/KNOWN-ISSUES.json (known-issues.py --mod) when the repository keeps one for it."""
+    global LEDGER
+    if MOD and modid and re.fullmatch(r"[a-z0-9_.-]+", modid) and (pathlib.Path(repo) / ".port" / modid / "KNOWN-ISSUES.json").is_file():
+        LEDGER = f".port/{modid}/KNOWN-ISSUES.json"
+    return LEDGER
+
+
+def tag_prefix(cfg):
+    """The name a release tag starts with: the config's tag_name (one mod of several), else its modid."""
+    return cfg.get("tag_name") or cfg.get("modid", "")
 MODRINTH = "https://api.modrinth.com/v2"
 CURSEFORGE = "https://minecraft.curseforge.com/api"
 GITHUB = "https://api.github.com"
@@ -81,7 +127,7 @@ def owned(repo, ref="HEAD"):
     """Is `repo` an owned repository (the mod author's own, tools/fork-kind.py is_owned), not a port of someone else's?"""
     spec = importlib.util.spec_from_file_location("fork_kind_owned", ROOT / "fork-kind.py")
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-    return m.is_owned(pathlib.Path(repo), ref)
+    return m.is_owned(pathlib.Path(repo), ref, config=CONFIG)
 
 
 def _ledger_mod():
@@ -166,7 +212,7 @@ def expand_properties(text, props):
 
 def gradle_props(repo, ref="HEAD"):
     out = {}
-    for line in git(repo, "show", f"{ref}:gradle.properties").stdout.splitlines():
+    for line in git(repo, "show", f"{ref}:{MOD_PREFIX}gradle.properties").stdout.splitlines():
         k, sep, v = line.partition("=")
         if sep and not k.lstrip().startswith(("#", "!")):
             out[k.strip()] = v.strip()
@@ -176,7 +222,7 @@ def gradle_props(repo, ref="HEAD"):
 def mods_toml(repo, ref="HEAD"):
     for p in ("src/main/resources/META-INF/neoforge.mods.toml", "src/main/resources/META-INF/mods.toml",
               "src/main/templates/META-INF/neoforge.mods.toml", "src/main/templates/META-INF/mods.toml"):
-        r = git(repo, "show", f"{ref}:{p}")
+        r = git(repo, "show", f"{ref}:{MOD_PREFIX}{p}")
         if r.returncode == 0:
             try:
                 import tomllib
@@ -231,13 +277,13 @@ def ledger_for(repo, mc):
             git(repo, "fetch", "-q", "--depth", "1", "origin", f"+refs/heads/{head}:{ref}")
             if git(repo, "rev-parse", "--verify", "--quiet", ref).returncode != 0:
                 return None, f"cannot read the head branch {head} to check its known-issues ledger"
-        r = git(repo, "show", f"{ref}:.port/KNOWN-ISSUES.json")
+        r = git(repo, "show", f"{ref}:{LEDGER}")
         text = r.stdout if r.returncode == 0 else ""
-        where = f"{head}:.port/KNOWN-ISSUES.json"
+        where = f"{head}:{LEDGER}"
     else:
-        f = pathlib.Path(repo) / ".port/KNOWN-ISSUES.json"
+        f = pathlib.Path(repo) / LEDGER
         text = f.read_text(encoding="utf-8") if f.is_file() else ""
-        where = ".port/KNOWN-ISSUES.json"
+        where = LEDGER
     if not text.strip():
         return None, None
     try:
@@ -319,10 +365,10 @@ def tag_workflow(repo, tag=None):
     """port-ci.yml as release `tag` was built with it (the workflow at the tag), else the checked-out one. The
     checked-out branch's pin moves on when keep-current re-pins a dependency; the jar was built against the tag's."""
     if tag:
-        r = git(repo, "show", f"{tag}:.github/workflows/port-ci.yml")
+        r = git(repo, "show", f"{tag}:{WORKFLOW}")
         if r.returncode == 0 and (r.stdout or "").strip():
             return r.stdout
-    wf = pathlib.Path(repo) / ".github/workflows/port-ci.yml"
+    wf = pathlib.Path(repo) / WORKFLOW
     return wf.read_text(encoding="utf-8") if wf.exists() else None
 
 
@@ -438,12 +484,12 @@ def notes(cfg, tag, release, repo_slug, is_owned=False):
     if is_owned:
         return "\n".join([
             f"{cfg.get('original_name') or cfg.get('modid') or 'This mod'} "
-            f"{version_of(tag, cfg.get('modid', '')).split('+')[0]} for NeoForge {minecraft_of(tag)}.", "",
+            f"{version_of(tag, tag_prefix(cfg)).split('+')[0]} for NeoForge {minecraft_of(tag)}.", "",
             f"Every build passes this mod's checks (it builds, loads on a server and in a real client) and is played by "
             f"a person before release. {played.group(0) if played else ''}".strip(), "",
             f"Report problems at https://github.com/{repo_slug}/issues."])
     out = [f"**Unofficial community port** of {cfg.get('original_name', 'the original mod')} to NeoForge "
-           f"{minecraft_of(tag)}, based on the original's version {version_of(tag, cfg.get('modid', '')).split('+')[0]}.", ""]
+           f"{minecraft_of(tag)}, based on the original's version {version_of(tag, tag_prefix(cfg)).split('+')[0]}.", ""]
     diffs = cfg.get("differences", [])
     if diffs:
         out += ["Differences from the original:", *[f"- {d}" for d in diffs], ""]
@@ -501,7 +547,7 @@ def port_config(cfg, port):
     ports share the port-branch name (neoforge-<mc>). No branch known (a detached checkout): the default branch."""
     ref = cfg.get("port_branch")
     q = f"?ref={urllib.parse.quote(ref, safe='')}" if ref else ""
-    return json.loads(gh("GET", f"/repos/{port}/contents/{CONFIG}{q}", accept="application/vnd.github.raw", raw=True))
+    return json.loads(gh("GET", f"/repos/{port}/contents/{SINGLE_CONFIG}{q}", accept="application/vnd.github.raw", raw=True))
 
 
 def checked_out_branch(repo):
@@ -528,7 +574,7 @@ def modrinth_version(cfg, tag, release, text, dry):
     mc = minecraft_of(tag)
     proj = modrinth("GET", f"/project/{mr['slug']}")
     have = {v["version_number"] for v in modrinth("GET", f"/project/{proj['id']}/version") or []}
-    number = version_of(tag, cfg.get("modid", ""))
+    number = version_of(tag, tag_prefix(cfg))
     if number in have:
         return proj, {"id": "existing", "version_number": number}
     asset = pick_asset(release, mr.get("asset", ""))
@@ -580,7 +626,7 @@ def curseforge_file(cfg, tag, release, text, dry):
     mc = minecraft_of(tag)
     asset = pick_asset(release, cf.get("asset", ""))
     kinds = {"required": "requiredDependency", "optional": "optionalDependency"}
-    meta = {"changelog": text, "changelogType": "markdown", "displayName": f"{version_of(tag, cfg.get('modid', ''))} (NeoForge {mc})",
+    meta = {"changelog": text, "changelogType": "markdown", "displayName": f"{version_of(tag, tag_prefix(cfg))} (NeoForge {mc})",
             "releaseType": "release"}
     rel = [{"slug": s, "type": kinds.get(t, "requiredDependency")} for s, t in dep_entries(cfg, "curseforge")]
     if rel:         # CurseForge rejects an empty list ("Array item count 0 is less than minimum count of 1")
@@ -611,6 +657,10 @@ def publish(repo, tag, dry=False, manual=False, platform=None):
     cfg = load_config(repo)
     if not cfg:
         print(f"::notice::no {CONFIG}: this fork is not set up to publish (port-publish.py setup)"); return 0
+    if MOD and not tag.startswith(tag_prefix(cfg) + "-"):
+        print(f"::error::will not publish {tag}: it is not a release of {MOD} ({tag_prefix(cfg)}-<version>-mc<minecraft>)")
+        return 1
+    mod_ledger(repo, cfg.get("modid"))
     repo_slug = slug_of(repo)
     cfg["port_branch"] = checked_out_branch(repo)       # where a port dependency's own config is read (port_config)
     release = gh("GET", f"/repos/{repo_slug}/releases/tags/{tag}")
@@ -785,7 +835,7 @@ def known_issues_section(repo, fork, api=None):
     (`known-issues.py page`) and paste it again when an S2 opens or is fixed."""
     ki = _known_issues()
     url = ki.details_link(fork, api)
-    led = pathlib.Path(repo) / ".port/KNOWN-ISSUES.json"
+    led = pathlib.Path(repo) / LEDGER
     if not led.is_file():
         return ["## Known issues", "", f"Known issues and their status: [the port's issue tracker]({url}).", ""]
     return ki.page(ki.read_ledger(led), fork, url).splitlines() + [""]
@@ -842,6 +892,11 @@ def release_variant(fork):
     return lambda sfx: sfx if any(n.endswith(sfx) for n in names) else ""
 
 
+def mod_keys():
+    """The config keys of one mod of several (use_mod): its tag name and folder; none for a single-mod repository."""
+    return {"tag_name": MOD, "mod_dir": MOD_PREFIX.rstrip("/")} if MOD else {}
+
+
 def setup_owned(repo, branch, out=None, ledgers=(), differences=()):
     """setup for an OWNED repository: the author's own mod. The same config and files as a fork's, with no permission,
     no original to look up or credit, no "unofficial" or "community port" wording and no derivative-work disclosure."""
@@ -851,7 +906,7 @@ def setup_owned(repo, branch, out=None, ledgers=(), differences=()):
     mod = toml["mods"][0]
     modid, name = mod["modId"], mod.get("displayName", mod["modId"])
     install = json.loads(git(repo, "show", f"{ref}:.github/port-install.json").stdout or "{}")
-    gp = git(repo, "show", f"{ref}:gradle.properties").stdout
+    gp = git(repo, "show", f"{ref}:{MOD_PREFIX}gradle.properties").stdout
     m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp)
     mc = install.get("minecraft") or (m.group(1) if m else "1.21.1")
     authors = mod.get("authors", "its authors")
@@ -862,7 +917,7 @@ def setup_owned(repo, branch, out=None, ledgers=(), differences=()):
     summary = (desc if desc and len(desc) <= 250 else f"{name} for NeoForge {mc}.")
     slug = modid.replace("_", "-")
     cfg = {"schema": 1, "own_mod": True, "auto": True, "modid": modid, "title": name[:64], "summary": summary,
-           "body_file": BODY, "icon": f"src/main/resources/{mod['logoFile']}" if mod.get("logoFile") else None,
+           "body_file": BODY, "icon": f"{MOD_PREFIX}src/main/resources/{mod['logoFile']}" if mod.get("logoFile") else None,
            "license": toml.get("license", "MIT"), "categories": [], "additional_categories": [],
            "ledger_issues": list(ledgers), "differences": list(differences), "original_name": name,
            "environment": "client_and_server",
@@ -870,7 +925,7 @@ def setup_owned(repo, branch, out=None, ledgers=(), differences=()):
                             "note": "This page's text was drafted with an AI assistant and checked by a person."}],
            "dependencies": deps,
            "modrinth": {"slug": slug, "asset": variant("_mr.jar")},
-           "curseforge": {"project_id": None, "slug": slug, "asset": variant("_cf.jar")}}
+           "curseforge": {"project_id": None, "slug": slug, "asset": variant("_cf.jar")}, **mod_keys()}
     lines = [f"# {name}", "", *([desc, ""] if desc else []),
              f"By **{authors}**. Report problems [on its issue tracker](https://github.com/{fork}/issues).", "",
              f"**Scope:** NeoForge, Minecraft {mc}. Builds are published for Minecraft {mc}.", "",
@@ -882,6 +937,7 @@ def setup_owned(repo, branch, out=None, ledgers=(), differences=()):
         lines.append(f"- {'Required' if d['type'] == 'required' else 'Optional'}: {what}")
     if not deps:
         lines.append(f"- Nothing beyond NeoForge {mc}.")
+    mod_ledger(repo, modid)
     lines += [""] + known_issues_section(repo, fork)
     lines += ["## How releases are made", "",
               f"Every release is built from https://github.com/{fork} by its own build, passes automated checks (it "
@@ -934,7 +990,7 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
     cfg = {"schema": 1, "permission": permission, "auto": True, "modid": modid, "title": title,
            "summary": f"Unofficial NeoForge port of {name} by {authors} to newer Minecraft, maintained by the community "
                       "with the author's permission.",
-           "body_file": BODY, "icon": f"src/main/resources/{mod['logoFile']}" if mod.get("logoFile") else None,
+           "body_file": BODY, "icon": f"{MOD_PREFIX}src/main/resources/{mod['logoFile']}" if mod.get("logoFile") else None,
            "license": toml.get("license", "MIT"), "categories": (orig or {}).get("categories", []),
            "additional_categories": (orig or {}).get("additional_categories", []),
            "ledger_issues": list(ledgers), "differences": list(differences), "original_name": name,
@@ -942,7 +998,7 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
            "disclosures": disclosures_for(name, authors, mc, f"https://modrinth.com/mod/{orig['slug']}" if orig else up),
            "dependencies": deps,
            "modrinth": {"slug": f"{oslug}-neoforge", "asset": variant("_mr.jar")},
-           "curseforge": {"project_id": None, "slug": f"{oslug}-neoforge", "asset": variant("_cf.jar")}}
+           "curseforge": {"project_id": None, "slug": f"{oslug}-neoforge", "asset": variant("_cf.jar")}, **mod_keys()}
     credits = str(mod.get("credits", "")).strip()
     where = [*([f"[Modrinth](https://modrinth.com/mod/{orig['slug']})"] if orig else []),
              *([f"[CurseForge]({orig_cf})"] if orig_cf else []), *([f"[source]({up})"] if up else [])]
@@ -970,6 +1026,7 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
         lines.append(f"- {'Required' if d['type'] == 'required' else 'Optional'}: {what}")
     if not deps:
         lines.append(f"- Nothing beyond NeoForge {mc}.")
+    mod_ledger(repo, modid)
     lines += [""] + known_issues_section(repo, fork)
     lines += ["## How releases are made", "",
               f"Every release is built by the original author's own build from https://github.com/{fork}, passes "
@@ -1259,8 +1316,75 @@ def self_check():
             curseforge_file({"modid": "m", "curseforge": cf_cfg}, "m-1.0.0-mc1.21.1", {"assets": [{"name": "m.jar"}]}, "n", True)
         expect(('"isMarkedForManualRelease": true' in buf.getvalue()) == held,
                f"curseforge.manual_release {held}: the upload {'is' if held else 'is not'} held for a manual release")
+    ok &= multimod_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
+
+
+def multimod_check():
+    """--mod NAME (issue #274): one publish config per mod of a repository that ships several, its own_mod / permission
+    read from that config, the mod's tags, folder and workflow; a single-mod repository's paths unchanged."""
+    import contextlib, io, tempfile
+    ok = True
+
+    def expect(c, msg):
+        nonlocal ok
+        if not c:
+            print("port-publish self-check FAIL [multi-mod]:", msg)
+            ok = False
+    saved = (CONFIG, BODY, WORKFLOW, MOD, MOD_PREFIX, LEDGER)
+    expect(saved == (".github/port-publish.json", ".github/port-publish/description.md", ".github/workflows/port-ci.yml",
+                     None, "", ".port/KNOWN-ISSUES.json"), f"single-mod paths unchanged: {saved}")
+    expect(version_of("examplemod-1.0.0-mc1.21.1", tag_prefix({"modid": "examplemod"})) == "1.0.0+1.21.1",
+           "single-mod config: the tag starts with its modid, as before")
+    expect(version_of("alpha-2.0.5-mc1.21.4", tag_prefix({"modid": "examplemod", "tag_name": "alpha"})) == "2.0.5+1.21.4",
+           "one mod of several: the version after its tag name, not its modid")
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d)
+        g = lambda *a: subprocess.run(["git", "-C", str(r), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                                      capture_output=True, text=True, encoding="utf-8")
+        g("init", "-q"); g("config", "core.autocrlf", "false")
+        (r / "mods/alpha/src/main/resources/META-INF").mkdir(parents=True)
+        (r / "mods/alpha/gradle.properties").write_text("mod_id=examplemod\nmod_version=2.0.5\nminecraft_version=1.21.4\n",
+                                                        encoding="utf-8")
+        (r / "mods/alpha/src/main/resources/META-INF/neoforge.mods.toml").write_text(
+            'license="MIT"\n[[mods]]\nmodId="examplemod"\nversion="${mod_version}"\n', encoding="utf-8")
+        (r / ".github").mkdir()
+        (r / ".github/port-publish-alpha.json").write_text(json.dumps(
+            {"schema": 1, "own_mod": True, "auto": True, "modid": "examplemod", "tag_name": "alpha", "mod_dir": "mods/alpha",
+             "modrinth": {"slug": "examplemod", "asset": ""}}), encoding="utf-8")
+        (r / ".port/examplemod").mkdir(parents=True)
+        (r / ".port/examplemod/KNOWN-ISSUES.json").write_text('{"schema": 1, "issues": []}\n', encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "fixture")
+        try:
+            expect(not owned(r), "no .github/port-publish.json: the repository as a whole is not marked owned")
+            use_mod("alpha", "mods/alpha")
+            expect((CONFIG, BODY, WORKFLOW) == (".github/port-publish-alpha.json", ".github/port-publish/description-alpha.md",
+                                                ".github/workflows/port-ci-alpha.yml"), f"per-mod paths: {CONFIG} {BODY} {WORKFLOW}")
+            expect(owned(r), "the mod's own config says own_mod: owned")
+            expect(gradle_props(r).get("mod_version") == "2.0.5", "gradle.properties read from the mod's folder")
+            expect(mods_toml(r)["mods"][0]["version"] == "2.0.5", "mods.toml read (and expanded) from the mod's folder")
+            expect(mod_keys() == {"tag_name": "alpha", "mod_dir": "mods/alpha"}, f"setup writes the mod's keys: {mod_keys()}")
+            expect(mod_ledger(r, "examplemod") == ".port/examplemod/KNOWN-ISSUES.json", "the mod's own known-issues ledger")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = publish(r, "beta-1.0.0-mc1.21.4", dry=True)
+            expect(rc == 1 and "not a release of alpha" in buf.getvalue(), f"another mod's tag refused: {buf.getvalue()!r}")
+            (r / ".github/port-publish-alpha.json").unlink()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = publish(r, "alpha-2.0.5-mc1.21.4", dry=True)
+            expect(rc == 0 and "port-publish-alpha.json" in buf.getvalue(), "no per-mod config: not set up, a notice")
+            for bad in ("../x", "-x", ""):
+                try:
+                    use_mod(bad)
+                    expect(False, f"--mod {bad!r} accepted")
+                except SystemExit:
+                    pass
+        finally:
+            g_ = globals()
+            g_["CONFIG"], g_["BODY"], g_["WORKFLOW"], g_["MOD"], g_["MOD_PREFIX"], g_["LEDGER"] = saved
+    return ok
 
 
 def main():
@@ -1276,8 +1400,14 @@ def main():
                    "(gates publishing; never shown to players)")
     s.add_argument("--difference", action="append", default=[], help="a difference from the original a player "
                    "would notice, stated neutrally; repeat"); s.add_argument("--out", help="write here instead of into the clone")
+    s.add_argument("--mod", metavar="NAME", help="one mod of a repository that ships several: its own config "
+                   ".github/port-publish-<NAME>.json (NAME: its name in tags, port-ci.py --mod-dir/--tag-name)")
+    s.add_argument("--mod-dir", metavar="DIR", help="with --mod: the mod's folder (default: NAME)")
     c = sub.add_parser("modrinth-create"); c.add_argument("--repo", default=".")
+    c.add_argument("--mod", metavar="NAME", help="one mod of several: .github/port-publish-<NAME>.json")
     p = sub.add_parser("publish"); p.add_argument("--repo", default="."); p.add_argument("--tag", required=True)
+    p.add_argument("--mod", metavar="NAME", help="one mod of several: .github/port-publish-<NAME>.json; the tag must "
+                   "be <NAME>-<version>-mc<minecraft> (the per-mod workflow passes it)")
     p.add_argument("--dry-run", action="store_true"); p.add_argument("--manual", action="store_true",
                                                                      help="a person asked for this publish (ignores auto)")
     p.add_argument("--platform", choices=("mr", "cf", "both"), default="both",
@@ -1286,6 +1416,13 @@ def main():
     a = ap.parse_args()
     if a.self_check:
         return self_check()
+    if getattr(a, "mod_dir", None) and not getattr(a, "mod", None):
+        sys.exit("--mod-dir goes with --mod")
+    if getattr(a, "mod", None):
+        use_mod(a.mod, getattr(a, "mod_dir", None))
+        cfg_ = load_config(a.repo) if a.cmd != "setup" else None
+        if cfg_ and cfg_.get("mod_dir"):
+            use_mod(a.mod, cfg_["mod_dir"])
     if getattr(a, "repo", None):
         import importlib.util
         spec = importlib.util.spec_from_file_location("fork_kind_pp", pathlib.Path(__file__).resolve().parent / "fork-kind.py")

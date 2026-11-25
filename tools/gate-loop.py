@@ -53,6 +53,24 @@ srcsets = importlib.util.module_from_spec(_ss); _ss.loader.exec_module(srcsets)
 sys.path.insert(0, str(ROOT / "tools"))
 from gitbash import BASH   # noqa: E402  (Git Bash on Windows; plain bash elsewhere)
 
+_PG = None
+
+
+def gradlew(work):
+    """[BASH, the Gradle wrapper for the project at `work`]: its own gradlew, else the nearest one above it up to the git
+    root (a mod folder of a repository of several mods; tools/port_gates.py gradlew_of, the one lookup every gate
+    tool uses)."""
+    global _PG
+    if _PG is None:
+        spec = importlib.util.spec_from_file_location("port_gates", ROOT / "tools/port_gates.py")
+        _PG = importlib.util.module_from_spec(spec); sys.modules.setdefault("port_gates", _PG); spec.loader.exec_module(_PG)
+    return _PG.gradlew_cmd(work)
+
+
+def has_gradlew(work):
+    """Does the project at `work` have a Gradle wrapper, its own or an ancestor's (gradlew)?"""
+    return gradlew(work)[1] != "gradlew" or (pathlib.Path(work) / "gradlew").exists()
+
 PROMPT = """A Minecraft mod ported to {target} compiles, but its headless GameTest server (Gate B) fails:
 
 {failure}
@@ -419,7 +437,7 @@ def LOG_DIR(work):
 
 
 def run_gate(work, task, heap, log, phase=None, timeout=1500):
-    cmd = [BASH, "gradlew", task, "--console=plain", "--init-script",
+    cmd = [*gradlew(work), task, "--console=plain", "--init-script",
            str(ROOT / "tools/central-mirror.init.gradle"), f"-Dorg.gradle.jvmargs=-Xmx{heap}"]
     # an upstream port keeps its test harness OUTSIDE the author's tree and wires it in per run
     # (templates/upstream-harness/gates.init.gradle; tools/port-upstream.py sets this)
@@ -512,7 +530,7 @@ def listener_audit(work):
         except Exception as e:  # noqa: BLE001 -- the audit is a pre-check; the client run still decides
             return None, f"listener audit: skipped (no classpath: {str(e)[:120]})"
     # the audit reads the PREPARED tree; refresh it, or a worker's fix is judged against the stale copy
-    subprocess.run([BASH, "gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
+    subprocess.run([*gradlew(work), "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
                     str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=900)
     r = subprocess.run([sys.executable, str(tool), str(work), f"--mc={mc}"], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
@@ -581,16 +599,16 @@ def mixin_audit(work):
     if not list((work / "src/main/resources").glob("*mixins*.json")):
         return None
     args = [f"--mc={mc}"] if mc and (work / f"versions/{mc}.properties").exists() else []
-    if args and (work / "gradlew").exists():   # the audit reads the PREPARED tree: refresh it so a worker's fix is not judged on a stale copy
-        subprocess.run([BASH, "gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
+    if args and has_gradlew(work):   # the audit reads the PREPARED tree: refresh it so a worker's fix is not judged on a stale copy
+        subprocess.run([*gradlew(work), "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
                         str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=900)
     audit = lambda: subprocess.run([sys.executable, str(ROOT / "tools/audit-mixin-targets.py"), str(work), *args],
                                    capture_output=True, text=True, encoding="utf-8", errors="replace")
     r = audit()
-    if "no sources" in r.stderr and (work / "gradlew").exists():
+    if "no sources" in r.stderr and has_gradlew(work):
         # a fresh checkout (CI) has not staged Minecraft's sources yet; the audit's sys.exit(msg) is ALSO exit 1,
         # which read as findings with an empty list and failed a clean port's Gate B. Stage them once and retry.
-        subprocess.run([BASH, "gradlew", "-q", "createMinecraftArtifacts", "--console=plain", "--init-script",
+        subprocess.run([*gradlew(work), "-q", "createMinecraftArtifacts", "--console=plain", "--init-script",
                         str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=1800)
         r = audit()
     if r.returncode != 1 or "MISMATCH" not in r.stdout:   # only real mismatches are findings
@@ -977,6 +995,33 @@ def verdict_red(note, run, phase, text):
     return 1
 
 
+def multimod_gradlew_check():
+    """A mod folder with no gradlew of its own (a repository of several mods, one wrapper at the root, issue #274): every
+    gate's Gradle call runs the root's wrapper with the mod's folder as its working directory, so Gradle builds that
+    folder's project; a wrapper above the git root is never used; a folder with its own wrapper runs it as always."""
+    import tempfile
+    ok = True
+    with tempfile.TemporaryDirectory() as d:
+        top = pathlib.Path(d).resolve()
+        (top / "gradlew").write_text("#!/usr/bin/env bash\necho outside\n", encoding="utf-8")      # above the git root
+        r = top / "repo"
+        (r / "alpha").mkdir(parents=True); (r / ".git").mkdir()
+        stub = '#!/usr/bin/env bash\npwd > "$(dirname "$0")/ran-in.txt"\necho "$@" >> "$(dirname "$0")/ran-in.txt"\n'
+        (r / "gradlew").write_text(stub, encoding="utf-8")
+        cmd = gradlew(r / "alpha")
+        ok &= cmd[1] != "gradlew" and pathlib.Path(cmd[1]).resolve() == (r / "gradlew").resolve() and has_gradlew(r / "alpha")
+        subprocess.run([*cmd, "prepareSources"], cwd=str(r / "alpha"), capture_output=True, timeout=60)
+        ran = (r / "ran-in.txt").read_text(encoding="utf-8").splitlines() if (r / "ran-in.txt").is_file() else []
+        ok &= len(ran) == 2 and pathlib.Path(ran[0]).resolve() == (r / "alpha").resolve() and ran[1] == "prepareSources"
+        if not ok:
+            print(f"gate-loop self-check FAIL [multi-mod gradlew]: {cmd} ran in {ran}")
+        (r / "gradlew").unlink()
+        ok &= gradlew(r / "alpha") == [BASH, "gradlew"] and not has_gradlew(r / "alpha")     # never above the git root
+        (r / "alpha/gradlew").write_text(stub, encoding="utf-8")
+        ok &= gradlew(r / "alpha") == [BASH, "gradlew"] and has_gradlew(r / "alpha")         # its own: as always
+    return ok
+
+
 def self_check():
     crash = ("[x] FATAL\nCaused by: java.lang.RuntimeException: wrapper\n\tat net.neoforged.fml.X.y(X.java:1)\n"
              "Caused by: java.lang.IllegalArgumentException: class a.b.H has no @SubscribeEvent methods\n"
@@ -1186,6 +1231,7 @@ def self_check():
     ok &= "Killed process 9 (java)" in (oom_note({"cgroup": None, "dmesg": 1}, {"cgroup": None, "dmesg": 2,
                                                   "last": "[1.0] Memory cgroup out of memory: Killed process 9 (java)"}) or "")
     ok &= gatec_lock_check()
+    ok &= multimod_gradlew_check()
     print("self-check:", "OK" if ok else f"FAIL {k} {text!r}")
     return 0 if ok else 1
 

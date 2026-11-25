@@ -32,8 +32,53 @@ def sh(cmd, cwd=None, env=None, timeout=None, log=None):
     return r
 
 
+def git_root(d):
+    """The nearest directory at or above `d` holding `.git` (a directory, or a worktree's file), else None."""
+    d = pathlib.Path(d).resolve()
+    for p in (d, *d.parents):
+        if (p / ".git").exists():
+            return p
+    return None
+
+
+def gradlew_of(cwd):
+    """The Gradle wrapper a gate runs with `cwd` as the project directory: `gradlew` there (the relative name, as every
+    single-project checkout always ran it), else the nearest `gradlew` in an ancestor directory up to the git root (a
+    repository of several mods, each a folder with its own settings.gradle and one wrapper at the root: Gradle run from
+    the mod's folder builds that folder's project). None when there is none, the caller then runs `gradlew` and fails
+    as before."""
+    cwd = pathlib.Path(cwd).resolve()
+    if (cwd / "gradlew").is_file():
+        return "gradlew"
+    top = git_root(cwd)
+    if top is None:
+        return None
+    for p in cwd.parents:
+        if (p / "gradlew").is_file():
+            return (p / "gradlew").as_posix()
+        if p == top:
+            break
+    return None
+
+
+def gradlew_cmd(cwd):
+    """[BASH, <the wrapper gradlew_of finds for cwd>]: the start of every gate's Gradle call."""
+    return [BASH, gradlew_of(cwd) or "gradlew"]
+
+
+def port_root(repo):
+    """Where a fork's .port/ records are read for the project at `repo`: `repo` itself when it has .port/ or is the
+    repository root (every single-project checkout), else the git root when that holds .port/ (a mod folder of a
+    repository of several mods: one .port/<mc>/ for the version branch, at the root)."""
+    repo = pathlib.Path(repo)
+    if (repo / ".port").is_dir():
+        return repo
+    top = git_root(repo)
+    return top if top is not None and (top / ".port").is_dir() else repo
+
+
 def gradle(repo, args, log, extra_init=(), env=None, timeout=2400):
-    cmd = [BASH, "gradlew","--console=plain", "-I", str(ROOT / "tools/central-mirror.init.gradle")]
+    cmd = [*gradlew_cmd(repo), "--console=plain", "-I", str(ROOT / "tools/central-mirror.init.gradle")]
     for i in extra_init:
         cmd += ["-I", str(i)]
     cmd += gradle_target_args(env)      # PORT_GRADLE_ARGS: extra arguments every Gradle call of a gate run carries
@@ -90,7 +135,7 @@ def author_unlisted_mixins(repo, base):
     listed = set()
     for f in files:
         if f.endswith(".json") and "/resources/" in f:
-            t = sh(["git", "show", f"{base}:{f}"], cwd=repo).stdout
+            t = sh(["git", "show", f"{base}:./{f}"], cwd=repo).stdout
             try:
                 d = json.loads(t)
             except ValueError:
@@ -106,7 +151,7 @@ def author_unlisted_mixins(repo, base):
         if not pkg:
             continue
         name = cls[len(pkg) + 1:]
-        if (pkg, name) not in listed and "@Mixin" in sh(["git", "show", f"{base}:{f}"], cwd=repo).stdout:
+        if (pkg, name) not in listed and "@Mixin" in sh(["git", "show", f"{base}:./{f}"], cwd=repo).stdout:
             out.append(name)
     return sorted(out)
 
@@ -132,10 +177,11 @@ def port_file(repo, name, mc=None):
     mc = port_mc(repo, mc)
     if not mc:
         return None
-    f = repo / ".port" / str(mc) / name
+    root = port_root(repo)
+    f = root / ".port" / str(mc) / name
     if f.is_file():
         return f
-    d0 = repo / ".port"
+    d0 = root / ".port"
     lower = sorted((mc_tuple(d.name), d / name) for d in d0.glob("*")
                    if re.fullmatch(r"\d+(\.\d+)+", d.name) and mc_tuple(d.name) < mc_tuple(str(mc))
                    and (d / name).is_file()) if d0.is_dir() else []
