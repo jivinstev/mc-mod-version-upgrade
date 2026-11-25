@@ -12,6 +12,16 @@ Java toolchain from build.gradle, the author's branch from origin/HEAD (else `gi
 else `main` with a warning). --dep names a sibling port this one
 compiles against (published to mavenLocal by its own build first, as during the port).
 
+Several mods in one repository (opt-in; without it the workflow is byte-for-byte what it was):
+  --mod-dir DIR                one mod of a repository that ships several, each a folder with its own settings.gradle,
+                               build.gradle and gradle.properties: writes .github/workflows/port-ci-<NAME>.yml, which
+                               builds and gates DIR (the nearest gradlew above it when it has none), releases
+                               <NAME>-<mod_version>-mc<mc> from DIR/gradle.properties, promotes only <NAME>-* tags and
+                               publishes with port-publish.py --mod NAME. --modid defaults to DIR's mod_id. Run per mod.
+  --tag-name NAME              the mod's name in its tags and workflow file (default: DIR's folder name).
+  --also-path PATH (repeat)    a folder or file the mod builds from (a shared folder): a push to it runs this workflow.
+  `promote --mod NAME` dispatches port-ci-<NAME>.yml.
+
 Per-platform jars (both opt-in; without them the workflow is byte-for-byte what it was, tools/golden/port-ci-*.yml):
   --variant-jar GLOB (repeat)  a mod whose build ships several jars (e.g. '*_mr.jar', '*_cf.jar'): a `shipped jars`
                                job builds once and boots EACH in a real NeoForge server (tools/shipped-gate.py, the
@@ -67,13 +77,14 @@ def props(repo):
     return dict(re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(.*?)\s*$", p.read_text(encoding="utf-8"))) if p.exists() else {}
 
 
-def java_version(repo, mc):
-    # a fork's version branch (tools/fork-branches.py) sets its toolchain in .port/<mc>/branch.properties (branch.gradle)
+def java_version(repo, mc, project=None):
+    # a fork's version branch (tools/fork-branches.py) sets its toolchain in .port/<mc>/branch.properties (branch.gradle),
+    # at the repository root; else the Gradle project's (one mod's folder, --mod-dir) build.gradle
     bp = pathlib.Path(repo) / ".port" / mc / "branch.properties"
     jv = re.search(r"(?m)^java_version\s*=\s*(\d+)\s*$", bp.read_text(encoding="utf-8")) if bp.is_file() else None
     if jv:
         return jv.group(1)
-    g = (pathlib.Path(repo) / "build.gradle").read_text(encoding="utf-8", errors="replace")
+    g = (pathlib.Path(project or repo) / "build.gradle").read_text(encoding="utf-8", errors="replace")
     m = re.search(r"JavaLanguageVersion\.of\(\s*(\d+)\s*\)", g)
     return m.group(1) if m else ("21" if mc.startswith("1.21") else "25")
 
@@ -194,6 +205,8 @@ def ignores_records(wf, need=None):
     other paths, a version branch's records)? A workflow port-ci.py rendered before that line existed runs the full Port
     CI for every ledger or Ports-block commit."""
     push = wf.split("\n  push:\n", 1)[1].split("\n  pull_request:", 1)[0] if "\n  push:\n" in wf else ""
+    if re.search(r"(?m)^\s*paths: \[", push) and not re.search(r"(?m)^\s*paths-ignore:", push):
+        return True     # one mod of several (--mod-dir): its push runs only for its own paths, never the root records
     m = re.search(r"(?m)^\s*paths-ignore: (\[.*\])\s*$", push)
     try:
         ign = json.loads(m.group(1)) if m else []
@@ -579,6 +592,72 @@ def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_o
     return v
 
 
+# A repository that ships SEVERAL mods (each a folder with its own settings.gradle, build.gradle and gradle.properties,
+# one gradlew at the root, a shared folder they build from) gets one workflow per mod: --mod-dir DIR [--tag-name NAME]
+# [--also-path PATH ...]. Without --mod-dir every placeholder below is what the single-mod workflow always had, byte for
+# byte (tools/golden/port-ci-*.yml). The push trigger's paths-ignore (the template's, which tools/known-issues.py
+# checks) becomes the mod's `paths` after rendering (mod_push): GitHub takes one of the two per event, never both.
+PUSH_IGNORE = re.compile(r"(?m)^    # the known-issues ledger \(tools/known-issues\.py\).*\n    # those runs nothing.*\n"
+                         r"    paths-ignore: \[.*\]$")
+MOD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+REL_PATH = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
+
+
+def mod_workflow(name=None):
+    """The workflow file port-ci.py writes: .github/workflows/port-ci.yml, or port-ci-<NAME>.yml for one mod of
+    several (--mod-dir)."""
+    return WORKFLOW if not name else f".github/workflows/port-ci-{name}.yml"
+
+
+def rel_path(repo, path, what):
+    """`path` as a clean path relative to the repository root (a folder or file that exists in it), or SystemExit."""
+    p = str(path).replace("\\", "/").strip("/")
+    if p.startswith("./"):
+        p = p[2:]
+    if not REL_PATH.fullmatch(p) or any(x in (".", "..") for x in p.split("/")):
+        raise SystemExit(f"{what} must be a path inside the repository, relative to its root (e.g. examplemod), got {path!r}")
+    if not (pathlib.Path(repo) / p).exists():
+        raise SystemExit(f"{what} {p}: no such folder or file in {repo}")
+    return p
+
+
+def mod_values(values, mod_dir=None, name=None, also=()):
+    """`also`: the push path patterns of the folders and files the mod builds from (--also-path: `shared/**` for a
+    folder, the path itself for a file). The placeholders that make the workflow one mod's of several (--mod-dir): its name, push paths, tag series,
+    build folder, artifacts, promote check and publish config. With no mod_dir every one is the single-mod text."""
+    if not mod_dir:
+        return dict(values, MOD_TITLE="", TAG_GLOB="", MOD_DIR=".", LOGS="gate-logs-", JARS="jars", LIBS="build/libs",
+                    MOD_PROPS="gradle.properties", TAG_NAME=values["MODID"], PROMOTE_TAG_CHECK="", PUBLISH_IF="",
+                    PUBLISH_MOD="", MOD_PUSH="")
+    paths = [f"{mod_dir}/**", *also, mod_workflow(name)]
+    push = ("    # one mod of several: a push runs this mod's workflow only when it touches the mod's folder, a folder it\n"
+            "    # builds from or this workflow (GitHub evaluates path filters on branch pushes only, so a release tag still runs)\n"
+            "    paths: [" + ", ".join(json.dumps(x) for x in paths) + "]")
+    check = (f'          case "$TAG" in\n'
+             f'            "{name}-"[0-9]*) ;;\n'
+             f'            *) echo "::error::$TAG is not a release of {name} ({name}-<version>-mc<minecraft>): promote it with '
+             f'its own workflow, port-ci-<mod>.yml"; exit 1 ;;\n'
+             f'          esac\n')
+    # a mod's releases are `<name>-<digit>...`: never by prefix alone, so a mod `a` never takes mod `a-b`'s tags
+    mine = " || ".join(f"startsWith(github.event.release.tag_name, '{name}-{n}')" for n in range(10))
+    return dict(values, MOD_TITLE=f" {name}", TAG_GLOB=f"{name}-[0-9]", MOD_DIR=mod_dir, LOGS=f"gate-logs-{name}-",
+                JARS=f"jars-{name}", LIBS=f"{mod_dir}/build/libs", MOD_PROPS=f"{mod_dir}/gradle.properties",
+                TAG_NAME=name, PROMOTE_TAG_CHECK=check,
+                PUBLISH_IF=f" && (github.event_name != 'release' || {mine})",
+                PUBLISH_MOD=f' --mod "{name}"', MOD_PUSH=push)
+
+
+def mod_push(text, values):
+    """The rendered workflow with its push trigger's paths-ignore replaced by the mod's `paths` (mod_values MOD_PUSH);
+    unchanged for a single mod."""
+    if not values.get("MOD_PUSH"):
+        return text
+    out, n = PUSH_IGNORE.subn(lambda _m: values["MOD_PUSH"], text, count=1)
+    if n != 1:
+        raise SystemExit("port-ci: the template's push paths-ignore was not found: cannot make it one mod's")
+    return out
+
+
 def port_branch(repo, mc, explicit=None):
     """The branch the workflow's triggers name: --branch when given; on a version branch -- the checkout holds
     `.port/<mc>/` for its own Minecraft version -- `neoforge-<mc>`, whatever branch is checked out (a keep-current/*
@@ -598,7 +677,16 @@ def recover_args(text):
     branch (port_branch: HEAD, or neoforge-<mc> on a version branch), the authors' branch (origin/HEAD), the target (gradle.properties) and the Java toolchain."""
     out = []
     one = lambda rx: (re.search(rx, text) or [None, None])[1]
-    out += ["--modid", one(r'ci-gates\.py --repo \. --modid "([^"]+)"')]
+    out += ["--modid", one(r'ci-gates\.py --repo \S+ --modid "([^"]+)"')]
+    mod_dir = one(r'ci-gates\.py --repo (\S+) --modid ')
+    if mod_dir and mod_dir != ".":                 # one mod of several (--mod-dir): its name, and what it builds from
+        out += ["--mod-dir", mod_dir]
+        name = one(r'tags: \["([A-Za-z0-9][\w.-]*?)-(?:\[0-9\])?\*-mc')
+        if name and name != mod_dir.rsplit("/", 1)[-1]:
+            out += ["--tag-name", name]
+        paths = re.search(r"(?m)^    paths: (\[.*\])\s*$", text)
+        for x in (json.loads(paths.group(1)) if paths else [])[1:-1]:
+            out += ["--also-path", x[:-3] if x.endswith("/**") else x]
     up = one(r'echo "\*\*Unofficial port\*\* of (.*) to [^"]*\."')
     if up and up != "the original":
         out += ["--upstream", up]
@@ -628,7 +716,7 @@ def recover_args(text):
         if d not in seen:
             seen.append(d); out += ["--dep", d]
     out += ["--gatec", one(r'--gatec "([^"]*)"')]
-    mc_suffix = re.search(r'tags: \["\*-mc([\d.]+)([^"]*)"\]', text)
+    mc_suffix = re.search(r'tags: \["(?:[\w.-]+-(?:\[0-9\])?)?\*-mc([\d.]+)([^"]*)"\]', text)
     if mc_suffix and mc_suffix.group(2):
         out.append(f"--tag-suffix={mc_suffix.group(2)}")
     # a workflow generated with the removed --layer-branch also triggers on the layer branch: that is dropped here, so a
@@ -745,13 +833,13 @@ def gh_logged_in():
     return bool(shutil.which("gh")) and subprocess.run(["gh", "auth", "status"], capture_output=True).returncode == 0
 
 
-def fork_workflow(fork, ref, repo_dir=None, gh=None):
+def fork_workflow(fork, ref, repo_dir=None, gh=None, workflow=WORKFLOW):
     """The fork's port-ci.yml on `ref`, best effort: `gh api` when gh is logged in (a private fork reads too), else
     `git show` from a local clone of that fork (--repo, default the current directory) -> (text or None, how)."""
     gh = gh_logged_in() if gh is None else gh
     if gh:
         r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github.raw",
-                            f"repos/{fork}/contents/.github/workflows/port-ci.yml?ref={ref}"],
+                            f"repos/{fork}/contents/{workflow}?ref={ref}"],
                            capture_output=True, text=True, encoding="utf-8")
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout, "gh api"
@@ -760,7 +848,7 @@ def fork_workflow(fork, ref, repo_dir=None, gh=None):
                          encoding="utf-8").stdout.strip()
     if re.search(rf"[/:]{re.escape(fork)}(\.git)?/?$", url, re.I):
         for rev in (f"origin/{ref}", ref):
-            r = subprocess.run(["git", "-C", d, "show", f"{rev}:.github/workflows/port-ci.yml"], capture_output=True,
+            r = subprocess.run(["git", "-C", d, "show", f"{rev}:{workflow}"], capture_output=True,
                                text=True, encoding="utf-8")
             if r.returncode == 0:
                 return r.stdout, f"git show {rev}"
@@ -775,15 +863,21 @@ def promote(argv):
     ap.add_argument("--repo", help="a local clone of the fork, read when gh is not logged in (default: the current directory)")
     ap.add_argument("--with-dependency", action="append", default=[], metavar="OWNER/REPO",
                     help="a pinned dependency still a pre-release that the person promotes together with this one")
+    ap.add_argument("--mod", metavar="NAME", help="one mod of a repository that ships several: dispatch its own "
+                    "workflow, port-ci-<NAME>.yml (port-ci.py --mod-dir); the tag must be <NAME>-...")
     a = ap.parse_args(argv)
+    wfile = mod_workflow(a.mod)
+    if a.mod and (not MOD_NAME.fullmatch(a.mod) or not re.match(re.escape(a.mod) + r"-[0-9]", a.tag)):
+        sys.exit(f"--mod {a.mod}: {a.tag} is not one of its releases ({a.mod}-<version>-mc<minecraft>)")
+    wname = wfile.rsplit("/", 1)[-1]
     ref, inputs = promote_dispatch(a.fork, a.tag, a.played_by, a.notes, a.branch)
     import json
     # best effort, never a reason a fork without fork-port pins cannot promote: the workflow is read with gh or from a
     # local clone; when neither can, a note and the dispatch as before
     gh = gh_logged_in()
-    wf, how = fork_workflow(a.fork, ref, a.repo, gh)
+    wf, how = fork_workflow(a.fork, ref, a.repo, gh, wfile)
     if wf is None:
-        print(f"note: could not read {a.fork}'s port-ci.yml on {ref} ({how}): the pinned dependencies are not checked "
+        print(f"note: could not read {a.fork}'s {wname} on {ref} ({how}): the pinned dependencies are not checked "
               "here -- make sure none is still a pre-release (a dependent is never promoted ahead of its dependency)")
     else:
         def release_of(r_, t_):
@@ -811,13 +905,13 @@ def promote(argv):
         print(f"(could not read release {a.tag} from GitHub: {e}; the workflow checks it anyway)")
     if rel is not None and not rel.get("prerelease"):
         sys.exit(f"{a.tag} is already a full Release")
-    cmd = ["gh", "workflow", "run", "port-ci.yml", "--repo", a.fork, "--ref", ref]
+    cmd = ["gh", "workflow", "run", wname, "--repo", a.fork, "--ref", ref]
     for k, v in inputs.items():
         cmd += ["-f", f"{k}={v}"]
     import shlex
     logged_in = gh
     if a.print or not logged_in:
-        print("Dispatch the fork's Port CI workflow (port-ci.yml) on ref", ref, "with inputs", json.dumps(inputs))
+        print(f"Dispatch the fork's Port CI workflow ({wname}) on ref", ref, "with inputs", json.dumps(inputs))
         print("  " + shlex.join(cmd))
         if not logged_in and not a.print:
             print("(gh is not logged in here: run that, use Actions -> Port CI -> Run workflow, or let an agent "
@@ -825,7 +919,7 @@ def promote(argv):
         return 0
     r = subprocess.run(cmd)
     if r.returncode == 0:
-        print(f"dispatched: watch https://github.com/{a.fork}/actions/workflows/port-ci.yml")
+        print(f"dispatched: watch https://github.com/{a.fork}/actions/workflows/{wname}")
     return r.returncode
 
 
@@ -833,7 +927,7 @@ GOLDEN_CASES = (("single-nodeps", False), ("single-deps", True))
 FIX_DEP = "o/lib@lib-1.0-mc1.21.1/lib-1.0_mr.jar=com.example.lib:lib:1.0"
 
 
-def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False, owned=False):
+def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False, owned=False, mod=None):
     """The workflow for fixed, invented values (no network: every sha256 is fake). The two option-free cases are
     recorded in tools/golden/port-ci-<case>.yml, captured from port-ci.py BEFORE --variant-jar/--dep-jar-variant
     existed: an option a fork does not use must not change one byte of its workflow."""
@@ -846,7 +940,8 @@ def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False, o
               "UPSTREAM": "https://github.com/a/examplemod"}
     values = variant_values(values, list(variant_jars), list(dep_variants), [FIX_DEP] if deps else [], sha)
     values = records_values(kind_values(values, owned), version_branch)
-    return render(TEMPLATE.read_text(encoding="utf-8"), values)
+    values = mod_values(values, *(mod or ()))       # mod: (mod_dir, name, also) for one mod of several
+    return mod_push(render(TEMPLATE.read_text(encoding="utf-8"), values), values)
 
 
 def _load_tool(name, file):
@@ -854,6 +949,130 @@ def _load_tool(name, file):
     spec = importlib.util.spec_from_file_location(name, ROOT / "tools" / file)
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
     return m
+
+
+def multimod_repo(d):
+    """A repository that ships two mods (issue #274): folders alpha/ and beta/, each with its own settings.gradle,
+    build.gradle and gradle.properties, a shared/ folder both apply, ONE gradlew at the root (a stub that records the
+    directory it ran in), on a version branch (.port/1.21.4/branch.properties at the root). Invented names only."""
+    r = pathlib.Path(d)
+    for name, modid in (("alpha", "examplemod"), ("beta", "examplelib")):
+        m = r / name
+        (m / "src/main/resources/META-INF").mkdir(parents=True)
+        (m / "settings.gradle").write_text(f"rootProject.name = '{name}'\n", encoding="utf-8")
+        (m / "build.gradle").write_text("apply from: '../shared/level.gradle'\n", encoding="utf-8")
+        (m / "gradle.properties").write_text(f"mod_id={modid}\nmod_version=2.0.{len(name)}\nminecraft_version=1.21.4\n"
+                                             "neo_version=21.4.100\n", encoding="utf-8")
+        (m / "src/main/resources/META-INF/neoforge.mods.toml").write_text(
+            f'license="MIT"\n[[mods]]\nmodId="{modid}"\nversion="1"\ndisplayName="Example {name}"\n', encoding="utf-8")
+    (r / "shared").mkdir()
+    (r / "shared/level.gradle").write_text("// shared\n", encoding="utf-8")
+    (r / ".port/1.21.4").mkdir(parents=True)
+    (r / ".port/1.21.4/branch.properties").write_text("parent=main\njava_version=21\n", encoding="utf-8")
+    (r / "gradlew").write_text('#!/usr/bin/env bash\npwd > "$(dirname "$0")/gradlew-ran-in.txt"\n', encoding="utf-8")
+    run = lambda *a: subprocess.run(["git", "-C", str(r), *a], capture_output=True, text=True, encoding="utf-8")
+    run("init", "-q", "-b", "neoforge-1.21.4"); run("config", "core.autocrlf", "false")
+    run("-c", "user.name=t", "-c", "user.email=t@example.invalid", "add", "-A")
+    run("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "fixture")
+    return r
+
+
+def multimod_check():
+    """--mod-dir / --tag-name / --also-path (issue #274 items 1-2): one workflow per mod of a repository that ships
+    several, each building, gating, releasing, promoting and publishing its own folder only; the single-mod workflow
+    unchanged (the goldens, checked elsewhere)."""
+    import tempfile
+    ok = True
+    single = fixture(False)
+    wf = fixture(False, mod=("alpha", "alpha", ["shared/**"]))
+    has = lambda case, s, text=wf: want(case, s in text, s, "(absent)")
+    ok &= has("mod: workflow name", "name: Port CI alpha (NeoForge")
+    ok &= has("mod: push paths", '    paths: ["alpha/**", "shared/**", ".github/workflows/port-ci-alpha.yml"]')
+    ok &= want("mod: no paths-ignore beside paths", "paths-ignore" not in wf, "none", "paths-ignore")
+    ok &= has("mod: gates run on its folder", 'ci-gates.py --repo alpha --modid "examplemod"')
+    ok &= has("mod: jar digests from its build/libs", "for j in alpha/build/libs/*.jar; do")
+    ok &= has("mod: jars uploaded from its build/libs", "            alpha/build/libs/*.jar\n            !alpha/build/libs/*-sources.jar")
+    ok &= want("mod: jars artifact per mod", wf.count("name: jars-alpha\n") == 2, 2, wf.count("name: jars-alpha\n"))
+    ok &= has("mod: gate logs per mod", "name: gate-logs-alpha-${{ matrix.env }}")
+    ok &= has("mod: gate logs downloaded per mod", "pattern: gate-logs-alpha-*")
+    ok &= has("mod: gate summary assets keep their names", 'gate-assets/gates-${n#gate-logs-alpha-}.md')
+    ok &= want("mod: no single-mod artifact name left", "gate-logs-$e" not in wf and "logs/gate-logs-*/" not in wf
+               and "name: jars\n" not in wf, "none", "a single-mod artifact name")
+    ok &= has("mod: release reads its gradle.properties", "sparse-checkout: alpha/gradle.properties")
+    ok &= has("mod: tag from its gradle.properties", "//p' alpha/gradle.properties | head -1)\n            TAG=\"alpha-${v}-mc1.21.1\"")
+    ok &= has("mod: publish only its own releases", "startsWith(github.event.release.tag_name, 'alpha-0') || "
+              "startsWith(github.event.release.tag_name, 'alpha-1')")
+    ok &= want("mod: no bare name- prefix test", "tag_name, 'alpha-')" not in wf, "none", "a bare prefix")
+    ok &= has("mod: its tags only, a version after the name", 'tags: ["alpha-[0-9]*-mc1.21.1"]')
+    ok &= has("mod: publish with its config", 'port-publish.py publish --repo . --tag "$TAG" --mod "alpha" ${MANUAL:+--manual}')
+    ok &= has("mod: publish setup with its config", 'port-publish.py modrinth-create --repo . --mod "alpha"')
+    # the differences from the single-mod workflow are only these (no line of the single-mod one moves otherwise)
+    import difflib
+    changed = [l for l in difflib.unified_diff(single.splitlines(), wf.splitlines(), lineterm="", n=0)
+               if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+    ok &= want("mod: lines changed from the single-mod workflow", len(changed) == 54, 54, len(changed))
+    # the promote job refuses another mod's tag, run as the job runs it
+    mark = "          set -euo pipefail\n          case \"$TAG\" in\n"
+    ok &= has("mod: promote checks the tag first", mark)
+    blk = wf.split(mark, 1)[-1].split("          esac\n", 1)[0] if mark in wf else "*) exit 9 ;;\n"
+    script = 'case "$TAG" in\n' + blk + "esac\n"
+    for tag, rc in (("alpha-2.0.5-mc1.21.1", 0), ("beta-2.0.4-mc1.21.1", 1), ("alphabet-1-mc1.21.1", 1),
+                    ("alpha-extra-1.0-mc1.21.1", 1)):
+        r = subprocess.run([_load_tool("gitbash", "gitbash.py").BASH, "-c", script], env=dict(os.environ, TAG=tag),
+                           capture_output=True, text=True, encoding="utf-8")
+        ok &= want(f"mod: promote {tag}", r.returncode == rc, rc, (r.returncode, r.stdout))
+    # mods `a` and `a-b` side by side: each workflow's tag trigger, promote check and publish test take only its own
+    wa, wab = fixture(False, mod=("a", "a", [])), fixture(False, mod=("a-b", "a-b", []))
+    ok &= want("mods a and a-b: tag triggers", 'tags: ["a-[0-9]*-mc1.21.1"]' in wa and 'tags: ["a-b-[0-9]*-mc1.21.1"]' in wab,
+               "a-[0-9]* / a-b-[0-9]*", "other")
+    for wf_, tag, rc in ((wa, "a-1.0-mc1.21.1", 0), (wa, "a-b-1.0-mc1.21.1", 1), (wab, "a-b-1.0-mc1.21.1", 0),
+                         (wab, "a-1.0-mc1.21.1", 1)):
+        blk_ = wf_.split(mark, 1)[-1].split("          esac\n", 1)[0] if mark in wf_ else "*) exit 9 ;;\n"
+        r = subprocess.run([_load_tool("gitbash", "gitbash.py").BASH, "-c", 'case "$TAG" in\n' + blk_ + "esac\n"],
+                           env=dict(os.environ, TAG=tag), capture_output=True, text=True, encoding="utf-8")
+        ok &= want(f"mods a and a-b: promote {tag}", r.returncode == rc, rc, (r.returncode, r.stdout))
+    ok &= want("mods a and a-b: publish tests", "tag_name, 'a-0')" in wa and "tag_name, 'a-b')" not in wa
+               and "tag_name, 'a-b-0')" in wab, "a-<digit> / a-b-<digit>", "other")
+    # read back: the arguments it was generated with (args / check)
+    rec = recover_args(wf)
+    ok &= want("mod: read back", rec[:2] == ["--modid", "examplemod"] and rec[2:6] == ["--mod-dir", "alpha", "--also-path", "shared"],
+               "--modid examplemod --mod-dir alpha --also-path shared", rec[:6])
+    named = fixture(False, mod=("mods/alpha", "examplealpha", []))
+    ok &= want("mod: --tag-name read back", recover_args(named)[2:6] == ["--mod-dir", "mods/alpha", "--tag-name", "examplealpha"],
+               "--mod-dir mods/alpha --tag-name examplealpha", recover_args(named)[2:6])
+    ok &= want("mod: no stale records warning", ignores_records(wf) and stale_workflow(wf, None) == [], [], stale_workflow(wf, None))
+    # the CLI on a real two-mod checkout: each mod's props, the root's version branch, a file of its own per mod
+    with tempfile.TemporaryDirectory() as d:
+        r = multimod_repo(d)
+        outs = {}
+        for name in ("alpha", "beta"):
+            p_ = subprocess.run([sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(r), "--mod-dir", name,
+                                 "--also-path", "shared", "--kit-version", "7", "--kit-sha", "b" * 64, "--no-commit"],
+                                capture_output=True, text=True, encoding="utf-8")
+            f = r / f".github/workflows/port-ci-{name}.yml"
+            ok &= want(f"mod cli: {name} wrote its workflow", p_.returncode == 0 and f.is_file(), 0, p_.stdout + p_.stderr)
+            outs[name] = f.read_text(encoding="utf-8") if f.is_file() else ""
+        a_, b_ = outs["alpha"], outs["beta"]
+        ok &= want("mod cli: no port-ci.yml", not (r / WORKFLOW).exists(), "absent", "written")
+        ok &= has("mod cli: mod id from its gradle.properties", 'ci-gates.py --repo beta --modid "examplelib"', b_)
+        ok &= has("mod cli: version branch from the root's .port/<mc>/", 'branches: ["neoforge-1.21.4"]', a_)
+        ok &= has("mod cli: version branch records ignored on nothing", '"alpha/**", "shared/**"', a_)
+        ok &= has("mod cli: its tag", 'TAG="beta-${v}-mc1.21.4"', b_)
+        ok &= has("mod cli: target from its gradle.properties", "NeoForge 21.4.100 (Minecraft 1.21.4)", a_)
+        # the release step's version, as the job reads it
+        line = next((l for l in a_.splitlines() if "sed -n 's/^mod_version" in l), "")
+        v = subprocess.run([_load_tool("gitbash", "gitbash.py").BASH, "-c", line.strip() + '; echo "$v"'], cwd=str(r),
+                           capture_output=True, text=True, encoding="utf-8").stdout.strip()
+        ok &= want("mod cli: release version from its folder", v == "2.0.5", "2.0.5", v)
+        bad = subprocess.run([sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(r), "--mod-dir", "../x",
+                              "--kit-version", "7", "--kit-sha", "b" * 64, "--print"], capture_output=True, text=True, encoding="utf-8")
+        ok &= want("mod cli: a folder outside refused", bad.returncode != 0 and "--mod-dir" in bad.stderr, "refused", bad.stderr[-200:])
+        bad = subprocess.run([sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(r), "--modid", "m",
+                              "--also-path", "shared", "--kit-version", "7", "--kit-sha", "b" * 64, "--print"],
+                             capture_output=True, text=True, encoding="utf-8")
+        ok &= want("mod cli: --also-path needs --mod-dir", bad.returncode != 0, "refused", bad.returncode)
+    print(f"port-ci self-check: multi-mod --mod-dir: {'OK' if ok else 'FAIL'}")
+    return ok
 
 
 def regen_golden():
@@ -1154,11 +1373,11 @@ def variant_check():
     # without it, so regenerating it drops the layer jobs
     old = fixture(False).replace('branches: ["neoforge-1.21.1"]', 'branches: ["neoforge-1.21.1", "neoforge-1.21.x"]')
     ok &= old != fixture(False) and recover_args(old) == recover_args(fixture(False))
-    sfx = render(TEMPLATE.read_text(encoding="utf-8"), variant_values(dict(
+    sfx = render(TEMPLATE.read_text(encoding="utf-8"), mod_values(variant_values(dict(
         {k: "x" for k in re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", TEMPLATE.read_text(encoding="utf-8"))},
         MC="1.21.1", TAG_SUFFIX="-release", MODID="m", GATEC="launch", KIT_VERSION="3", KIT_SHA256="d" * 64,
         UPSTREAM="the original", PRE_BUILD="", BRANCH="neoforge-1.21.1", KIND_NOUN="unofficial port",
-        TITLE_KIND="unofficial x port", NOTES_INTRO='            echo "**Unofficial port** of the original to x."\n')))
+        TITLE_KIND="unofficial x port", NOTES_INTRO='            echo "**Unofficial port** of the original to x."\n'))))
     ok &= recover_args(sfx) == ["--modid", "m", "--gatec", "launch", "--tag-suffix=-release", "--kit-version", "3", "--kit-sha", "d" * 64]
     try:
         recover_args("name: something else\n"); ok = False
@@ -1754,7 +1973,7 @@ def self_check():
     v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", t))}
     v["PRE_BUILD"] = pre_build(["owner/lib@neoforge-1.21.1"])
     v["BRANCH"], v["BASE"] = "neoforge-1.21.1", "master"
-    v = records_values(variant_values(v))
+    v = mod_values(records_values(variant_values(v)))
     plain = render(t, v)
     out = plain
     ok = "${{ github.sha }}" in out and "{{" not in out.replace("${{", "")    # GitHub's own ${{ }} survive
@@ -1947,6 +2166,7 @@ def self_check():
     ok &= workflow_check_check()
     ok &= reuse_check()
     ok &= default_branch_check()
+    ok &= multimod_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -1978,7 +2198,18 @@ def main():
         print(shlex.join(["python3", "tools/port-ci.py", "--repo", a.repo, *recover_args(f.read_text(encoding="utf-8"))]))   # exec-ok: a command printed for a person's shell (setup's python3 shim)
         return 0
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--repo", required=True); ap.add_argument("--modid", required=True)
+    ap.add_argument("--repo", required=True)
+    ap.add_argument("--modid", help="the mod id (required, except with --mod-dir: then read from its gradle.properties' "
+                                    "mod_id when not given)")
+    ap.add_argument("--mod-dir", metavar="DIR", help="one mod of a repository that ships several: the folder (relative "
+                    "to the root) holding its settings.gradle, build.gradle and gradle.properties; writes "
+                    ".github/workflows/port-ci-<NAME>.yml, which builds, gates, releases <NAME>-<mod_version>-mc<mc>, "
+                    "promotes and publishes that mod only. Run once per mod")
+    ap.add_argument("--tag-name", metavar="NAME", help="with --mod-dir: the mod's name in its tags and workflow file "
+                    "(default: the folder's name)")
+    ap.add_argument("--also-path", action="append", default=[], metavar="PATH",
+                    help="with --mod-dir: a folder or file the mod builds from outside its folder (e.g. a shared folder); "
+                         "a push touching it runs this mod's workflow too. Repeat")
     ap.add_argument("--upstream", default="", help="the author's repository URL, for the release notes")
     ap.add_argument("--dep", action="append", default=[], help="owner/repo@branch built into mavenLocal first")
     ap.add_argument("--dep-jar", action="append", default=[], metavar="OWNER/REPO@TAG/ASSET.jar=G:A:V",
@@ -2004,10 +2235,29 @@ def main():
     if why:
         print(why)
         sys.exit(2)
-    p = props(repo)
+    mod_dir, name, also = None, None, []
+    if a.mod_dir:
+        mod_dir = rel_path(repo, a.mod_dir, "--mod-dir")
+        if not (repo / mod_dir / "gradle.properties").is_file():
+            sys.exit(f"--mod-dir {mod_dir}: no gradle.properties there")
+        name = a.tag_name or mod_dir.rsplit("/", 1)[-1]
+        if not MOD_NAME.fullmatch(name):
+            sys.exit(f"--tag-name must be a name for tags and a file ([A-Za-z0-9_.-], starting with a letter or digit), got {name!r}")
+        if a.variant_jar or a.dep_jar_variant:
+            sys.exit("--variant-jar and --dep-jar-variant are not supported with --mod-dir yet")
+        for x in a.also_path:
+            x = rel_path(repo, x, "--also-path")
+            also.append(f"{x}/**" if (repo / x).is_dir() else x)
+    elif a.tag_name or a.also_path:
+        sys.exit("--tag-name and --also-path go with --mod-dir (one mod of a repository that ships several)")
+    proj = repo / mod_dir if mod_dir else repo      # the Gradle project: gradle.properties, build.gradle
+    p = props(proj)
+    a.modid = a.modid or (p.get("mod_id") if mod_dir else None)
+    if not a.modid:
+        sys.exit("--modid is required" + (f" ({mod_dir}/gradle.properties names no mod_id)" if mod_dir else ""))
     mc, neo = p.get("minecraft_version"), p.get("neo_version")
     if not mc or not neo:
-        sys.exit("gradle.properties has no minecraft_version / neo_version")
+        sys.exit(f"{mod_dir + '/' if mod_dir else ''}gradle.properties has no minecraft_version / neo_version")
     branch = port_branch(repo, mc, a.branch)
     base = default_branch(repo)
     mrepo = migrator_repo()
@@ -2015,15 +2265,18 @@ def main():
     kver, ksha = kit_pin(mrepo, a.kit_version, a.kit_sha,
                          floor=max(pinned_kits(f.read_text(encoding="utf-8", errors="replace") for f in wfs), default=None))
     values = {"TARGET": f"NeoForge {neo} (Minecraft {mc})", "BRANCH": branch, "MC": mc, "MODID": a.modid,
-              "BASE": base, "JAVA": java_version(repo, mc), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
+              "BASE": base, "JAVA": java_version(repo, mc, proj), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
               "GATEC": a.gatec, "TAG_SUFFIX": a.tag_suffix, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}
     values = variant_values(values, a.variant_jar, a.dep_jar_variant, a.dep_jar)
-    values = records_values(kind_values(values, _load_tool("fork_kind", "fork-kind.py").is_owned(repo)),
-                            is_version_branch(repo, mc))
-    out = render(TEMPLATE.read_text(encoding="utf-8"), values)
+    fk = _load_tool("fork_kind", "fork-kind.py")
+    owned = fk.is_owned(repo, config=fk.publish_config(name)) if name else fk.is_owned(repo)
+    values = records_values(kind_values(values, owned), is_version_branch(repo, mc))
+    values = mod_values(values, mod_dir, name, also)
+    out = mod_push(render(TEMPLATE.read_text(encoding="utf-8"), values), values)
     if a.print:
         print(out); return 0
-    f = repo / WORKFLOW
+    wfile = mod_workflow(name)
+    f = repo / wfile
     hand = hand_gradle_args(f.read_text(encoding="utf-8", errors="replace"), repo, mc) if f.is_file() else None
     if hand:
         print(f"port-ci: WARNING: {hand}")
@@ -2031,8 +2284,8 @@ def main():
     f.write_text(out, encoding="utf-8")
     if a.no_commit:
         print(f"wrote {f}"); return 0
-    git(repo, "add", WORKFLOW)
-    msg = (f"CI: build, gate and release this port ({values['TARGET']})\n\n"
+    git(repo, "add", wfile)
+    msg = (f"CI: build, gate and release {'this port' if not name else name} ({values['TARGET']})\n\n"
            "Runs the author's own Gradle build, then the gates the port was held to -- mixin-config\n"
            "integrity, a headless server running GameTests, and a real client under Xvfb -- with no\n"
            "model and no automatic fixes. A tag <mod>-<version>-mc" + mc + " publishes the author-built\n"
@@ -2042,7 +2295,7 @@ def main():
     if a.trailer:
         msg += "\n" + "\n".join(a.trailer) + "\n"
     r = git(repo, "commit", "-q", "-m", msg)
-    print(r.stdout + r.stderr or f"committed {WORKFLOW} on {branch}")
+    print(r.stdout + r.stderr or f"committed {wfile} on {branch}")
     return r.returncode
 
 

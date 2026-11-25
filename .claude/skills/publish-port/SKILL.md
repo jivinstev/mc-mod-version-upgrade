@@ -93,6 +93,14 @@ own words -- their description and credits -- and the permission link are exempt
      dependency's fork. They gate publishing; they are never shown on the page;
    - `--difference`: each difference from the original a player would notice (see above). Usually none beyond the
      loader and version.
+   - a repository that ships several mods (one Port CI workflow per mod, `port-ci.py --mod-dir`): run setup once per
+     mod with `--mod <NAME> [--mod-dir <folder>]` (NAME: the mod's name in its tags; folder default NAME). It writes
+     `.github/port-publish-<NAME>.json` and `.github/port-publish/description-<NAME>.md` from that folder's
+     `gradle.properties` and mods.toml; the config records `modid`, `tag_name` (NAME) and `mod_dir`. `own_mod` or
+     `permission` is each config's own. The mod's workflow passes `--mod <NAME>` to `publish` and `modrinth-create`;
+     `publish --mod` refuses a tag that does not start with `<NAME>-`, and reads `.port/<modid>/KNOWN-ISSUES.json` when
+     the repository keeps one for the mod (else `.port/KNOWN-ISSUES.json`). A single-mod repository keeps the one
+     `.github/port-publish.json`.
    A dependency that is another fork port (`"port": "owner/fork"`) is linked to THAT fork's community project.
 2. Read both files. The page must say "unofficial", credit and link the original and its authors, keep the
    licence and copyright, and say how the port differs -- CurseForge's moderation asks for all of it.

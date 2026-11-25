@@ -225,6 +225,20 @@ new tag together (port-ci.py refuses a mismatch). To change one option of an ins
 `python3 tools/port-ci.py args --repo DIR` prints the command it was generated with (kit pin included); add the
 option, run it with `--print`, and diff against the installed file before committing.
 
+**Several mods in one repository.** A repository that ships separate mods (each a folder with its own
+`settings.gradle`, `build.gradle` and `gradle.properties`, often one `gradlew` at the root and a shared folder) gets
+one workflow per mod. Run once per mod:
+```bash
+python3 tools/port-ci.py --repo DIR --mod-dir <folder> [--tag-name <NAME>] [--also-path <shared folder> ...]
+```
+It writes `.github/workflows/port-ci-<NAME>.yml` (NAME: the folder's name unless `--tag-name`; `--modid` defaults to
+the folder's `mod_id`), which builds and gates that folder only (the root's `gradlew`, run from the folder, when it
+has none), releases `<NAME>-<mod_version>-mc<mc>` from the folder's `gradle.properties`, promotes only its own tags
+(`port-ci.py promote --mod <NAME>`) and publishes with `port-publish.py --mod <NAME>`. A push runs it only for the
+folder, each `--also-path` and the workflow file. On a version branch, `.port/<mc>/` stays at the repository root.
+`--variant-jar` and `--dep-jar-variant` are not supported with `--mod-dir` yet. `port-ci.py args --repo DIR --file
+.github/workflows/port-ci-<NAME>.yml` reads a mod's options back.
+
 ## 7. Offer it to the authors (nothing is sent)
 
 ```bash

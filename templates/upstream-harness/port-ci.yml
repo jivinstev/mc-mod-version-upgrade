@@ -41,12 +41,12 @@
 # "owner/repo#RUN_ID/ARTIFACT/asset.jar=group:artifact:version@sha256" (a jar in a workflow run's artifact) builds and
 # gates against a library's candidate jar in place of the pinned one with the same group:artifact:version, on every
 # gates leg and in the shipped-jar job. A run with dep_override never releases. Inputs reach scripts only through env.
-name: Port CI ({{TARGET}})
+name: Port CI{{MOD_TITLE}} ({{TARGET}})
 
 on:
   push:
     branches: ["{{BRANCH}}"]
-    tags: ["*-mc{{MC}}{{TAG_SUFFIX}}"]
+    tags: ["{{TAG_GLOB}}*-mc{{MC}}{{TAG_SUFFIX}}"]
     # the known-issues ledger (tools/known-issues.py) and the root README are records, not port code: a push of only
     # those runs nothing (GitHub evaluates path filters on branch pushes only, so a release tag still runs)
     paths-ignore: [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json", "README.md"{{RECORDS_IGNORE}}]
@@ -130,7 +130,7 @@ jobs:
         run: |
           git rev-parse "HEAD^{tree}" > "$RUNNER_TEMP/built-tree.txt"   # the tree this run built: a from_run release checks it
           git fetch --no-tags origin "{{BASE}}"
-          python3 .port-tools/tools/ci-gates.py --repo . --modid "{{MODID}}" --base "origin/{{BASE}}" \
+          python3 .port-tools/tools/ci-gates.py --repo {{MOD_DIR}} --modid "{{MODID}}" --base "origin/{{BASE}}" \
             --gatec "{{GATEC}}" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md" --port-ci
       - name: Gate summary
         if: always()
@@ -138,7 +138,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gate-logs-${{ matrix.env }}{{GATES_VARIANT_ARTIFACT}}
+          name: {{LOGS}}${{ matrix.env }}{{GATES_VARIANT_ARTIFACT}}
           path: |
             ${{ runner.temp }}/port-ci/*.log
             ${{ runner.temp }}/port-ci/*.jsonl
@@ -148,17 +148,17 @@ jobs:
       - name: Jar digests (a keep-current round's dependent gate reads them over the API)
         if: matrix.env == 'full'{{GATES_VARIANT_JARS_IF}}
         run: |
-          for j in build/libs/*.jar; do
+          for j in {{LIBS}}/*.jar; do
             case "$j" in *-sources.jar) continue ;; esac
             if [ -f "$j" ]; then echo "::notice title=jar sha256::$(basename "$j") $(sha256sum "$j" | cut -d' ' -f1)"; fi
           done
       - uses: actions/upload-artifact@v4
         if: matrix.env == 'full'{{GATES_VARIANT_JARS_IF}}
         with:
-          name: jars
+          name: {{JARS}}
           path: |
-            build/libs/*.jar
-            !build/libs/*-sources.jar{{SHIPPED_JOB}}
+            {{LIBS}}/*.jar
+            !{{LIBS}}/*-sources.jar{{SHIPPED_JOB}}
 
   release:
     # from_run: the gates (and shipped) jobs are skipped and their jars and gate logs come from that earlier run; a
@@ -177,7 +177,7 @@ jobs:
           exit 1
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: gradle.properties
+          sparse-checkout: {{MOD_PROPS}}
           sparse-checkout-cone-mode: false
       - name: Check the earlier run (from_run) built this tree
         if: ${{ inputs.from_run }}
@@ -232,13 +232,13 @@ jobs:
           echo "Releasing the jars and gate logs of run $FROM_RUN ($head, the same tree as $GITHUB_SHA)" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/download-artifact@v4
         with:
-          name: jars
+          name: {{JARS}}
           path: jars
           run-id: ${{ inputs.from_run || github.run_id }}
           github-token: ${{ inputs.from_run && github.token || '' }}
       - uses: actions/download-artifact@v4
         with:
-          pattern: gate-logs-*
+          pattern: {{LOGS}}*
           path: logs
           run-id: ${{ inputs.from_run || github.run_id }}
           github-token: ${{ inputs.from_run && github.token || '' }}
@@ -251,9 +251,9 @@ jobs:
           want=$(git rev-parse "$GITHUB_SHA^{tree}")
           ls jars/*.jar > /dev/null 2>&1 || { echo "::error::the earlier run left no jars: nothing released"; exit 1; }
           for e in full minimal; do
-            [ -f "logs/gate-logs-$e/gates.md" ] || { echo "::error::the earlier run has no gate summary for $e: nothing released"; exit 1; }
+            [ -f "logs/{{LOGS}}$e/gates.md" ] || { echo "::error::the earlier run has no gate summary for $e: nothing released"; exit 1; }
           done
-          for d in logs/gate-logs-*/; do
+          for d in logs/{{LOGS}}*/; do
             had=$(cat "${d}built-tree.txt" 2>/dev/null || true)
             if [ "$had" != "$want" ]; then
               echo "::error::${d%/} records tree '$had', not this commit's ($want): its gates built something else; nothing released"
@@ -266,7 +266,7 @@ jobs:
           import os, pathlib, re, sys
           sha, run = os.environ["GITHUB_SHA"], os.environ["FROM_RUN"]
           event = (pathlib.Path(os.environ["RUNNER_TEMP"]) / "from-run-event.txt").read_text(encoding="utf-8").strip()
-          for f in sorted(pathlib.Path("logs").glob("gate-logs-*/gates.md")):
+          for f in sorted(pathlib.Path("logs").glob("{{LOGS}}*/gates.md")):
               first, nl, rest = f.read_bytes().partition(b"\n")
               cr = b"\r" if first.endswith(b"\r") else b""
               line = first[:len(first) - len(cr)].decode("utf-8")
@@ -285,8 +285,8 @@ jobs:
           # the commit a tag of this repository points at (an annotated tag peeled), empty when there is no such tag
           tag_commit() { git ls-remote origin "refs/tags/$1" "refs/tags/$1^{}" | awk '{c=$1} END {print c}'; }
           if [ "${{ github.ref_type }}" = tag ]; then TAG="${{ github.ref_name }}"; else
-            v=$(sed -n 's/^mod_version[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
-            TAG="{{MODID}}-${v}-mc{{MC}}{{TAG_SUFFIX}}"
+            v=$(sed -n 's/^mod_version[[:space:]]*=[[:space:]]*//p' {{MOD_PROPS}} | head -1)
+            TAG="{{TAG_NAME}}-${v}-mc{{MC}}{{TAG_SUFFIX}}"
             # the port was fixed but the author's version did not move: release it as -r2, -r3, ... -- a name is taken
             # when its release OR its tag exists (a tag with no release: gh release create would reuse that tag)
             base="$TAG"; n=2
@@ -302,7 +302,7 @@ jobs:
           {
 {{NOTES_INTRO}}            echo
             for e in full minimal; do
-              cat "logs/gate-logs-$e/gates.md" 2>/dev/null || echo "(gate summary for the $e environment missing)"
+              cat "logs/{{LOGS}}$e/gates.md" 2>/dev/null || echo "(gate summary for the $e environment missing)"
               echo
             done
             echo
@@ -310,9 +310,9 @@ jobs:
           } > notes.md
           # each environment's gate summary, exactly as ci-gates.py wrote it, as an asset: gate-logs-X/gates.md -> gates-X.md
           mkdir -p gate-assets; gates=()
-          for d in logs/gate-logs-*/; do
+          for d in logs/{{LOGS}}*/; do
             [ -f "${d}gates.md" ] || continue
-            n=$(basename "$d"); cp "${d}gates.md" "gate-assets/gates-${n#gate-logs-}.md"; gates+=("gate-assets/gates-${n#gate-logs-}.md")
+            n=$(basename "$d"); cp "${d}gates.md" "gate-assets/gates-${n#{{LOGS}}}.md"; gates+=("gate-assets/gates-${n#{{LOGS}}}.md")
           done
           gh release create "$TAG" jars/*.jar ${gates[@]+"${gates[@]}"} --repo "${{ github.repository }}" --prerelease \
             --title "$TAG ({{TITLE_KIND}})" --notes-file notes.md --target "${{ github.sha }}"
@@ -337,7 +337,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$WHO" | grep -Eq '^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$'; then
+{{PROMOTE_TAG_CHECK}}          if ! printf '%s' "$WHO" | grep -Eq '^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$'; then
             echo "::error::played_by must be the GitHub login of the person who played this build"; exit 1
           fi
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
@@ -407,7 +407,7 @@ jobs:
     # Upload a promoted Release to Modrinth and CurseForge. needs: promote, so a Claude- or CLI-driven promote
     # publishes in the same run; also a release promoted in the GitHub UI, or publish = <tag> by hand.
     needs: promote
-    if: ${{ always() && (needs.promote.result == 'success' || github.event_name == 'release' || inputs.publish) }}
+    if: ${{ always() && (needs.promote.result == 'success' || github.event_name == 'release' || inputs.publish){{PUBLISH_IF}} }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write             # appends the Modrinth/CurseForge links to the release notes
@@ -433,7 +433,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._+-]+$'; then echo "::error::not a release tag: $TAG"; exit 1; fi
-          python3 .port-tools/tools/port-publish.py publish --repo . --tag "$TAG" ${MANUAL:+--manual}
+          python3 .port-tools/tools/port-publish.py publish --repo . --tag "$TAG"{{PUBLISH_MOD}} ${MANUAL:+--manual}
 
   publish-setup:
     if: ${{ inputs.publish_setup }}
@@ -451,4 +451,4 @@ jobs:
       - name: Create the Modrinth draft project
         env:
           MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
-        run: python3 .port-tools/tools/port-publish.py modrinth-create --repo .
+        run: python3 .port-tools/tools/port-publish.py modrinth-create --repo .{{PUBLISH_MOD}}

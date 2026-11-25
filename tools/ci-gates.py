@@ -153,13 +153,25 @@ def tested_tree(repo, mc):
     return f"{head} + uncommitted: {', '.join(dirty[:6])}{f' (+{len(dirty) - 6} more)' if len(dirty) > 6 else ''}"
 
 
+_PORT_ROOT = None
+
+
+def port_root(repo):
+    """Where the .port/ records of the project at `repo` are read: `repo` itself, or -- a mod folder of a repository of
+    several mods, run with --repo <folder> -- the git root holding .port/ (tools/port_gates.py port_root)."""
+    global _PORT_ROOT
+    if _PORT_ROOT is None:
+        _PORT_ROOT = _load("port_gates_root", "port_gates.py").port_root
+    return _PORT_ROOT(repo)
+
+
 def branch_version(repo):
     """The Minecraft version of a fork's VERSION BRANCH checked out at `repo` (tools/fork-branches.py: gradle.properties'
-    minecraft_version, with .port/<it>/branch.properties beside it), else None -- the port branch and every
-    single-version fork."""
+    minecraft_version, with .port/<it>/branch.properties beside it -- at the git root for a mod folder, port_root),
+    else None -- the port branch and every single-version fork."""
     gp = pathlib.Path(repo) / "gradle.properties"
     m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
-    return m.group(1) if m and (pathlib.Path(repo) / ".port" / m.group(1) / "branch.properties").is_file() else None
+    return m.group(1) if m and (port_root(repo) / ".port" / m.group(1) / "branch.properties").is_file() else None
 
 
 def shipped_jar_file(repo, bv=None):
@@ -169,7 +181,7 @@ def shipped_jar_file(repo, bv=None):
     gp = pathlib.Path(repo) / "gradle.properties"
     m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
     mc = bv or (m.group(1) if m else None)
-    return pathlib.Path(repo) / ".port" / mc / "shipped-jar.txt" if mc else None
+    return port_root(repo) / ".port" / mc / "shipped-jar.txt" if mc else None
 
 
 def read_kv(path):
@@ -206,9 +218,9 @@ def is_library(repo, bv):
     marked library=true in .port/<mc>/port.properties (#161 U5, B1: the keep-current round's pre-merge dependent gate,
     tools/round.py depgate, stands in -- a round refuses a marked library with no dependent in its set)."""
     if bv:
-        return read_kv(pathlib.Path(repo) / ".port" / bv / "branch.properties").get("library") == "true"
+        return read_kv(port_root(repo) / ".port" / bv / "branch.properties").get("library") == "true"
     mc = sv_mc(repo)
-    return bool(mc) and read_kv(pathlib.Path(repo) / ".port" / mc / SV_PROPS).get("library") == "true"
+    return bool(mc) and read_kv(port_root(repo) / ".port" / mc / SV_PROPS).get("library") == "true"
 
 
 def library_phases(phases, library):
@@ -232,7 +244,7 @@ def wiring_ref(repo, bv, base):
     local one), else the authors' ref (--base); None when neither resolves."""
     cands = []
     if bv:
-        parent = read_kv(pathlib.Path(repo) / ".port" / bv / "branch.properties").get("parent")
+        parent = read_kv(port_root(repo) / ".port" / bv / "branch.properties").get("parent")
         if parent:
             cands += [f"origin/{parent}", parent]
     if base:
@@ -557,6 +569,51 @@ def harness_base_of(bprops):
     return bprops.get("harness_base") or bprops.get("base_minecraft_version") or "1.21.1"
 
 
+def multimod_check():
+    """--repo <mod folder> of a repository that ships several mods (issue #274): the version branch, its library mark,
+    its gate arguments and shipped-jar names are read from the git root's .port/<mc>/; Gradle runs the root's gradlew in
+    the mod's folder; the author's unlisted mixins are read from the folder at the base ref. A single-mod checkout reads
+    its own root, as always."""
+    ok = True
+    pu = _load("port_gates_mm", "port_gates.py")
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d).resolve()
+        g = lambda *a: subprocess.run(["git", "-C", str(r), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                                      capture_output=True, text=True, encoding="utf-8")
+        g("init", "-q", "-b", "work"); g("config", "core.autocrlf", "false")   # never the parent branch: macOS git names it main
+        m = r / "alpha"
+        (m / "src/main/java/com/example/mod/mixin").mkdir(parents=True)
+        (m / "src/main/resources").mkdir(parents=True)
+        (m / "gradle.properties").write_text("mod_id=examplemod\nminecraft_version=1.21.4\n", encoding="utf-8")
+        (m / "src/main/resources/examplemod.mixins.json").write_text(
+            '{"package": "com.example.mod.mixin", "mixins": ["Listed"]}', encoding="utf-8")
+        for c in ("Listed", "Parked"):
+            (m / f"src/main/java/com/example/mod/mixin/{c}.java").write_text(f"@Mixin(X.class) class {c} {{}}\n", encoding="utf-8")
+        (r / ".port/1.21.4").mkdir(parents=True)
+        (r / ".port/1.21.4/branch.properties").write_text("parent=main\nlibrary=true\n", encoding="utf-8")
+        (r / ".port/1.21.4/gate-gradle-args.txt").write_text("-Pshard=ci\n", encoding="utf-8")
+        (r / "gradlew").write_text('#!/usr/bin/env bash\npwd > "$(dirname "$0")/ran-in.txt"\n', encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "fixture")
+        rp = lambda x: pathlib.Path(x).resolve() if x else x     # macOS: /var -> /private/var, compared resolved
+        checks = [("the git root", rp(port_root(m)) == r and rp(port_root(r)) == r, (port_root(m), port_root(r))),
+                  ("the version", branch_version(m) == "1.21.4" and is_library(m, "1.21.4"), branch_version(m)),
+                  ("the shipped-jar file", rp(shipped_jar_file(m, "1.21.4")) == r / ".port/1.21.4/shipped-jar.txt",
+                   shipped_jar_file(m, "1.21.4")),
+                  ("the gate arguments", pu.gate_gradle_args(m, "1.21.4") == ["-Pshard=ci"], pu.gate_gradle_args(m, "1.21.4")),
+                  ("no wiring ref", wiring_ref(m, "1.21.4", None) is None, wiring_ref(m, "1.21.4", None)),
+                  ("the unlisted mixins", pu.author_unlisted_mixins(m, "HEAD") == ["Parked"], pu.author_unlisted_mixins(m, "HEAD"))]
+        pu.gradle(m, ["build"], r / "g.log", timeout=60)
+        ran = (r / "ran-in.txt").read_text(encoding="utf-8").strip() if (r / "ran-in.txt").is_file() else ""
+        # Git Bash's pwd prints /c/Users/... for C:/Users/...: read back as a Windows path before comparing
+        win = lambda x: re.sub(r"^/([A-Za-z])/", lambda m_: m_.group(1) + ":/", x) if os.name == "nt" else x
+        checks.append(("gradle ran in the folder", bool(ran) and pathlib.Path(win(ran)).resolve() == m, ran))
+        for what, good, got in checks:
+            if not good:
+                ok = False
+                print(f"ci-gates self-check FAIL [multi-mod --repo <folder>]: {what}: {got!r}")
+    return ok
+
+
 def self_check():
     ok = green_detail("[x] All 4 required tests passed :)") == "4 required test(s) passed"
     # #262: the harness's base -- harness_base wins; else base_minecraft_version, as before; else 1.21.1
@@ -743,6 +800,7 @@ def self_check():
         (r / "src/main/java/com/example/mod/Other.java").unlink()
         tier.write_text("class InfTier implements Tier {\n  public int getUses() { return 512; }\n}\n", encoding="utf-8")
         ok &= zero_uses_row(r, d) is None
+    ok &= multimod_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -780,7 +838,7 @@ def main():
         return 2
     bv = branch_version(repo)        # a version branch (tools/fork-branches.py): a plain build at its own version
     if bv:
-        bprops = read_kv(repo / ".port" / bv / "branch.properties")
+        bprops = read_kv(port_root(repo) / ".port" / bv / "branch.properties")
         # the harness is written for the base version and renamed for this one (port_gates.py). `harness_base` names it
         # when the port branch builds a later line than any harness (#262: base_minecraft_version is then the port
         # branch's own version, which fork-branches.py reads); without it, base_minecraft_version, as before
@@ -996,10 +1054,10 @@ def main():
                     cmd += ["--mc", bv] + (["--neo", m.group(1)] if m else [])
                     # .port/<bv>/shipped-expect-<variant>.txt (cf for a *_cf*.jar beside it), else the unsuffixed one
                     sg = _load("shipped_gate", "shipped-gate.py")
-                    ef = sg.expect_file(repo, bv, sg.variant_of(pat) if first else "cf")
+                    ef = sg.expect_file(port_root(repo), bv, sg.variant_of(pat) if first else "cf")
                     if ef:
                         cmd += ["--expect-file", str(ef)]
-                    sib = _load("layer_deps", "layer-deps.py").sibling_jars(repo, bv)
+                    sib = _load("layer_deps", "layer-deps.py").sibling_jars(port_root(repo), bv)
                     if sib:
                         cmd += ["--deps", *sib]
                 else:
@@ -1009,7 +1067,7 @@ def main():
                         cmd += ["--neo", m.group(1)]
                     # .port/<mc>/shipped-expect-<variant>.txt, else .port/<mc>/shipped-expect.txt, as on a version branch
                     sg = _load("shipped_gate", "shipped-gate.py")
-                    ef = sg.expect_file(repo, None, sg.variant_of(pat))
+                    ef = sg.expect_file(port_root(repo), sv_mc(repo), sg.variant_of(pat))
                     if ef:
                         cmd += ["--expect-file", str(ef)]
                 r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)

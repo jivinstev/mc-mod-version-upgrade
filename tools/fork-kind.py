@@ -84,11 +84,18 @@ LEGACY_CHECKOUT = ("{tool}: {repo} is a version-branch fork checked out on a leg
 PUBLISH_CONFIG = ".github/port-publish.json"
 
 
-def is_owned(repo, ref="HEAD"):
-    """Is this repository the mod author's own -- its publishing config (PUBLISH_CONFIG) committed at ref says
-    `"own_mod": true` -- rather than a port of somebody else's mod? Read from git, never the working tree: an
-    uncommitted edit says nothing. No config, an unreadable one, or anything but the JSON value true: not owned."""
-    r = git(repo, "show", f"{ref}:{PUBLISH_CONFIG}")
+def publish_config(mod=None):
+    """The publishing config's path: PUBLISH_CONFIG, or .github/port-publish-<mod>.json for one mod of a repository
+    that ships several (port-ci.py --mod-dir, port-publish.py --mod): own_mod and permission are each mod's."""
+    return PUBLISH_CONFIG if not mod else f".github/port-publish-{mod}.json"
+
+
+def is_owned(repo, ref="HEAD", config=PUBLISH_CONFIG):
+    """Is this repository the mod author's own -- its publishing config (PUBLISH_CONFIG, or `config`: one mod's,
+    publish_config) committed at ref says `"own_mod": true` -- rather than a port of somebody else's mod? Read from git,
+    never the working tree: an uncommitted edit says nothing. No config, an unreadable one, or anything but the JSON
+    value true: not owned."""
+    r = git(repo, "show", f"{ref}:{config}")
     if r.returncode != 0:
         return False
     try:
@@ -266,6 +273,19 @@ def self_check():
         expect(detect(c2)[:2] == ("version-branches", ["1.21.4"]) and detect(c2)[2] == ["origin/neoforge-1.21.x"],
                f"origin's version branches count: {detect(c2)}")
     expect(mc_key("1.21.11") > mc_key("1.21.8") and mc_key("26.1.2") > mc_key("1.21.11"), "versions sort as numbers")
+    with tempfile.TemporaryDirectory() as d:     # one mod of several (issue #274): own_mod is each mod's config's
+        r = pathlib.Path(d)
+        g = lambda *a: subprocess.run(["git", "-C", str(r), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                                      capture_output=True, text=True, encoding="utf-8")
+        g("init", "-q")
+        (r / ".github").mkdir()
+        (r / ".github/port-publish-alpha.json").write_text('{"own_mod": true}\n', encoding="utf-8")
+        (r / ".github/port-publish-beta.json").write_text('{"permission": "https://example.invalid/ok"}\n', encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "configs")
+        expect(publish_config() == PUBLISH_CONFIG and publish_config("alpha") == ".github/port-publish-alpha.json",
+               "per-mod config path")
+        expect(not is_owned(r) and is_owned(r, config=publish_config("alpha"))
+               and not is_owned(r, config=publish_config("beta")), "own_mod read from each mod's own config")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
