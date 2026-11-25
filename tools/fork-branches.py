@@ -1742,6 +1742,15 @@ LEDGER_PATH = re.compile(r"^\.port/(?:[^/]+/)?KNOWN-ISSUES\.json$")
 HEAD_ONLY = (".github/workflows/weekly-plan.yml", ".github/workflows/weekly-plan-promote.yml", ".github/weekly-plan.json")
 
 
+def branch_owned(repo, *refs):
+    """The files a version branch owns (BRANCH_OWNED), and every Port CI workflow tools/fork-kind.py port_ci_workflows
+    lists at any of `refs` (the version's commit, the parent merged into it): for a repository of several mods each
+    mod's port-ci-<NAME>.yml, rendered per version by `ci` exactly as port-ci.yml is (issue #303) -- kept on a merge,
+    never a cascade decision, re-rendered by ci --run."""
+    fk = fork_kind()
+    return set(BRANCH_OWNED) | {path for r in refs if r for _n, path in fk.port_ci_workflows(repo, r)}
+
+
 def head_only(path):
     """A file of the head branch that no version branch carries: the known-issues ledger, the weekly plan's files."""
     return bool(LEDGER_PATH.match(path)) or path in HEAD_ONLY
@@ -2153,8 +2162,8 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
     every .java file the merge changed that both sides had from the rows alone (the parent's equal to its rows over
     the port branch it now carries, t's equal to t's rows over the port branch it carried) is re-made from the port
     branch's new file through t's rows; a file t dropped stays dropped; a conflicting derived file (gradle.properties,
-    mods.toml, a mixin config) is the parent's with t's build keys applied; t's own generated workflow is kept; the
-    append-only records (DECISIONS.md, AUTHORS-REVIEWS.md) are a union. The authors' change to a file the parent does
+    mods.toml, a mixin config) is the parent's with t's build keys applied; t's own generated workflows (port-ci.yml,
+    or each mod's port-ci-<NAME>.yml: branch_owned) are kept; the append-only records (DECISIONS.md, AUTHORS-REVIEWS.md) are a union. The authors' change to a file the parent does
     not carry is carried from port_taken (the port commit t fully took) up, so a change a run did not take is offered
     again; when the parent is already in t only that carry runs.
     resolve=None: any other conflict aborts the merge, and a carried file t changed by hand gets an open REMERGE.json
@@ -2365,7 +2374,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
         resolved.add(f)
         notes.append(f"{f}: " + ("the known-issues ledger" if LEDGER_PATH.match(f) else "the weekly plan's")
                      + f" stays on the head branch, not carried to {t}")
-    for f in BRANCH_OWNED:
+    for f in sorted(branch_owned(repo, pre, parent_ref)):
         if f in changed:
             if blob_at(repo, pre, f) is not None:
                 git(work, "checkout", pre, "--", f)
@@ -6005,6 +6014,66 @@ def _check_ci_several_mods(expect):
                f"ci-check: the head's every mod workflow: {hl}")
 
 
+def _mod_workflow(n, branch, note):
+    """A Port CI workflow of mod `n` of several (port-ci.py --mod-dir's shape, as tools/fork-kind.py port_ci_workflows
+    takes one), triggered on `branch`, marked `note`."""
+    return (f'name: Port CI {n}\non:\n  push:\n    branches: ["{branch}"]\njobs:\n  gates:\n    steps:\n'
+            '      - run: curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" https://example.invalid/port-ci-kit-v9/port-ci-kit-v9.tar.gz\n'
+            f'      - run: python3 .port-tools/tools/ci-gates.py --repo {n} --modid "example{n}" --gatec "launch"\n# {note}\n')
+
+
+def _check_cascade_mod_workflows(expect):
+    """The cascade on a version-branch fork of TWO MODS (issue #303): each version branch's own per-mod Port CI
+    workflow (port-ci-<NAME>.yml, rendered by `ci`) is the version's, exactly as port-ci.yml is -- kept through the
+    merge (an add/add with the head's, and a later change on the head), never a --plan decision; a version that has
+    rendered none yet takes none of the head's (ci --run renders it)."""
+    wfs = [f".github/workflows/port-ci-{n}.yml" for n in ("alpha", "zeta")]
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        mods = {f"{n}/gradle.properties": f"mod_id=example{n}\nminecraft_version=1.21.1\n" for n in ("alpha", "zeta")}
+        _authors(r, g, dict(mods, **{".github/workflows/port-ci-alpha.yml": _mod_workflow("alpha", "neoforge-1.21.1", "head v1"),
+                                     ".github/workflows/port-ci-zeta.yml": _mod_workflow("zeta", "neoforge-1.21.1", "head v1"),
+                                     "gradle.properties": ("mod_id=examplemod\n", "")}), "two mods, a workflow each")
+        expect(mod_dirs(r, "neoforge-1.21.1") == ["alpha", "zeta"]
+               and [p for _n, p in fork_kind().port_ci_workflows(r, "neoforge-1.21.1")] == wfs,
+               f"fixture: the head holds two mods, one Port CI workflow each: {mod_dirs(r, 'neoforge-1.21.1')}")
+        # the round's ci-check fixer rendered 1.21.3's and 1.21.4's own before the cascade (an add/add with the head's);
+        # 1.21.5 has rendered none yet
+        own = {}
+        for t in ("1.21.3", "1.21.4"):
+            w, _w = worktree_for(r, t)
+            own[t] = {p: _mod_workflow(n, branch_name(t), f"own {t}") for n, p in zip(("alpha", "zeta"), wfs)}
+            _hand(w, own[t], f"{t}: its own Port CI workflows (ci --run)")
+        wf_at = lambda t, p: blob_at(r, resolve_branch(r, branch_name(t)), p)
+        head_tip = resolve_branch(r, "neoforge-1.21.1")
+        refs = g("for-each-ref", "--format=%(refname) %(objectname)")
+        pdir = pathlib.Path(d) / "plan"
+        rc, out = _quiet(cascade, r, "port..1.21.5", mode="plan", out_dir=pdir)
+        plan = json.loads((pdir / "CASCADE-PLAN.json").read_text(encoding="utf-8")) if (pdir / "CASCADE-PLAN.json").is_file() else {}
+        raised = [x["file"] for x in plan.get("decisions", []) + plan.get("mechanical", []) if x.get("file", "").startswith(".github/")]
+        expect(rc == 0 and plan and not raised and g("for-each-ref", "--format=%(refname) %(objectname)") == refs,
+               f"cascade --plan: no per-mod workflow is a decision (the version's own, as port-ci.yml): {raised} {out[-600:]}")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none", mode="apply", out_dir=pdir)
+        got = {t: {p: (wf_at(t, p) or b"").decode("utf-8") for p in wfs} for t in ("1.21.3", "1.21.4", "1.21.5")}
+        expect(rc == 0 and got["1.21.3"] == own["1.21.3"] and got["1.21.4"] == own["1.21.4"]
+               and all(wf_at("1.21.5", p) is None for p in wfs)
+               and all(mod_dirs(r, resolve_branch(r, branch_name(t))) == ["alpha", "zeta"] for t in got)
+               and resolve_branch(r, "neoforge-1.21.1") == head_tip,
+               f"cascade --apply: each version keeps its own per-mod workflows (none of the head's): {got} {out[-600:]}")
+        # the head's workflows change (a new kit, a new pin): the versions keep theirs again, plan and apply
+        _authors(r, g, {p: _mod_workflow(n, "neoforge-1.21.1", "head v2") for n, p in zip(("alpha", "zeta"), wfs)},
+                 "the head's workflows re-rendered")
+        rc, out = _quiet(cascade, r, "port..1.21.5", mode="plan", out_dir=pdir)
+        plan = json.loads((pdir / "CASCADE-PLAN.json").read_text(encoding="utf-8")) if (pdir / "CASCADE-PLAN.json").is_file() else {}
+        raised = [x["file"] for x in plan.get("decisions", []) + plan.get("mechanical", []) if x.get("file", "").startswith(".github/")]
+        expect(rc == 0 and plan and not raised, f"--plan after the head's change: no workflow decision: {raised} {out[-600:]}")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none", mode="apply", out_dir=pdir)
+        got = {t: {p: (wf_at(t, p) or b"").decode("utf-8") for p in wfs} for t in ("1.21.3", "1.21.4")}
+        expect(rc == 0 and got["1.21.3"] == own["1.21.3"] and got["1.21.4"] == own["1.21.4"]
+               and all(wf_at("1.21.5", p) is None for p in wfs),
+               f"--apply after the head's change: each version's own kept: {got} {out[-600:]}")
+
+
 def _check_ci_check(expect):
     """ci-check warns about a version branch whose workflow pins an older kit or boots no `_cf` jar although the branch
     keeps .port/<v>/shipped-expect-cf.txt; ci_args adds that variant's --variant-jar."""
@@ -8307,6 +8376,7 @@ def self_check():
         _check_check_done_rows(expect)
         _check_ci_check(expect)
         _check_ci_several_mods(expect)
+        _check_cascade_mod_workflows(expect)
         _check_change_reviews(expect)
         _check_release_gate_record(expect)
         _check_ledgered_not_ok(expect)
