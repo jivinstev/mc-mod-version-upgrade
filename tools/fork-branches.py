@@ -5112,9 +5112,11 @@ def head_ci_lines(repo, have, newest):
     the kit-v23 one, re-pins having kept its kit, and ci-check read only the version branches). Nothing for a head
     without a workflow, or one current on both counts."""
     head, wfs = head_workflows(repo, have)
+    pc, ref = load("port_ci_fb", "port-ci.py"), fresh_branch(repo, head)
+    gate = fork_kind().workflow_text(repo, pc.RELEASE_GATE_FILE, ref) if ref else None   # the fork's release gate, "" none
     why = []
     for path, wf in wfs:            # one per mod of a repository of several mods, each named
-        w_ = load("port_ci_fb", "port-ci.py").stale_workflow(wf, newest)   # the single-version check (port-ci.py check)
+        w_ = pc.stale_workflow(wf, newest, gate)   # the single-version check (port-ci.py check)
         why += [f"{path}: {x}" for x in w_] if len(wfs) > 1 or not path.endswith("/port-ci.yml") else w_
     if not why:
         return []

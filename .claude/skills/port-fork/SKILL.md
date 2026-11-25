@@ -179,6 +179,15 @@ file of its own uses the nearest lower version's (never a higher one's); an empt
 summary; local gate runs (`fork-port.py`, the weekly round) do not read it, so they run the full tier. `port-ci.py`
 and `port-ci.py check` warn about a hand-added `PORT_GRADLE_ARGS` until the file holds it.
 
+**A release gate of the fork's own** (`> Make the fork's releases wait for its full test run`): never add a step to
+the release job by hand. Commit `.github/port-release-gate.json` --
+`{"schema": 1, "script": "<path>.py|.sh", "args": ["..."], "timeout_minutes": N}` (args of `[A-Za-z0-9_.:=/@+-]` only,
+1-360 minutes, default 60) -- then regenerate the workflow with `port-ci.py`, which refuses a bad file. Its
+`release-gate` job runs the script (the fork's own code, trusted like its Gradle build) as an argv on the release
+commit, with `GATE_SHA`, `GATE_REF`, `GITHUB_REPOSITORY` and `GH_TOKEN` and the permissions `contents: read`,
+`actions: write`; the release needs it to succeed, `from_run` releases included, so a failed, skipped or cancelled gate
+releases nothing. `port-ci.py check` warns when the installed workflow and the file disagree.
+
 **Promote it once they have played it** (`> Promote my fork's release`). Ask who played it and, optionally,
 one line on what they did; never promote on your own or from an unattended run -- promotion is the "a person
 played it" gate, and the fork's newest full Release is the baseline everything after it (syncing, publishing)
