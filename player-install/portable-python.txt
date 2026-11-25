@@ -1,0 +1,25 @@
+# The portable Python the one-line bootstraps (install.sh, install.ps1) download when the player has no usable Python
+# 3.9+, run the installer with, and remove afterwards (unless --keep-python). `tools/player-install.py --bundle` writes
+# the lines below into both bootstraps (and the release notes), so a published player-install-vN pins them; a
+# download whose sha256 differs is refused before anything is unpacked or run.
+#
+# One line per platform: <platform> <size in MB, for the one line said before downloading> <sha256> <url>
+#
+# macOS and Linux: astral-sh/python-build-standalone release 20261110, CPython 3.13.18, the `install_only_stripped`
+#   tarballs (the `install_only` layout, python/bin/python3, without debug symbols: 25-36 MB instead of 77). Each
+#   sha256 is the line for that file in the release's own checksum file,
+#   https://github.com/astral-sh/python-build-standalone/releases/download/20261110/SHA256SUMS
+# Windows: python.org's official embeddable zip, CPython 3.13.17 (3.13.18 is a source-only security release; 3.13.17
+#   is the newest 3.13 python.org built Windows binaries for). Each sha256 is python.org's own, the `sha256_sum` of
+#   that file on the release page, https://www.python.org/downloads/release/python-31317/ (the same data as
+#   https://www.python.org/api/v2/downloads/release_file/?release=1167).
+# Each file was also downloaded and hashed on 2026-11-25, matching both sources.
+#
+# To move to newer builds: change the lines (from the same two sources), run `python3 tools/player-install.py
+# --self-check`, and let the player-install workflow's portable-Python checks pass before publishing.
+linux-x86_64 36 f2d2199eb25880e07863b391cf7124e7ffa1338b0d65600dfcec117c4223a7fb https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.13.18%2B20261110-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+linux-aarch64 30 55c00325f7c1fddf325dfc621aabdfbbac4dc54adda224af88ec411dc12db239 https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.13.18%2B20261110-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz
+macos-x86_64 25 d27d59a722db9f69926eb6d9564071247221f45a04da920ea7f3001c97e32f9b https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.13.18%2B20261110-x86_64-apple-darwin-install_only_stripped.tar.gz
+macos-arm64 26 7a2384641584ab9984221fcb0fc9265df465922af71be71410529e2a9c3f0540 https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.13.18%2B20261110-aarch64-apple-darwin-install_only_stripped.tar.gz
+windows-amd64 11 9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38 https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip
+windows-arm64 11 7b58787a047b400edbfcb539aa3cdb4e2ed77bf0f22cae42b7c01cedd7dd6614 https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-arm64.zip
