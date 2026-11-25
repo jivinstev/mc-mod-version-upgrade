@@ -187,7 +187,8 @@ curl -fsSL https://github.com/jivinstev/mc-mod-version-upgrade/releases/download
 - **Acceptance**: the `player-install` workflow's `acceptance` input (a JSON list of argument strings) runs real
   installs from real releases on headless Linux and boots each to the title screen (`--boot-test`); an agent starts
   it with one dispatch call, and nothing reads a repository variable. A mod repository can run the published
-  one-liner on its own releases the same way (the skill's "Acceptance on every release").
+  one-liner on its own releases the same way; a fork on the Port CI kit does it by itself: its workflow's
+  `player-install` job installs and boots every release it promotes (the skill's "Acceptance on every release").
 
 ## Testing released ports on real installs
 

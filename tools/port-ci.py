@@ -326,7 +326,14 @@ def hand_gradle_args(wf, repo, mc):
             "reads it")
 
 
+# The player-install bootstrap the player-install job runs (a release of the migrator repository, never replaced): the
+# tag and its install.sh's sha256. Move both together, to a release whose acceptance passed (player-install.yml).
+PLAYER_INSTALL = {"PLAYER_INSTALL_TAG": "player-install-v3", "PLAYER_INSTALL_SHA256":
+                  "da9a778ba2b349f782a22ec2c9e4028d9f3d2e9b921a47e43b0c688d2b9185e0"}
+
+
 def render(text, values):
+    values = {**PLAYER_INSTALL, **values}
     out = re.sub(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), text)
     left = re.findall(r"(?<!\$)\{\{[A-Z0-9_]+\}\}", out)
     if left:
@@ -1010,7 +1017,10 @@ def multimod_check():
     import difflib
     changed = [l for l in difflib.unified_diff(single.splitlines(), wf.splitlines(), lineterm="", n=0)
                if l[:1] in "+-" and not l.startswith(("+++", "---"))]
-    ok &= want("mod: lines changed from the single-mod workflow", len(changed) == 54, 54, len(changed))
+    ok &= want("mod: lines changed from the single-mod workflow", len(changed) == 56, 56, len(changed))
+    ok &= has("mod: a player's install runs for its own releases only",
+              "(needs.promote.result == 'success' || github.event_name == 'release') && (github.event_name != 'release' "
+              "|| startsWith(github.event.release.tag_name, 'alpha-0')")
     # the promote job refuses another mod's tag, run as the job runs it
     mark = "          set -euo pipefail\n          case \"$TAG\" in\n"
     ok &= has("mod: promote checks the tag first", mark)
@@ -1648,7 +1658,10 @@ def _cut(text, start, end):
 
 
 def _without_reuse(wf):
-    """The workflow with every piece the reuse change added taken out and every line it changed put back."""
+    """The workflow with every piece the reuse change added taken out and every line it changed put back (and the
+    later player-install job, appended after it, taken off the end)."""
+    if "\n\n  player-install:\n" in wf:
+        wf = wf[:wf.index("\n\n  player-install:\n") + 1]
     w = _cut(wf, "#\n# Every pre-release carries", "name: Port CI (")
     w = _cut(w, "      from_run:\n", "\npermissions:")
     w = w.replace(" && !inputs.from_run }}", " }}").replace(DEP_OVERRIDE_STEP, "")
@@ -2023,6 +2036,17 @@ def self_check():
     ok &= "github.event_name != 'release'" in out.split("\n  gates:\n", 1)[1].split("steps:", 1)[0]
     ok &= "run: |" in pub and "${{" not in pub.rsplit("run: |", 1)[1] and "port-publish.py publish" in pub
     ok &= out.count("secrets.MODRINTH_TOKEN") == 2 and out.count("secrets.CURSEFORGE_TOKEN") == 1
+    # player-install: after a promote (or a release promoted in the UI), never on a private repository, read-only, its
+    # tag only through env, the bootstrap pinned by sha256 before it runs, and it installs exactly that tag
+    pi = out.split("\n  player-install:\n", 1)[-1]
+    ok &= "needs: promote" in pi and "!github.event.repository.private" in pi and "github.event_name == 'release'" in pi
+    ok &= "    permissions:\n      contents: read\n" in pi and "secrets.MODRINTH" not in pi and "contents: write" not in pi
+    ok &= "TAG: ${{ inputs.promote || github.event.release.tag_name }}" in pi and not any("${{" in b for b in run_blocks(pi))
+    ok &= pi.index("sha256sum -c -") < pi.index('bash "$RUNNER_TEMP/install.sh"')
+    ok &= '"$GITHUB_REPOSITORY" --release "$TAG"' in pi and "--boot-test" in pi and "--yes" in pi
+    real = render(t, {k: x for k, x in v.items() if k not in PLAYER_INSTALL})       # the pinned values, as generated
+    ok &= (f"/releases/download/{PLAYER_INSTALL['PLAYER_INSTALL_TAG']}/install.sh" in real
+           and re.fullmatch(r"[0-9a-f]{64}", PLAYER_INSTALL["PLAYER_INSTALL_SHA256"]) is not None)
     ok &= branch_for("mymod-1.0-fix-mc1.21.1-r4") == "neoforge-1.21.1"
     ok &= branch_for("x-1.0-mc26.2") == "neoforge-26.2"
     ok &= branch_for("x_y-2.0+b3-mc1.21.1-release-r2") == "neoforge-1.21.1-release"
@@ -2150,8 +2174,8 @@ def self_check():
         except SystemExit:
             pass
     # no layer text: the workflow triggers on the port branch alone and has no layer jobs (the layer route was removed)
-    ok &= "layer" not in plain.lower() and 'branches: ["neoforge-1.21.1"]' in plain
-    ok &= plain.endswith("modrinth-create --repo .\n") and "{{" not in plain.replace("${{", "")
+    ok &= not re.search(r"(?<!p)layer", plain.lower()) and 'branches: ["neoforge-1.21.1"]' in plain   # (not "player")
+    ok &= "modrinth-create --repo .\n\n  player-install:\n" in plain and "{{" not in plain.replace("${{", "")
     ok &= "PREVIEW" not in plain and "preview" not in plain.lower() and "github.ref_name !=" not in plain
     ok &= "layer-deps.py" not in fixture(True) and "layer-deps.py" not in fixture(False)
     # every needs.<job>.outputs.<name> a job reads is one <job> declares: GitHub reads an undeclared output as '', so a

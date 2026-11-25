@@ -452,3 +452,32 @@ jobs:
         env:
           MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
         run: python3 .port-tools/tools/port-publish.py modrinth-create --repo .{{PUBLISH_MOD}}
+
+  player-install:
+    # A player's install of the release just made full: the published player-install bootstrap ({{MIGRATOR_REPO}}'s
+    # {{PLAYER_INSTALL_TAG}}, the command a README gives players; pinned by sha256 like the kit) installs exactly that
+    # tag -- NeoForge, the jar and every release it pins -- into a fresh Minecraft folder on headless Linux and boots it
+    # to the title screen with the mods loaded. Red means players cannot install what was promoted; the promotion stands.
+    # A private repository is skipped: nobody can install its releases without a token.
+    needs: promote
+    if: ${{ always() && !github.event.repository.private && (needs.promote.result == 'success' || github.event_name == 'release'){{PUBLISH_IF}} }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: A virtual display and software OpenGL for the boot
+        run: sudo apt-get update -q && sudo apt-get install -y -q xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0
+      - name: Install the promoted release as a player does, then boot it
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.promote || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._+-]+$'; then echo "::error::not a release tag: $TAG"; exit 1; fi
+          curl -fsSL -o "$RUNNER_TEMP/install.sh" \
+            "https://github.com/{{MIGRATOR_REPO}}/releases/download/{{PLAYER_INSTALL_TAG}}/install.sh"
+          echo "{{PLAYER_INSTALL_SHA256}}  $RUNNER_TEMP/install.sh" | sha256sum -c -
+          xvfb-run -a -s "-screen 0 1280x720x24" bash "$RUNNER_TEMP/install.sh" "$GITHUB_REPOSITORY" --release "$TAG" \
+            --yes --minecraft-dir "$RUNNER_TEMP/minecraft" --boot-test
+          echo "A player's install of $TAG boots (player-install {{PLAYER_INSTALL_TAG}})" >> "$GITHUB_STEP_SUMMARY"
