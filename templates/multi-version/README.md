@@ -44,6 +44,10 @@ TSV, `from<TAB>to`, three kinds of row:
 | `member:foo	bar` | **only** after a dot | a method/field rename |
 | `re:<pattern>	<replacement>` | raw regex | a whole call SHAPE |
 
+A `member:` row is receiver-agnostic but **type-blind**: it fires on the name after any dot, whatever the receiver's
+type. Use it only when no type the mod calls the name on keeps the old member; a method removed from one type while
+another keeps it is a row per receiver name from a scan (CATALOG X180).
+
 Regex rules run **before** token rules, and token rules longest-key-first (§X4, §V11).
 Generate the type rows from the two real compile classpaths with
 `tools/build-class-move-map.py` (repo root) — not from memory.
