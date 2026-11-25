@@ -8,7 +8,7 @@ description: Give players one command that installs a mod from its GitHub releas
 `tools/player-install.py` installs a repository's released mod into the player's **own** Minecraft (unlike
 `real-install.py`, which builds separate test instances). Players never run it from a checkout: they paste the
 one-liner a README shows, which downloads this repository's `player-install-vN` release bundle, checks its sha256 and
-runs the installer.
+runs the installer. The player needs no Python: see "No Python needed" below.
 
 ## The one-liners (what a README shows)
 
@@ -46,6 +46,29 @@ Options: `--mc 1.21.8`, `--release TAG`, `--pre`, `--instance new|"Profile name"
 `--dry-run`, `--list` (released mods and versions), `--with python` (Python 3 on the PATH for a mod's optional
 feature, installed for this user only), `--boot-test` (boot the installed profile headless and check the mods load).
 
+## No Python needed
+
+The installer is Python 3.9+, and the bootstrap (`player-install/install.sh`, `install.ps1`) uses a Python that is
+already on the machine: `python3`/`python` on macOS and Linux, `py -3`/`python3`/`python` on Windows, each only if it
+really runs 3.9+. It never runs a Mac's `/usr/bin/python3` (or a `python3` that resolves to it) unless
+`xcode-select -p` succeeds and names a folder that exists: without the developer tools that `python3` is a stub that
+pops up Apple's install dialog. It skips Windows' Microsoft Store aliases (`...\Microsoft\WindowsApps\python*.exe`),
+which open the Store.
+
+When none is usable it prints one line -- `No Python 3.9+ here: downloading a portable Python (about N MB) just for
+this install; it is removed afterwards.` -- downloads the build pinned for the platform in
+`player-install/portable-python.txt` (python-build-standalone's CPython `install_only_stripped` tarballs for macOS
+x86_64/arm64 and Linux x86_64/aarch64; python.org's embeddable zip for Windows amd64/arm64) into a temporary folder,
+checks its sha256 with no Python (`sha256sum`/`shasum -a 256`, `Get-FileHash`) before unpacking (`tar`,
+`Expand-Archive`), runs the installer with it and deletes it afterwards. A mismatch stops with nothing run. On macOS
+and Linux, when `SSL_CERT_FILE` is unset it names the system's certificate bundle (`/etc/ssl/cert.pem`, ...) for the
+portable build; Windows' embeddable build uses the Windows certificate store.
+
+`--keep-python` (the bootstrap's own option, not passed to the installer) keeps the download in `~/.mmvu/python/`
+(`%LOCALAPPDATA%\mmvu\python\`), and later runs use it. Moving to newer builds is an edit of
+`portable-python.txt` (URL and sha256 from the publisher's own checksums, sources in its header), then a new
+`player-install-vN` release.
+
 ## What it reads (nothing new in the mod's repository)
 
 - **Releases** tagged `<series>-<version>-mc<minecraft>` (a re-release adds `-r<N>`), one series per mod; the
@@ -72,13 +95,16 @@ is running, because the Launcher rewrites its profiles file.
 ## Publishing a new version of the command
 
 The bundle is built by `python3 tools/player-install.py --bundle DIR --tag player-install-vN` (the installer and the
-tools it composes, deterministic; both bootstraps with that tag and the bundle's sha256 written in). Publish it by
-running the `player-install` workflow on `main` with `tag` = the next `player-install-vN`: it runs the checks and the
-real-release acceptance installs given in its `acceptance` input first, and refuses a tag that already exists. A
+tools it composes, deterministic; both bootstraps with that tag, the bundle's sha256 and the portable-Python pins
+written in). Publish it by running the `player-install` workflow on `main` with `tag` = the next `player-install-vN`:
+it runs the checks (Linux, macOS and Windows, each also with no Python on the PATH, so the pinned portable builds
+download, verify, run the self-check and a real HTTPS fetch) and the real-release acceptance installs given in its
+`acceptance` input (headless Linux) and `acceptance_portable` input (clean Windows and macOS runners with no Python,
+through the published-style bootstrap) first, and refuses a tag that already exists. A
 README keeps naming its tag until its owner moves it. Nothing in this repository reads a repository variable: a run's
 acceptance installs are its input (a JSON list of argument strings, `["OWNER/REPO --mc 1.21.8"]`), so an agent can
 run them with `gh api repos/OWNER/mc-mod-version-upgrade/actions/workflows/player-install.yml/dispatches -f ref=main
--f 'inputs[acceptance]=[...]'` and nobody sets anything by hand.
+-f 'inputs[acceptance]=[...]' -f 'inputs[acceptance_portable]=[...]'` and nobody sets anything by hand.
 
 ## Acceptance on every release
 

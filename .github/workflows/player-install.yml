@@ -1,9 +1,15 @@
 # The player install (tools/player-install.py, the player-install skill): one command a player pastes to install a
 # repository's mod, its dependencies and NeoForge into their own Minecraft.
 #
-#   check       every PR that touches it: the installer's self-check; the macOS/Linux bootstrap piped into bash as a
-#               player runs it (a good bundle runs the installer, a tampered one is refused); the Windows bootstrap the
-#               same way in PowerShell.
+#   check       every PR that touches it, on Linux and macOS: the installer's self-check (on the Mac with Apple's own
+#               Python 3.9; it includes install.sh's portable-Python path offline, and the macOS stub rule with a fake
+#               xcode-select); the bootstrap piped into bash as a player runs it (a good bundle runs the installer, a
+#               tampered one is refused); and the same with every Python hidden from the PATH, so the bootstrap
+#               downloads the pinned portable Python for real, checks it, runs the self-check with it plus a real
+#               HTTPS fetch (--https) and removes it; --keep-python keeps it; a tampered one is refused, nothing run.
+#   check-windows  the same for install.ps1: with a system Python, then with every Python hidden (a fake Microsoft
+#               Store alias left on the PATH, which must not run): python.org's embeddable Python downloaded, checked,
+#               the self-check (the installer's whole import closure) and a real HTTPS fetch run with it, and removed.
 #   acceptance  a manual run with the input `acceptance`: real installs from real releases on headless Linux into a fresh
 #               Minecraft folder, each then booted to the title screen with the mods loaded (--boot-test), and re-run
 #               to show a re-run changes nothing. The input is a JSON list of argument strings
@@ -11,9 +17,14 @@
 #               reads a repository variable, so nobody has to set one. Empty (and on PRs), the job is skipped. Each
 #               mod repository's own release workflow runs the published one-liner on itself instead (the
 #               player-install skill, "Acceptance on every release").
+#   acceptance-windows, acceptance-macos
+#               a manual run with the input `acceptance_portable` (the same JSON form): the published-style bootstrap,
+#               built by --bundle in this run, on a clean runner with no Python reachable (no setup-python; the PATH
+#               filtered of every Python), so it fetches the portable one, installs each case with --yes and boots it
+#               (--boot-test). Windows boots with Mesa's llvmpipe beside the game's java.exe (windows.yml's Gate C).
 #   release     a manual run on main with a tag (player-install-v<N>): the bundle, the two bootstraps with that tag and
 #               the bundle's sha256 written in, and SHA256SUMS, published as a GitHub release. A README's one-liner
-#               names that tag, so a published release is never replaced.
+#               names that tag, so a published release is never replaced. Every acceptance job that ran must pass.
 name: player-install
 
 on:
@@ -36,6 +47,10 @@ on:
         description: 'Real installs to run and boot: a JSON list of argument strings, e.g. ["OWNER/REPO --mc 1.21.8"]'
         required: false
         default: ""
+      acceptance_portable:
+        description: 'Real installs on clean Windows and macOS runners with no Python (a portable one is fetched): JSON list, e.g. ["OWNER/REPO"]'
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -46,19 +61,30 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    name: check (${{ matrix.os }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        if: runner.os == 'Linux'
         with:
           python-version: '3.12'
-      - name: The installer's self-check
-        run: python3 tools/player-install.py --self-check
+      - name: The installer's self-check (on macOS, Apple's Python 3.9)
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then export PATH="/usr/bin:$PATH"; fi
+          python3 --version
+          python3 tools/player-install.py --self-check
       - name: The macOS/Linux bootstrap, piped into bash as a player runs it
         run: |
           python3 tools/player-install.py --bundle "$RUNNER_TEMP/rel" --tag player-install-v0
           cat "$RUNNER_TEMP/rel/install.sh" | PLAYER_INSTALL_ZIP="$RUNNER_TEMP/rel/player-install.zip" \
-            MMVU_HOME="$RUNNER_TEMP/home" bash -s -- --self-check
+            MMVU_HOME="$RUNNER_TEMP/home" bash -s -- --self-check > "$RUNNER_TEMP/good.txt"
+          cat "$RUNNER_TEMP/good.txt"
+          if grep -q "portable Python" "$RUNNER_TEMP/good.txt"; then echo "a system Python was not used"; exit 1; fi
           cp "$RUNNER_TEMP/rel/player-install.zip" "$RUNNER_TEMP/bad.zip" && printf x >> "$RUNNER_TEMP/bad.zip"
           if cat "$RUNNER_TEMP/rel/install.sh" | PLAYER_INSTALL_ZIP="$RUNNER_TEMP/bad.zip" \
                MMVU_HOME="$RUNNER_TEMP/home2" bash -s -- --help 2> "$RUNNER_TEMP/bad.txt"; then
@@ -66,6 +92,39 @@ jobs:
           fi
           grep -q "nothing was installed" "$RUNNER_TEMP/bad.txt"
           test ! -e "$RUNNER_TEMP/home2/player-install/player-install-v0/tools"
+      - name: With no Python on the PATH, the bootstrap fetches the pinned portable Python (and HTTPS works with it)
+        run: |
+          R="$RUNNER_TEMP"
+          mkdir -p "$R/nopy" "$R/ptmp"
+          for f in /usr/bin/* /bin/* /usr/sbin/* /sbin/*; do
+            n=${f##*/}
+            case $n in python*|pydoc*|idle*|2to3*|pip*) continue ;; esac
+            [ -e "$R/nopy/$n" ] || ln -s "$f" "$R/nopy/$n"
+          done
+          if PATH="$R/nopy" /bin/sh -c 'command -v python3 || command -v python'; then echo "a Python is still reachable"; exit 1; fi
+          run() {    # MMVU_HOME, then the bootstrap's arguments; stdout+stderr to $R/out.txt
+            h=$1; shift
+            cat "$R/rel/install.sh" | env -u SSL_CERT_FILE PATH="$R/nopy" TMPDIR="$R/ptmp" MMVU_HOME="$R/$h" \
+              PLAYER_INSTALL_ZIP="$R/rel/player-install.zip" ${BAD:+PLAYER_INSTALL_PYTHON_FILE="$BAD"} \
+              /bin/bash -s -- "$@" > "$R/out.txt" 2>&1
+          }
+          echo "--- the default: downloaded, checked, run (the self-check and a real HTTPS fetch), removed"
+          rc=0; run p1 --self-check --https || rc=$?; cat "$R/out.txt"; test "$rc" = 0
+          grep -q "No Python 3.9+ here: downloading a portable Python (about [0-9]* MB) just for this install; it is removed afterwards." "$R/out.txt"
+          grep -q "^self-check: OK" "$R/out.txt"
+          grep -q "^https: OK" "$R/out.txt"
+          test -z "$(ls -A "$R/ptmp")" && test ! -e "$R/p1/python"
+          echo "--- --keep-python keeps it, and the next run uses it"
+          rc=0; run p2 --keep-python --help || rc=$?; tail -3 "$R/out.txt"; test "$rc" = 0
+          ls "$R"/p2/python/*/python/bin/python3
+          run p2 --help
+          if grep -q "downloading" "$R/out.txt"; then echo "the kept portable Python was not used"; exit 1; fi
+          echo "--- a tampered portable Python is refused, with nothing run"
+          printf 'not the pinned python\n' > "$R/bad.tgz"
+          if BAD="$R/bad.tgz" run p3 --help; then cat "$R/out.txt"; echo "a tampered portable Python was run"; exit 1; fi
+          cat "$R/out.txt"
+          grep -q "is not the pinned one" "$R/out.txt" && grep -q "nothing was run" "$R/out.txt"
+          test ! -e "$R/p3/player-install" && test -z "$(ls -A "$R/ptmp")"
 
   check-windows:
     runs-on: windows-latest
@@ -82,22 +141,77 @@ jobs:
           $env:LOCALAPPDATA = "$env:RUNNER_TEMP\home"
           & ([scriptblock]::Create((Get-Content -Raw "$env:RUNNER_TEMP\rel\install.ps1"))) --self-check
           if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: With no Python on the PATH (a Store alias left on it), the embeddable Python is fetched and removed
+        shell: pwsh
+        run: |
+          $R = $env:RUNNER_TEMP
+          $store = "$R\fake\Microsoft\WindowsApps"      # a Store alias: answers like a Python, and must never run
+          New-Item -ItemType Directory -Force -Path $store, "$R\ptmp" | Out-Null
+          Set-Content -Path "$store\python.cmd" -Value "@echo ran> `"$R\store-ran.txt`"`r`n@echo 1"
+          $keep = @($env:Path -split ';' | Where-Object { $_ -and -not ((Test-Path (Join-Path $_ 'python.exe')) -or
+                    (Test-Path (Join-Path $_ 'python3.exe')) -or (Test-Path (Join-Path $_ 'py.exe'))) })
+          $env:Path = (@($store) + $keep) -join ';'
+          if (Get-Command python.exe, python3.exe, py.exe -ErrorAction SilentlyContinue) { throw 'a Python is still reachable' }
+          $env:TEMP = "$R\ptmp"; $env:TMP = "$R\ptmp"
+          $env:PLAYER_INSTALL_ZIP = "$R\rel\player-install.zip"
+          $boot = [scriptblock]::Create((Get-Content -Raw "$R\rel\install.ps1"))
+          function Run($home_, $argv) {
+            $env:LOCALAPPDATA = "$R\$home_"
+            $out = & $boot @argv *>&1 | Out-String
+            $rc = $LASTEXITCODE
+            Write-Host $out
+            return @($rc, $out)
+          }
+          Write-Host '--- the default: downloaded, checked, run (the self-check and a real HTTPS fetch), removed'
+          $rc, $out = Run 'p1' @('--self-check', '--https')
+          if ($rc -ne 0) { throw "exit $rc" }
+          if ($out -notmatch 'No Python 3\.9\+ here: downloading a portable Python \(about \d+ MB\) just for this install; it is removed afterwards\.') { throw 'not announced' }
+          if ($out -notmatch '(?m)^self-check: OK' -or $out -notmatch '(?m)^https: OK') { throw 'self-check or HTTPS failed' }
+          if (Test-Path "$R\store-ran.txt") { throw 'the Store alias was run' }
+          if (@(Get-ChildItem "$R\ptmp").Count -ne 0) { throw 'the portable Python was not removed' }
+          Write-Host '--- --keep-python keeps it, and the next run uses it'
+          $rc, $out = Run 'p2' @('--keep-python', '--help')
+          if ($rc -ne 0 -or -not (Get-ChildItem "$R\p2\mmvu\python\*\python.exe")) { throw 'not kept' }
+          $rc, $out = Run 'p2' @('--help')
+          if ($rc -ne 0 -or $out -match 'downloading') { throw 'the kept Python was not used' }
+          Write-Host '--- a tampered portable Python is refused, with nothing run'
+          Set-Content -Path "$R\bad.zip" -Value 'not the pinned python'
+          $env:PLAYER_INSTALL_PYTHON_FILE = "$R\bad.zip"
+          $rc, $out = Run 'p3' @('--help')
+          $env:PLAYER_INSTALL_PYTHON_FILE = ''
+          if ($rc -eq 0 -or $out -notmatch 'is not the pinned one' -or $out -notmatch 'nothing was run') { throw 'a tampered portable Python was not refused' }
+          if ((Test-Path "$R\p3\mmvu\player-install") -or @(Get-ChildItem "$R\ptmp").Count -ne 0) { throw 'something was written' }
 
   acceptance-plan:
     runs-on: ubuntu-latest
     outputs:
       cases: ${{ steps.c.outputs.cases }}
+      portable: ${{ steps.c.outputs.portable }}
     steps:
+      - uses: actions/checkout@v4
       - id: c
         env:
           CASES: ${{ inputs.acceptance }}
+          PORTABLE: ${{ inputs.acceptance_portable }}
         run: |
-          if [ -z "$CASES" ]; then
-            echo "::notice::no acceptance input: no real-release acceptance install runs"
-            echo 'cases=[]' >> "$GITHUB_OUTPUT"
-          else
-            echo "cases=$(printf '%s' "$CASES" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)))')" >> "$GITHUB_OUTPUT"
-          fi
+          for v in CASES PORTABLE; do
+            eval "val=\${$v}"
+            out=$(printf '%s' "$v" | tr 'A-Z' 'a-z')
+            if [ -z "$val" ]; then
+              echo "::notice::no $out acceptance input: those acceptance installs do not run"
+              echo "$out=[]" >> "$GITHUB_OUTPUT"
+            else
+              echo "$out=$(printf '%s' "$val" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)))')" >> "$GITHUB_OUTPUT"
+            fi
+          done
+      # The portable acceptance runs the published-style bootstrap on runners with no Python at all, so the bundle is
+      # built here and handed over.
+      - name: The release bundle, as --bundle publishes it
+        run: python3 tools/player-install.py --bundle "$RUNNER_TEMP/rel" --tag player-install-v0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: player-install-bundle
+          path: ${{ runner.temp }}/rel
 
   acceptance:
     needs: acceptance-plan
@@ -144,15 +258,127 @@ jobs:
           after=$(cd "$inst" && find . -type f -not -path './logs/*' -not -path './crash-reports/*' -printf '%p %T@\n' | sort)
           test "$before" = "$after"
 
+  acceptance-windows:
+    needs: acceptance-plan
+    if: ${{ needs.acceptance-plan.outputs.portable != '[]' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        args: ${{ fromJSON(needs.acceptance-plan.outputs.portable) }}
+    name: acceptance-windows (no Python) -- ${{ matrix.args }}
+    env:
+      MESA_VERSION: 26.2.4          # windows.yml's Gate C pin
+      MESA_SHA256: 351fc8c8b695878ffb3eaa044b3ead08672a48b1a045e3c3e3975811df0f6695
+    steps:
+      # no checkout and no setup-python: the bundle is all a player downloads
+      - uses: actions/download-artifact@v4
+        with:
+          name: player-install-bundle
+          path: ${{ runner.temp }}/rel
+      - name: Mesa llvmpipe (pinned, checksum verified), for the boot on a runner with no GPU
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -UseBasicParsing -OutFile "$env:RUNNER_TEMP\mesa.7z" `
+            -Uri "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA_VERSION/mesa3d-$env:MESA_VERSION-release-msvc.7z"
+          if ((Get-FileHash -Algorithm SHA256 "$env:RUNNER_TEMP\mesa.7z").Hash.ToLower() -ne $env:MESA_SHA256) { throw 'Mesa sha256' }
+          7z x -y -o"$env:RUNNER_TEMP\mesa" "$env:RUNNER_TEMP\mesa.7z" | Out-Null
+      - name: Install with the published-style bootstrap, no Python on the PATH, then boot to the title screen
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARGS: ${{ matrix.args }}
+        run: |
+          $R = $env:RUNNER_TEMP
+          # every Python off the PATH; the Store's aliases may stay (the bootstrap must skip them)
+          $env:Path = (@($env:Path -split ';' | Where-Object { $_ -and ($_ -match '\\Microsoft\\WindowsApps' -or -not (
+                        (Test-Path (Join-Path $_ 'python.exe')) -or (Test-Path (Join-Path $_ 'python3.exe')) -or
+                        (Test-Path (Join-Path $_ 'py.exe')))) })) -join ';'
+          foreach ($c in @(Get-Command python.exe, python3.exe, py.exe -ErrorAction SilentlyContinue)) {
+            if ($c.Path -notmatch '\\Microsoft\\WindowsApps\\') { throw "a Python is still reachable: $($c.Path)" }
+            Write-Host "on the PATH, a Store alias only: $($c.Path)"
+          }
+          $env:PLAYER_INSTALL_ZIP = "$R\rel\player-install.zip"
+          $boot = [scriptblock]::Create((Get-Content -Raw "$R\rel\install.ps1"))
+          $argv = @($env:ARGS -split '\s+' | Where-Object { $_ }) + @('--yes', '--minecraft-dir', "$R\minecraft")
+          Write-Host '--- install (the game, NeoForge, the mods)'
+          $out = & $boot @argv *>&1 | Out-String; $rc = $LASTEXITCODE; Write-Host $out
+          if ($rc -ne 0) { throw "install: exit $rc" }
+          if ($out -notmatch 'downloading a portable Python') { throw 'no portable Python was fetched' }
+          # The runner's desktop has only Windows' OpenGL 1.1; Minecraft needs 3.2: Mesa beside the game's java.exe
+          foreach ($j in @(Get-ChildItem -Recurse -Filter java.exe "$R\minecraft\runtime")) {
+            Copy-Item "$R\mesa\x64\*.dll" $j.DirectoryName; Write-Host "Mesa beside $($j.FullName)"
+          }
+          $env:GALLIUM_DRIVER = 'llvmpipe'
+          Write-Host '--- the same command again with --boot-test: a re-run, then the game booted'
+          $argv2 = $argv + @('--boot-test')
+          $out = & $boot @argv2 *>&1 | Out-String; $rc = $LASTEXITCODE; Write-Host $out
+          if ($rc -ne 0 -or $out -notmatch 'Boot test: PASS') { throw "boot test: exit $rc" }
+      - name: keep the game's logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-windows-logs-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/minecraft/instances/*/logs
+            ${{ runner.temp }}/minecraft/instances/*/crash-reports
+          if-no-files-found: ignore
+
+  acceptance-macos:
+    needs: acceptance-plan
+    if: ${{ needs.acceptance-plan.outputs.portable != '[]' }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        args: ${{ fromJSON(needs.acceptance-plan.outputs.portable) }}
+    name: acceptance-macos (no Python) -- ${{ matrix.args }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: player-install-bundle
+          path: ${{ runner.temp }}/rel
+      - name: Install with the published-style bootstrap, no python3 reachable, then boot to the title screen
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARGS: ${{ matrix.args }}
+        run: |
+          R="$RUNNER_TEMP"
+          mkdir -p "$R/nopy"
+          for f in /usr/bin/* /bin/* /usr/sbin/* /sbin/*; do
+            n=${f##*/}
+            case $n in python*|pydoc*|idle*|2to3*|pip*) continue ;; esac
+            [ -e "$R/nopy/$n" ] || ln -s "$f" "$R/nopy/$n"
+          done
+          if PATH="$R/nopy" /bin/sh -c 'command -v python3 || command -v python'; then echo "a Python is still reachable"; exit 1; fi
+          # shellcheck disable=SC2086
+          cat "$R/rel/install.sh" | env PATH="$R/nopy" PLAYER_INSTALL_ZIP="$R/rel/player-install.zip" \
+            /bin/bash -s -- $ARGS --yes --minecraft-dir "$R/minecraft" --boot-test 2>&1 | tee "$R/out.txt"
+          grep -q "downloading a portable Python" "$R/out.txt"
+          grep -q "Boot test: PASS" "$R/out.txt"
+      - name: keep the game's logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-macos-logs-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/minecraft/instances/*/logs
+            ${{ runner.temp }}/minecraft/instances/*/crash-reports
+          if-no-files-found: ignore
+
   release:
-    # acceptance is skipped (not failed) when no case is given, and a skipped need skips a job by default: say
+    # an acceptance job is skipped (not failed) when no case is given, and a skipped need skips a job by default: say
     # which results count instead
-    needs: [check, check-windows, acceptance-plan, acceptance]
+    needs: [check, check-windows, acceptance-plan, acceptance, acceptance-windows, acceptance-macos]
     if: >-
       ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.tag != '' && github.ref == 'refs/heads/main'
       && needs.check.result == 'success' && needs.check-windows.result == 'success'
       && needs.acceptance-plan.result == 'success'
-      && (needs.acceptance.result == 'success' || needs.acceptance.result == 'skipped') }}
+      && (needs.acceptance.result == 'success' || needs.acceptance.result == 'skipped')
+      && (needs.acceptance-windows.result == 'success' || needs.acceptance-windows.result == 'skipped')
+      && (needs.acceptance-macos.result == 'success' || needs.acceptance-macos.result == 'skipped') }}
 
     runs-on: ubuntu-latest
     permissions:

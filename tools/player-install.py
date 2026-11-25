@@ -6,7 +6,10 @@
                                     [--with python] [--list] [--boot-test]
 
 A player normally runs it through the one-line bootstrap a repository's README shows (player-install/install.sh,
-install.ps1; published with each player-install-vN release of this repository), which needs no checkout:
+install.ps1; published with each player-install-vN release of this repository), which needs no checkout and no
+Python: with no usable Python 3.9+ on the machine it downloads a portable one, pinned by URL and sha256
+(player-install/portable-python.txt), runs this installer with it and removes it afterwards (kept with --keep-python,
+an option of the bootstrap's own):
 
     curl -fsSL https://github.com/jivinstev/mc-mod-version-upgrade/releases/download/player-install-vN/install.sh | bash -s -- OWNER/REPO
     & ([scriptblock]::Create((irm https://github.com/jivinstev/mc-mod-version-upgrade/releases/download/player-install-vN/install.ps1))) OWNER/REPO
@@ -48,6 +51,8 @@ import argparse, hashlib, importlib.util, json, os, pathlib, re, shutil, subproc
     urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
+if str(HERE) not in sys.path:      # Windows' embeddable Python (its ._pth file) leaves the script's folder off sys.path
+    sys.path.insert(0, str(HERE))
 
 
 def _load(name, file):
@@ -589,15 +594,39 @@ def boot_test(src, plat, mcdir, vid, comp, target, modids, log=print):
 BUNDLE = ("tools/player-install.py", "tools/real-install.py", "tools/install-port.py", "tools/find-minecraft.py",
           "tools/port-manifest.py", "tools/fork-kind.py")
 BOOTSTRAPS = ("player-install/install.sh", "player-install/install.ps1", "player-install/RELEASE-NOTES.md")
+PINS_FILE = "player-install/portable-python.txt"
+PIN_PLATFORMS = ("linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64", "windows-amd64", "windows-arm64")
 
 
-def bundle(out, tag, root=HERE.parent):
+def python_pins(text):
+    """player-install/portable-python.txt -> [(platform, MB, sha256, url)]: the portable Python each bootstrap
+    downloads when the player has no usable Python 3.9+. Refuses a malformed line or a missing platform."""
+    pins = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        f = line.split()
+        if (len(f) != 4 or f[0] not in PIN_PLATFORMS or not f[1].isdigit() or not re.fullmatch(r"[0-9a-f]{64}", f[2])
+                or not f[3].startswith("https://") or any(c in f[3] for c in "'\"$`")):
+            raise Refuse(f"{PINS_FILE} line {n}: want <platform> <MB> <sha256> <https url>, got {line!r}")
+        pins.append((f[0], int(f[1]), f[2], f[3]))
+    have = [p[0] for p in pins]
+    if sorted(have) != sorted(PIN_PLATFORMS):
+        raise Refuse(f"{PINS_FILE}: want one line for each of {', '.join(PIN_PLATFORMS)}, got {', '.join(have)}")
+    return pins
+
+
+def bundle(out, tag, root=HERE.parent, pins=None):
     """The files a player-install-vN release publishes: player-install.zip (the installer and the tools it composes,
-    byte-identical for the same sources: sorted, fixed timestamps), install.sh and install.ps1 with the tag and the
-    zip's sha256 written in, and SHA256SUMS. -> {name: sha256}."""
+    byte-identical for the same sources: sorted, fixed timestamps), install.sh and install.ps1 with the tag, the
+    zip's sha256 and the portable-Python pins (player-install/portable-python.txt; `pins` replaces them, for the
+    self-check) written in, and SHA256SUMS. -> {name: sha256}."""
     import io, zipfile
     if not re.fullmatch(r"player-install-v\d+", tag):
         raise Refuse(f"--tag {tag!r}: a player-install release tag is player-install-v<N>")
+    if pins is None:
+        pins = python_pins((root / PINS_FILE).read_text(encoding="utf-8"))
+    pin_lines = "\n".join(f"{k} {mb} {s} {u}" for k, mb, s, u in pins)
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
     b = io.BytesIO()
     with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as z:
@@ -611,7 +640,8 @@ def bundle(out, tag, root=HERE.parent):
     (out / "player-install.zip").write_bytes(data)
     sums = {"player-install.zip": sha}
     for rel in BOOTSTRAPS:
-        text = (root / rel).read_text(encoding="utf-8").replace("@TAG@", tag).replace("@SHA@", sha)
+        text = ((root / rel).read_text(encoding="utf-8").replace("@TAG@", tag).replace("@SHA@", sha)
+                .replace("@PYTHON_PINS@", pin_lines))
         name = rel.rsplit("/", 1)[1]
         with open(out / name, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
@@ -697,7 +727,8 @@ def make_parser():
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if "--self-check" in argv:
-        return self_check()
+        rc = self_check()
+        return rc or (https_check() if "--https" in argv else 0)
     if "--bundle" in argv:
         bp = argparse.ArgumentParser(); bp.add_argument("--bundle", required=True); bp.add_argument("--tag", required=True)
         b = bp.parse_args(argv)
@@ -720,6 +751,130 @@ def main(argv=None):
 
 
 # ── self-check ────────────────────────────────────────────────────────────────────────────────────────────────────
+def bootstrap_check(chk):
+    """install.sh's portable-Python path, offline, with Python hidden from it: a fake portable build (a tarball whose
+    python/bin/python3 records its arguments, then runs this Python) pinned in place of the real ones. The download is
+    announced, checked and removed afterwards; --keep-python keeps it (and is not passed on) and a later run uses it; a
+    tampered one is refused with nothing run; on a Mac without the developer tools /usr/bin/python3 (or a link to it)
+    is never run."""
+    import io, tarfile
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d).resolve()
+        mark, stubmark = d / "portable-ran.txt", d / "stub-ran.txt"
+        script = f"#!/bin/sh\necho \"$*\" >> '{mark}'\nexec '{sys.executable}' \"$@\"\n".encode("utf-8")
+        b = io.BytesIO()
+        with tarfile.open(fileobj=b, mode="w:gz") as tf:
+            members = (("python", None), ("python/bin", None), ("python/bin/python3", script))  # exec-ok: tar names
+            for name, data in members:
+                ti = tarfile.TarInfo(name)
+                ti.mode, ti.mtime = 0o755, 1577836800
+                if data is None:
+                    ti.type = tarfile.DIRTYPE
+                    tf.addfile(ti)
+                else:
+                    ti.size = len(data)
+                    tf.addfile(ti, io.BytesIO(data))
+        good, bad = d / "portable.tar.gz", d / "tampered.tar.gz"
+        good.write_bytes(b.getvalue())
+        bad.write_bytes(b.getvalue() + b"x")
+        pin_sha = hashlib.sha256(b.getvalue()).hexdigest()
+        bundle(d / "rel", "player-install-v7",
+               pins=[(k, 1, pin_sha, f"https://example.invalid/{k}.tar.gz") for k in PIN_PLATFORMS])
+        nopy = d / "nopy"; nopy.mkdir()          # a PATH with the tools a bootstrap uses, and no Python
+        tools = ("sh", "cat", "cut", "awk", "tar", "gzip", "mkdir", "rm", "cp", "mktemp", "uname", "dirname",  # exec-ok: linked
+                 "basename", "readlink", "sha256sum", "shasum", "openssl")
+        for tool in tools:
+            w = shutil.which(tool, path="/usr/bin:/bin") or shutil.which(tool)     # the system's own, not a wrapper
+            if w:
+                (nopy / tool).symlink_to(w)
+        stub = d / "usr-bin"; stub.mkdir()     # stands in for a Mac's /usr/bin
+        (stub / "python3").write_text(f"#!/bin/sh\necho ran >> '{stubmark}'\nexec '{sys.executable}' \"$@\"\n",
+                                      encoding="utf-8")
+        (stub / "python3").chmod(0o755)
+        link = d / "elsewhere"; link.mkdir()
+        (link / "python3").symlink_to(stub / "python3")       # a python3 that resolves to the stub is the stub
+        devtools = d / "CommandLineTools"; devtools.mkdir()
+        for name, body in (("xcode-select-none", "echo 'xcode-select: error: no developer tools' >&2; exit 2"),
+                           ("xcode-select-ok", f"echo '{devtools}'")):
+            (d / name).write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+            (d / name).chmod(0o755)
+        sh = shutil.which("sh")
+
+        def boot(home, args, path=nopy, **env):
+            tmp = d / f"tmp-{len(list(d.glob('tmp-*')))}"
+            tmp.mkdir()
+            e = {"PATH": str(path), "HOME": str(d), "MMVU_HOME": str(home), "TMPDIR": str(tmp),
+                 "PLAYER_INSTALL_ZIP": str(d / "rel" / "player-install.zip"), "PLAYER_INSTALL_PYTHON_FILE": str(good),
+                 "SSL_CERT_FILE": os.environ.get("SSL_CERT_FILE", "")}
+            e.update(env)
+            r = subprocess.run([sh, str(d / "rel" / "install.sh")] + args, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=300,
+                               env={k: v for k, v in e.items() if v})
+            return r, tmp
+
+        def runs(f):      # each run of the portable python3: its arguments
+            return f.read_text(encoding="utf-8").splitlines() if f.is_file() else []
+
+        def installs():   # the installer's runs: its arguments after the script
+            return [x.split("player-install.py", 1)[1].strip() for x in runs(mark) if "tools/player-install.py" in x]
+
+        say = "downloading a portable Python (about 1 MB) just for this install; it is removed afterwards"
+        home = d / "home1"
+        r, tmp = boot(home, ["--help"])
+        chk(r.returncode == 0 and say in r.stdout and "usage:" in r.stdout and installs() == ["--help"]
+            and not any(tmp.iterdir()) and not (home / "python").exists(),
+            f"no Python: a portable one is announced, checked, run and removed: {r.returncode} {r.stdout[-300:]} "
+            f"{r.stderr[-300:]} ran: {runs(mark)} left: {sorted(tmp.iterdir())}")
+        home = d / "home2"
+        r, tmp = boot(home, ["--keep-python", "--help"])
+        kept = home / "python" / pin_sha[:16] / "python" / "bin" / "python3"
+        chk(r.returncode == 0 and "--keep-python keeps it" in r.stdout and kept.is_file() and installs()[-1:] == ["--help"],
+            f"--keep-python keeps it, and is not passed on: {r.stdout[-300:]} {r.stderr[-300:]} ran: {runs(mark)}")
+        n = len(installs())
+        r, tmp = boot(home, ["--help"], PLAYER_INSTALL_PYTHON_FILE=str(bad))
+        chk(r.returncode == 0 and "downloading" not in r.stdout and len(installs()) == n + 1,
+            f"a kept portable Python is used again, nothing downloaded: {r.stdout[-300:]} {r.stderr[-300:]}")
+        n = len(runs(mark))
+        home = d / "home3"
+        r, tmp = boot(home, ["--help"], PLAYER_INSTALL_PYTHON_FILE=str(bad))
+        chk(r.returncode == 1 and "nothing was run" in r.stderr and len(runs(mark)) == n and not any(tmp.iterdir())
+            and not (home / "player-install").exists(),
+            f"a tampered portable Python is refused, nothing run: {r.returncode} {r.stderr[-300:]}")
+        # a Mac: /usr/bin/python3 without the developer tools is Apple's stub -- never run; a portable one instead
+        mac = dict(PLAYER_INSTALL_TEST_UNAME="Darwin", PLAYER_INSTALL_TEST_STUB_DIR=str(stub))
+        n = len(installs())
+        r, tmp = boot(d / "home4", ["--help"], path=os.pathsep.join(map(str, (link, stub, nopy))),
+                      PLAYER_INSTALL_TEST_XCODE_SELECT=str(d / "xcode-select-none"), **mac)
+        chk(r.returncode == 0 and not stubmark.exists() and say in r.stdout and len(installs()) == n + 1,
+            f"macOS without the developer tools: /usr/bin/python3 (or a link to it) is never run: {r.stdout[-300:]} "
+            f"{r.stderr[-300:]} stub ran: {stubmark.exists()}")
+        r, tmp = boot(d / "home5", ["--help"], path=os.pathsep.join(map(str, (stub, nopy))),
+                      PLAYER_INSTALL_TEST_XCODE_SELECT=str(d / "no-such-xcode-select"), **mac)
+        chk(r.returncode == 0 and not stubmark.exists(),
+            f"macOS with no xcode-select at all: /usr/bin/python3 is never run: {r.stderr[-300:]}")
+        r, tmp = boot(d / "home6", ["--help"], path=os.pathsep.join(map(str, (stub, nopy))),
+                      PLAYER_INSTALL_TEST_XCODE_SELECT=str(d / "xcode-select-ok"), **mac)
+        chk(r.returncode == 0 and stubmark.is_file() and "downloading" not in r.stdout,
+            f"macOS with the developer tools: /usr/bin/python3 is a real Python, and used: {r.stdout[-300:]} {r.stderr[-300:]}")
+
+
+def https_check():
+    """--self-check --https: a real HTTPS fetch with this Python's own trust (urllib, no curl fallback): the portable
+    builds' proof that they verify certificates with no extra setup."""
+    import ssl
+    url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+    paths = ssl.get_default_verify_paths()
+    where = f"SSL_CERT_FILE={os.environ.get('SSL_CERT_FILE', '')!r} cafile={paths.cafile!r} capath={paths.capath!r}"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r:
+            n = len(r.read())
+    except (OSError, urllib.error.URLError) as e:
+        print(f"https: FAILED for {url} with Python {sys.version.split()[0]} at {sys.executable}: {e} ({where})")
+        return 1
+    print(f"https: OK, {n} bytes from {url} with Python {sys.version.split()[0]} at {sys.executable} ({where})")
+    return 0
+
+
 def self_check():
     """Offline: fake releases, jars and a fake Minecraft folder -- resolution, refusals and placement."""
     import io, zipfile
@@ -735,6 +890,21 @@ def self_check():
             z.writestr("META-INF/neoforge.mods.toml", f'modLoader="javafml"\nloaderVersion="[1,)"\n[[mods]]\nmodId="{modid}"\n'
                        f'[[dependencies.{modid}]]\nmodId="neoforge"\ntype="required"\nversionRange="[{floor},)"\n')
         return b.getvalue()
+    # the whole import closure, on whichever Python runs this (the bootstrap's portable ones too: Windows' embeddable
+    # build has no tkinter, venv, ensurepip or site-packages): every tool the bundle ships, and the standard modules
+    # they import only where used
+    for rel in BUNDLE:
+        if rel != "tools/player-install.py":
+            try:
+                _load("closure_" + rel[6:-3].replace("-", "_"), rel[6:])
+            except Exception as e:      # an ImportError, or what a tool does at import time
+                chk(False, f"{rel} does not load on Python {sys.version.split()[0]}: {e!r}")
+    import importlib
+    for mod in ("concurrent.futures", "ctypes.util", "signal", "ssl", "zipfile", "tarfile", "urllib.request"):
+        try:
+            importlib.import_module(mod)
+        except ImportError as e:
+            chk(False, f"the standard module {mod} is missing from Python {sys.version.split()[0]}: {e}")
     core = {mc: jar("examplecore") for mc in ("1.21.8", "26.3")}
     isle = jar("exampleisle")
     def rel(tag, pre, name, data, digest=True):
@@ -868,6 +1038,19 @@ def self_check():
                 bundle(pathlib.Path(d) / "c", "v7"); chk(False, "a bad tag must refuse")
             except Refuse:
                 pass
+            pins = python_pins((HERE.parent / PINS_FILE).read_text(encoding="utf-8"))
+            notes_md = (pathlib.Path(d) / "a" / "RELEASE-NOTES.md").read_text(encoding="utf-8")
+            chk(all(s in sh and s in ps and u in sh and u in ps and s in notes_md for _k, _mb, s, u in pins)
+                and "@PYTHON_PINS@" not in sh + ps + notes_md,
+                "bundle: every portable-Python pin (url, sha256) is written into both bootstraps and the notes")
+            for bad in ("linux-x86_64 36 abc https://x.invalid/p.tgz\n", "linux-x86_64 36 " + "a" * 64 + " http://x.invalid/p\n",
+                        "\n".join(f"{k} 1 {'a' * 64} https://x.invalid/{k}" for k in PIN_PLATFORMS[:-1])):
+                try:
+                    python_pins(bad); chk(False, f"a bad pins file must refuse: {bad!r}")
+                except Refuse:
+                    pass
+        if os.name != "nt" and shutil.which("sh") and shutil.which("tar"):
+            bootstrap_check(chk)
     files[("o/core", "examplecore-1.0.9-mc1.21.8", ".github/player-install.txt")] = "To turn on the extra later: open the menu.\n"
     chk(notes(src, resolve(src, "o/worlds", ["isle"], A("o/worlds:isle"), ask, q)) == ["To turn on the extra later: open the menu."],
         "a dependency's player-install.txt at its tag is printed after the install")
