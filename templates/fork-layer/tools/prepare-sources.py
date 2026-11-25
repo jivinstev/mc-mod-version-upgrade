@@ -219,6 +219,39 @@ def unguard(text):
     return text.replace(KEEP_CALL_MARKED, '.mulPose(') if KEEP_MARK in text else text
 
 
+
+# ---- a class renamed by its fully qualified name: the file's simple-name uses follow its import (#261). A plain row
+# `a.b.Old<TAB>a.b.New` rewrites `import a.b.Old;`, but the file then says `Old.PICKUP`, `new Old()`, `Old x` -- which
+# no longer compiles. The migrator's own tables pair such a row with a simple-name row; a fork's renames.tsv often has
+# only the qualified one. So a file that imports the class EXACTLY (`import a.b.Old;`, not a wildcard) gets `Old` ->
+# `New` too, on identifier boundaries and never after a dot (`x.Old` is another class's member), as a type row does.
+# Only where the simple names differ, and never when the table already says what `Old` becomes (a row of its own).
+_IMPORT_RX = re.compile(r'(?m)^[ \t]*import[ \t]+([A-Za-z_][\w.]*\.[A-Za-z_]\w*)[ \t]*;')
+
+
+def implied_renames(text, table):
+    """{old simple name: new simple name} for each class the file imports by a name a plain row renames to another
+    simple name (see above). Read from the text BEFORE the token sweep rewrites the import."""
+    out = {}
+    if not table:
+        return out
+    for imp in _IMPORT_RX.findall(text):
+        new = table.get(imp)
+        if not new or not re.fullmatch(r'[A-Za-z_][\w.]*', new):
+            continue
+        old_s, new_s = imp.rsplit('.', 1)[1], new.rsplit('.', 1)[-1]
+        if old_s != new_s and old_s[:1].isupper() and old_s not in table:
+            out[old_s] = new_s
+    return out
+
+
+def apply_implied(text, implied):
+    """`text` with each implied simple-name rename applied (identifier boundaries, never after a dot). -> (text, n)."""
+    if not implied:
+        return text, 0
+    rx = re.compile(r'(?<![\w.])(' + '|'.join(re.escape(k) for k in sorted(implied, key=len, reverse=True)) + r')(?!\w)')
+    return rx.subn(lambda m: implied[m.group(1)], text)
+
 def build_pattern(renames):
     if not renames:
         return None, {}
@@ -336,7 +369,10 @@ def main():
             def _tok(m):
                 hits[m.group(1)] = hits.get(m.group(1), 0) + 1
                 return table[m.group(1)]
+            implied = implied_renames(text, table)
             text, n = pattern.subn(_tok, text)
+            rewrites += n
+            text, n = apply_implied(text, implied)
             rewrites += n
         text = unguard(text)
         dest = os.path.join(a.out, rel)
