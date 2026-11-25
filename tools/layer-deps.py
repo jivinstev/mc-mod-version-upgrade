@@ -2443,6 +2443,11 @@ def _check_several_mods(expect):
     coordinate pinned differently is refused naming both workflows; resolve --port-release re-pins a workflow-only pin
     like a named one; head-repin regenerates each mod's workflow; a one-mod workflow-only pin gets its row too."""
     import contextlib, io
+    if not (ROOT / "tools/port-ci.py").is_file():
+        # the Port CI kit ships layer-deps.py without port-ci.py (a fork's CI never runs head-repin, the round does,
+        # from a full checkout): these checks render workflows with it, so the kit's verify skips them, saying so
+        print("layer-deps: several-mods checks skipped: tools/port-ci.py is not here (the Port CI kit)")
+        return
     with tempfile.TemporaryDirectory() as td:
         m = pathlib.Path(td) / "multi"
         several_mods_fixture(m, "1.21.4")
