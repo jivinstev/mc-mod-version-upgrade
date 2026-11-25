@@ -211,3 +211,4 @@ zipls -p prints a member	2	2	2
 zipls extracts the matching members	2	2	2
 audit-mixin-targets: an unbounded ? in a getter accessor matches the field's argument; a different t	2	2	2
 rename engine: a row renaming a class's qualified name renames its simple-name uses after an exact i	2	3	4
+player-install: a repository's newest full release per Minecraft version (a pre-release only on requ	3	6	10
