@@ -119,14 +119,50 @@ def all_mods_owned(repo, ref="HEAD"):
 def mod_dirs(repo, ref="HEAD"):
     """A repository of several separate mods: its top-level folders whose own gradle.properties names a mod_id, sorted
     -- [] for a repository whose root gradle.properties names one (the one-mod layout every tool assumes) or that has
-    fewer than one such folder. Read from git at ref."""
+    fewer than one such folder. Read from git at ref; ref None reads the working tree (a checkout a tool edits)."""
     def mod_id(path):
-        r = git(repo, "show", f"{ref}:{path}")
-        return r.returncode == 0 and re.search(r"(?m)^\s*mod_id\s*[=:]\s*\S", r.stdout) is not None
+        text = workflow_text(repo, path, ref)
+        return re.search(r"(?m)^\s*mod_id\s*[=:]\s*\S", text) is not None
     if mod_id("gradle.properties"):
         return []
-    tops = git(repo, "ls-tree", "-d", "--name-only", ref).stdout.split()
+    if ref:
+        tops = git(repo, "ls-tree", "-d", "--name-only", ref).stdout.split()
+    else:
+        tops = [x.name for x in pathlib.Path(repo).iterdir() if x.is_dir()] if pathlib.Path(repo).is_dir() else []
     return sorted(t for t in tops if not t.startswith(".") and mod_id(f"{t}/gradle.properties"))
+
+
+PORT_CI_WF = ".github/workflows/port-ci.yml"
+MOD_WF_RE = re.compile(r"^\.github/workflows/port-ci-([\w.-]+)\.yml$")
+MOD_WF_GEN = re.compile(r'ci-gates\.py --repo (?!\.\s)\S+ --modid "[^"]+"[\s\S]*port-ci-kit-v\d+|'
+                        r'port-ci-kit-v\d+[\s\S]*ci-gates\.py --repo (?!\.\s)\S+ --modid "[^"]+"')
+
+
+def workflow_text(d, path, ref=None):
+    """A file's text at git ref (else the working tree at d); "" when absent."""
+    if ref:
+        r = git(d, "show", f"{ref}:{path}")
+        return r.stdout if r.returncode == 0 else ""
+    f = pathlib.Path(d) / path
+    return f.read_text(encoding="utf-8") if f.is_file() else ""
+
+
+def port_ci_workflows(d, ref=None):
+    """The fork's Port CI workflows, at git ref (else in the working tree at d): [(name, path)] -- [("", PORT_CI_WF)]
+    for a one-mod repository; for a repository of several mods (port-ci.py --mod-dir: one workflow per mod, no
+    PORT_CI_WF) each `port-ci-<name>.yml`, sorted by name; [] when there is none. The one list every tool that reads a
+    fork's workflows takes (round.py port_ci_wfs, layer-deps.py's pins, fork-branches.py ci)."""
+    if ref:
+        files = git(d, "ls-tree", "--name-only", ref, ".github/workflows/").stdout.split()
+    else:
+        wd = pathlib.Path(d) / ".github" / "workflows"
+        files = sorted(f".github/workflows/{f.name}" for f in wd.glob("*.yml")) if wd.is_dir() else []
+    if PORT_CI_WF in files:
+        return [("", PORT_CI_WF)]
+    # a mod's workflow only when port-ci.py --mod-dir generated it (its gates run on a mod folder): a workflow of the
+    # repository's own that merely shares the name pattern (port-ci-check.yml) is never taken for a mod's
+    return sorted((m.group(1), f) for f in files for m in [MOD_WF_RE.match(f)]
+                  if m and MOD_WF_GEN.search(workflow_text(d, f, ref)))
 
 
 def head_of(repo, vb):
@@ -311,6 +347,21 @@ def self_check():
         w("alpha/gradle.properties", "mod_id = examplealpha\nmod_version=0.2.0\n"); w("docs/README.md", "x\n")
         g("add", "-A"); g("commit", "-qm", "two mods")
         expect(mod_dirs(r) == ["alpha", "zeta"], f"two mod folders, the shared and docs folders not: {mod_dirs(r)}")
+        w("beta/gradle.properties", "mod_id=examplebeta\n")       # in the working tree only
+        expect(mod_dirs(r, None) == ["alpha", "beta", "zeta"] and mod_dirs(r) == ["alpha", "zeta"],
+               f"ref None reads the working tree, HEAD the commit: {mod_dirs(r, None)}")
+        import shutil; shutil.rmtree(r / "beta")
+        gen = lambda n: f'curl .../port-ci-kit-v9.tar.gz\n  python3 x/ci-gates.py --repo {n} --modid "example{n}"\n'
+        w(".github/workflows/port-ci-zeta.yml", gen("zeta")); w(".github/workflows/port-ci-alpha.yml", gen("alpha"))
+        w(".github/workflows/port-ci-check.yml", "name: the repository's own\n")
+        g("add", "-A"); g("commit", "-qm", "workflows")
+        want = [("alpha", ".github/workflows/port-ci-alpha.yml"), ("zeta", ".github/workflows/port-ci-zeta.yml")]
+        expect(port_ci_workflows(r) == want and port_ci_workflows(r, "HEAD") == want and port_ci_workflows(r, "HEAD~1") == [],
+               f"each mod's generated workflow, sorted; a workflow of the repository's own not one: {port_ci_workflows(r)}")
+        w(PORT_CI_WF, "x\n")
+        expect(port_ci_workflows(r) == [("", PORT_CI_WF)] and port_ci_workflows(r, "HEAD") == want,
+               "a port-ci.yml: the one-mod workflow alone (the tree), the commit's as it was")
+        (r / PORT_CI_WF).unlink()
         expect(not is_owned(r) and not all_mods_owned(r), "no publishing config at all: not owned")
         w(".github/port-publish-alpha.json", '{"schema": 1, "own_mod": true}\n'); g("add", "-A"); g("commit", "-qm", "a")
         expect(all_mods_owned(r) and not is_owned(r), "every per-mod config (one) says own_mod: all mods owned; the "

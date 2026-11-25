@@ -224,6 +224,15 @@ run is green, and it is then gated against the dependency's NEW build.
    and asset of `--dep-jar` AND of any `--dep-jar-variant` together -- a mismatch is refused -- and rerun it).
    A repository that ships several mods has one workflow per mod (`.github/workflows/port-ci-<NAME>.yml`,
    `port-ci.py --mod-dir`): `port-ci.py args --repo DIR --file .github/workflows/port-ci-<NAME>.yml` reads each one back.
+   One command does the edit for every workflow that pins the library, on either kind of repository: `python3
+   tools/layer-deps.py head-repin --repo DIR --port-release <owner/lib>@<tag> --branch <head branch>` (the new
+   release's asset that stands for the pinned one, its sha256, `--dep-jar` and `--dep-jar-variant` together, every other
+   option and the kit as they are; written, not committed: run the fork's `after_repin` commands, then commit it all).
+   A version branch of several mods re-pins with `layer-deps.py resolve --port-release` as one mod does (it reads every
+   mod's workflow and build.gradle; the same coordinate pinned differently by two mods' workflows, or a CurseForge/Modrinth dependency two mods' builds
+   pin at different builds, is refused, naming
+   both), then `fork-branches.py ci --target <v> --run` with no `--modid` renders each mod's workflow. A `--dep-jar`
+   no build.gradle names (the build reads the jar from mavenLocal) is re-pinned like a named one.
    **Don't exceed your dependency.** A dependent MAY cut its own pre-release pinned to the dependency's
    pre-release -- do it: a library is only really tested through a dependent, so that pair of pre-releases is what
    the owner plays. A dependent MUST NOT be promoted to a full Release, nor published, while a dependency it pins
@@ -577,7 +586,8 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   `port-sync.py --port keep-current/<date> --base <head> --upstream <the remote fetching the plan's upstream>/<branch>
   --commit <upstream_commit>`; a conflict stops it red and becomes its fixer's job -- resolve, commit the merge -- after
   which it finds nothing left to merge), `authors` (an agent: Run steps 3-5, reconcile and port to green A/B),
-  `repin-head` (an agent, a dependent: Run step 7's `port-ci.py args` edit to the library's release of this round),
+  `repin-head` (an agent, a dependent: Run step 7's `layer-deps.py head-repin` to the library's release of this round,
+  then the fork's `after_repin` commands, one commit),
   `backlog`, the fresh `review`, `fix` and `recheck` (on `.port/<mc>/REVIEW.md`, step 4 below), `records` (#161 U5:
   `fork-branches.py check-done` writes the done list's records -- TEST-ITEMS.md, INVENTORY-CHECK.json, any `?` row the
   review left -- and, when the head was re-pinned to a library pre-release whose version is not done, DEPS.md's
@@ -772,8 +782,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      none. **On a version branch, the cheapest correct
      sequence** -- one full run (~20 minutes) per version where the 2026-10-19 round ran two or three, every gate still
      green on the exact tree that merges:
-     1. what changes the build goes in first: a library re-pin (`layer-deps.py resolve --port-release`, then
-        `fork-branches.py ci` for the workflow) and the plan's ticked dependency bumps (`dep_bumps`, `resolve --bump`)
+     1. what changes the build goes in first: a library re-pin (`layer-deps.py resolve --port-release`, the fork's
+        `after_repin` commands, the commit, then `fork-branches.py ci` for the workflow -- each mod's, with no
+        `--modid`, on a version branch of several mods) and the plan's ticked dependency bumps (`dep_bumps`, `resolve --bump`)
         before the version is gated, never after its gates;
      2. the cascade's `--gates ab` (compile, audits, Gate A/B) green is what the review starts from: the review needs no
         Gate C run before it;
@@ -948,7 +959,7 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
            [--allow push-version-branches --allow pre-release --allow merge-fork-prs] \
            [--ledger-issues <owner/dep>=12,15] [--depends-on <owner/dep>=<owner/lib>] \
            [--replace-task "<old task name>"] \
-           [--release-bump [<owner/repo>=]<file>:<key> ...] \
+           [--release-bump [<owner/repo>=]<file>:<key> ...] [--after-repin <owner/repo>="<command>" ...] \
            [--default-branch-too] [--keep-existing] [--trailer "<Key>: <value>" ...]
 
    One `--fork` per fork, the library first (a fork alone: one). A `--fork` without `=URL#BRANCH` takes the authors'
@@ -984,6 +995,14 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    SEVERAL MODS repeats the flag, one per mod's version file (`alpha/gradle.properties:mod_version`): a mod's version
    moves only when the take changes its folder or a shared path (one in no mod folder), every bump of the round is one
    PR (`Versions alpha 1.2.4, zeta 0.3.1: ...`), and the plan has a line per mod.
+   **A fork that derives files from its pins** (a pin table its build reads, generated from its workflows or
+   branch.properties) names the command that regenerates them: `--after-repin <owner/repo>="python3 scripts/write-pins.py
+   --write"` (repeatable, run in order; split like a shell, run without one; stored as the fork's `after_repin`). The
+   round runs it in that fork's checkout after every re-pin -- each version branch's `repin` step, and the head's
+   `repin-head` job, whose task names it -- and before that re-pin's commit, so the derived files land in the same
+   commit; a non-zero exit stops the re-pin naming the command. It is the repository's own code run in its own
+   checkout, the same trust as its Gradle build. Ask the owner at stop 1 whether such a file exists. Re-running setup
+   without it warns and drops it unless `--keep-existing`.
 2. **The round task:** list the scheduled tasks (`list_triggers`) first, then `python3 tools/weekly-plan.py round-task
    --repo <library checkout> --existing "<name>" ...` with every name the listing returned: the round runs on
    `tools/round.py` for every fork set (`--version-branches`, which older setups pass, is accepted and changes nothing).

@@ -17,6 +17,7 @@
     python3 tools/fork-branches.py remake      --repo DIR --branch neoforge-<v>   # after a hand-made merge: the rows' step
     python3 tools/fork-branches.py cutout-check --repo DIR --branch neoforge-<v> [--fix]   # the 26.1.2 entityCutout swap
     python3 tools/fork-branches.py ci          --repo DIR (--target T | --all) --modid ID | --head [--modid ID]  [--run] [--kit-version N]
+                                           # several mods: no --modid; each mod's port-ci-<NAME>.yml (ci_mods_args)
     python3 tools/fork-branches.py ci-check    --repo DIR [--target T ...] [--kit-version N]   # the head branch too
     python3 tools/fork-branches.py versions    [--refresh]   # the targeted lines (templates/fork-layer/versions.json)
     python3 tools/fork-branches.py sync-shared --repo DIR [--target T ...] [--check [--json FILE]]   # --check: read-only report
@@ -4945,6 +4946,40 @@ def ci_args(repo, t, modid, kit_version=None):
         "--branch", branch_name(t)]
 
 
+def ci_mods_args(repo, t, kit_version=None):
+    """[(name, args)] -- version branch t of a repository of SEVERAL MODS (mod_dirs at the branch): one port-ci.py
+    command per mod, each from that mod's workflow on the port branch (`port-ci-<NAME>.yml`, tools/fork-kind.py
+    port_ci_workflows) read back (its --mod-dir, --tag-name, --also-path and pins), remapped by remap_ci_args with the
+    mod_id of its folder's gradle.properties at the version branch, `--branch neoforge-<t>`. [] for a one-mod branch
+    (ci_args is its command, as it always was). ValueError when the port branch has no workflow per mod, or a mod's
+    workflow names no --mod-dir or its folder no mod_id."""
+    t_ref = fresh_branch(repo, branch_name(t))
+    if not t_ref or not mod_dirs(repo, t_ref):
+        return []
+    read = reader_of_ref(repo, t_ref)
+    p = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
+    port = p.get("port_branch", "neoforge-1.21.1")
+    port_ref = fresh_branch(repo, port)
+    fk, pc = fork_kind(), load("port_ci_fb", "port-ci.py")
+    wfs = fk.port_ci_workflows(repo, port_ref) if port_ref else []
+    if not wfs or wfs == [("", fk.PORT_CI_WF)]:
+        raise ValueError(f"{branch_name(t)} holds several mods ({', '.join(mod_dirs(repo, t_ref))}), but the port branch "
+                         f"{port} has no Port CI workflow per mod (port-ci.py --mod-dir DIR, once per mod, installs them)")
+    out = []
+    for name, path in wfs:
+        try:
+            rec = pc.recover_args(fk.workflow_text(repo, path, port_ref))
+        except SystemExit as e:
+            raise ValueError(f"{port}'s {path} cannot be read back: {e}")
+        md = rec[rec.index("--mod-dir") + 1] if "--mod-dir" in rec else None
+        modid = parse_props(read(f"{md}/gradle.properties")).get("mod_id") if md else None
+        if not modid:
+            raise ValueError(f"{port}'s {path}: " + (f"{md}/gradle.properties at {branch_name(t)} names no mod_id" if md
+                                                     else "it names no --mod-dir"))
+        out.append((name, remap_ci_args(rec, p, modid, kit_version) + ["--branch", branch_name(t)]))
+    return out
+
+
 def shipped_variants(repo, ref, t):
     """The variants version t's branch keeps shipped-jar expectations for: `cf` for .port/<t>/shipped-expect-cf.txt."""
     r = git(repo, "ls-tree", "--name-only", f"{ref}:{REC}/{t}/") if ref else None
@@ -4972,40 +5007,49 @@ def ci_check(repo, versions=None, kit_version=None):
         try:
             pc = load("port_ci_fb", "port-ci.py")
             # the floor of the download probe kit_pin falls back to when the release list is refused (a 403)
-            newest = pc.newest_kit([git(repo, "show", f"{fresh_branch(repo, branch_name(t)) or have[t]}:.github/workflows/"
-                                        "port-ci.yml").stdout for t in todo] + [head_workflow(repo, have)[1]], say=out.append)
+            fk_ = fork_kind()
+            refs = [fresh_branch(repo, branch_name(t)) or have[t] for t in todo]
+            newest = pc.newest_kit([fk_.workflow_text(repo, path, r_) for r_ in refs
+                                    for _n, path in fk_.port_ci_workflows(repo, r_)]
+                                   + [t_ for _p, t_ in head_workflows(repo, have)[1]], say=out.append)
         except (Exception, SystemExit) as e:    # noqa: BLE001 -- offline: say so, compare the variants only
             out.append(f"fork-branches: ci-check: cannot read the newest Port CI kit ({e}); pass --kit-version N")
     elif kit_version is not False:
         newest = int(kit_version)
     stale = 0
+    fk = fork_kind()
     for t in todo:
         ref = fresh_branch(repo, branch_name(t)) or have[t]
-        wf = git(repo, "show", f"{ref}:.github/workflows/port-ci.yml")
+        # every Port CI workflow of the branch: its port-ci.yml, or one per mod of a repository of several mods
+        wfs = fk.port_ci_workflows(repo, ref)
         why = []
-        if wf.returncode:
+        if not wfs:
             why.append("no .github/workflows/port-ci.yml")
-        else:
-            kits = [int(k) for k in re.findall(r"port-ci-kit-v(\d+)", wf.stdout)]    # the kit's release the workflow downloads
+        for name, path in wfs:
+            text = fk.workflow_text(repo, path, ref)
+            w_ = []
+            kits = [int(k) for k in re.findall(r"port-ci-kit-v(\d+)", text)]    # the kit's release the workflow downloads
             if newest is not None and (not kits or min(kits) < newest):
-                why.append(f"its workflow pins Port CI kit {min(kits) if kits else '?'}, older than kit {newest}")
-            vj = (re.search(r'\n\s*VARIANT_JARS: "([^"]*)"', wf.stdout) or [None, ""])[1].split()
-            miss = [v for v in shipped_variants(repo, ref, t) if f"*_{v}.jar" not in vj]
-            if newest is not False and not ignores_records(wf.stdout, version_records()):
+                w_.append(f"its workflow pins Port CI kit {min(kits) if kits else '?'}, older than kit {newest}")
+            vj = (re.search(r'\n\s*VARIANT_JARS: "([^"]*)"', text) or [None, ""])[1].split()
+            # a mod of several boots no variant jar (port-ci.py --mod-dir takes no --variant-jar yet)
+            miss = [v for v in shipped_variants(repo, ref, t) if f"*_{v}.jar" not in vj] if not name else []
+            if newest is not False and not ignores_records(text, version_records()):
                 # a workflow port-ci.py rendered before a version branch's records were ignored: every push of only
                 # GATES.md, COST.md, ... is a full Port CI run (review of the cost PR)
-                why.append("its push trigger ignores none of the round's records (" + ", ".join(version_records())
-                           + "), so a records-only push runs the full Port CI")
+                w_.append("its push trigger ignores none of the round's records (" + ", ".join(version_records())
+                          + "), so a records-only push runs the full Port CI")
             pc = load("port_ci_fb", "port-ci.py")
-            gone = pc.missing_inputs(wf.stdout)
+            gone = pc.missing_inputs(text)
             if newest is not False and gone:
-                why.append("it was rendered before the from_run/dep_override inputs (no " + ", ".join(gone)
-                           + "): it can neither release an earlier run's jars nor run the dependent gate")
-            elif newest is not False and pc.missing_digests(wf.stdout):
-                why.append(pc.DIGESTS_STALE)
+                w_.append("it was rendered before the from_run/dep_override inputs (no " + ", ".join(gone)
+                          + "): it can neither release an earlier run's jars nor run the dependent gate")
+            elif newest is not False and pc.missing_digests(text):
+                w_.append(pc.DIGESTS_STALE)
             if miss:
-                why.append("its workflow boots no " + ", ".join(f"*_{v}.jar" for v in miss) + " although .port/" + t
-                           + "/" + ", ".join(f"shipped-expect-{v}.txt" for v in miss) + " expects it (CI green, that jar unchecked)")
+                w_.append("its workflow boots no " + ", ".join(f"*_{v}.jar" for v in miss) + " although .port/" + t
+                          + "/" + ", ".join(f"shipped-expect-{v}.txt" for v in miss) + " expects it (CI green, that jar unchecked)")
+            why += [f"{path}: {x}" for x in w_] if name else w_
         if why:
             stale += 1
             out.append(f"fork-branches: ci-check: WARNING {branch_name(t)}: " + "; ".join(why))
@@ -5046,6 +5090,15 @@ def head_workflow(repo, have=None):
     return head, (r.stdout if r is not None and r.returncode == 0 else "")
 
 
+def head_workflows(repo, have=None):
+    """(head branch, [(path, text)] of its Port CI workflows): its port-ci.yml, or for a repository of several mods each
+    mod's port-ci-<NAME>.yml (tools/fork-kind.py port_ci_workflows), read from the head's newest commit."""
+    head = head_branch(repo, have)
+    ref = fresh_branch(repo, head)
+    fk = fork_kind()
+    return head, ([(path, fk.workflow_text(repo, path, ref)) for _n, path in fk.port_ci_workflows(repo, ref)] if ref else [])
+
+
 def ignores_records(wf, need=None):
     """port-ci.py ignores_records: does the workflow's push trigger paths-ignore the head's round records (`need`:
     other paths, a version branch's records)?"""
@@ -5058,10 +5111,11 @@ def head_ci_lines(repo, have, newest):
     run (weekly round 2026-10-19: nine 8-14 minute runs on the head for ledger and README commits; its workflow was still
     the kit-v23 one, re-pins having kept its kit, and ci-check read only the version branches). Nothing for a head
     without a workflow, or one current on both counts."""
-    head, wf = head_workflow(repo, have)
-    if not wf:
-        return []
-    why = load("port_ci_fb", "port-ci.py").stale_workflow(wf, newest)   # the single-version check (port-ci.py check)
+    head, wfs = head_workflows(repo, have)
+    why = []
+    for path, wf in wfs:            # one per mod of a repository of several mods, each named
+        w_ = load("port_ci_fb", "port-ci.py").stale_workflow(wf, newest)   # the single-version check (port-ci.py check)
+        why += [f"{path}: {x}" for x in w_] if len(wfs) > 1 or not path.endswith("/port-ci.yml") else w_
     if not why:
         return []
     return [f"fork-branches: ci-check: WARNING {head} (the head branch): " + "; ".join(why) + f" -- regenerate: python3 "
@@ -5104,29 +5158,36 @@ def ci_head(repo, modid, run=False, say=print, kit_version=None, runner=None):
         say("fork-branches: ci --head is for a fork with version branches (none here); a single-version fork's port branch "
             "is checked by port-ci.py check --repo DIR, which warns about an old kit or no records ignore and prints the "
             "command that regenerates its workflow at the newest kit"); return 2
-    head, wf = head_workflow(repo, have)
-    if not wf:
+    head, wfs = head_workflows(repo, have)
+    if not wfs:
         say(f"fork-branches: {head} has no .github/workflows/port-ci.yml (the port-fork skill installs it)"); return 2
     pc = load("port_ci_fb", "port-ci.py")
-    args, rec, i = [], pc.recover_args(wf), 0
-    while i < len(rec):
-        if rec[i] in ("--kit-version", "--kit-sha"):           # the kit moves; everything else is read back as it is
-            i += 2; continue
-        if rec[i] == "--modid":
-            if modid and modid != rec[i + 1]:
-                say(f"fork-branches: --modid {modid} is not the head workflow's ({rec[i + 1]}): ci --head regenerates the "
-                    "workflow as it is -- drop --modid, or install another with port-ci.py"); return 2
-            args += ["--modid", rec[i + 1]]; i += 2; continue
-        args.append(rec[i]); i += 1
-    had = re.search(r'git fetch --no-tags origin "([^"]+)"', wf)
-    base = pc.default_branch(repo, say=lambda m_: None)
-    if had and had.group(1) != base:
-        say(f"fork-branches: the head workflow fetches the authors' branch {had.group(1)}, but port-ci.py would take "
-            f"{base} (origin/HEAD): fix origin/HEAD first (git remote set-head origin {had.group(1)}), then run ci --head "
-            "again"); return 2
-    args += (["--kit-version", str(kit_version)] if kit_version else []) + ["--branch", head]
     import shlex
-    say(f"fork-branches: {head} (the head branch): python3 tools/port-ci.py --repo <its checkout> {shlex.join(args)}")
+    runs, ids = [], []
+    for path, wf in wfs:        # a repository of several mods: each mod's workflow, from its own read-back options
+        args, rec, i = [], pc.recover_args(wf), 0
+        while i < len(rec):
+            if rec[i] in ("--kit-version", "--kit-sha"):           # the kit moves; everything else is read back as it is
+                i += 2; continue
+            if rec[i] == "--modid":
+                if modid and modid != rec[i + 1] and len(wfs) == 1:
+                    say(f"fork-branches: --modid {modid} is not the head workflow's ({rec[i + 1]}): ci --head regenerates "
+                        "the workflow as it is -- drop --modid, or install another with port-ci.py"); return 2
+                ids.append(rec[i + 1])
+                args += ["--modid", rec[i + 1]]; i += 2; continue
+            args.append(rec[i]); i += 1
+        had = re.search(r'git fetch --no-tags origin "([^"]+)"', wf)
+        base = pc.default_branch(repo, say=lambda m_: None)
+        if had and had.group(1) != base:
+            say(f"fork-branches: the head workflow fetches the authors' branch {had.group(1)}, but port-ci.py would take "
+                f"{base} (origin/HEAD): fix origin/HEAD first (git remote set-head origin {had.group(1)}), then run ci "
+                "--head again"); return 2
+        args += (["--kit-version", str(kit_version)] if kit_version else []) + ["--branch", head]
+        runs.append(args)
+        say(f"fork-branches: {head} (the head branch" + (f", {path}" if len(wfs) > 1 else "")
+            + f"): python3 tools/port-ci.py --repo <its checkout> {shlex.join(args)}")
+    if modid and len(wfs) > 1 and modid not in ids:
+        say(f"fork-branches: --modid {modid} is none of the head workflows' ({', '.join(ids)}): drop --modid"); return 2
     if not run:
         say(f"fork-branches: run it on a checkout of {head} (or pass --run: a worktree under build/fork-branches/), then push")
         return 0
@@ -5143,11 +5204,13 @@ def ci_head(repo, modid, run=False, say=print, kit_version=None, runner=None):
         work, why = worktree_for(repo, m.group(1))
     if work is None:
         say(f"fork-branches: {why}"); return 2
-    cmd = [sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(work), *args]
-    rc = (runner or (lambda c: subprocess.run(c).returncode))(cmd)
-    if rc == 0:
-        say(f"fork-branches: committed on {head} in {work}; nothing pushed: git push origin {head}")
-    return rc
+    for args in runs:
+        cmd = [sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(work), *args]
+        rc = (runner or (lambda c: subprocess.run(c).returncode))(cmd)
+        if rc:
+            return rc
+    say(f"fork-branches: committed on {head} in {work}; nothing pushed: git push origin {head}")
+    return 0
 
 
 PIN_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/(.+)$")
@@ -5262,24 +5325,34 @@ def newer_recuts(p, t, tags_of=remote_tags):
     return out
 
 
-def ci(repo, t, modid, run=False, say=print, kit_version=None, tags_of=remote_tags):
+def ci(repo, t, modid, run=False, say=print, kit_version=None, tags_of=remote_tags, runner=None):
+    """`ci --target T` (None: --all): version branch T's Port CI workflow rendered from the port branch's (ci_args), or
+    for a version branch of several mods each mod's (ci_mods_args); --run regenerates and commits it (port-ci.py, once
+    per workflow) in a clean checkout of the branch (worktree_for). runner(cmd) -> exit code: the self-check's stand-in
+    for running port-ci.py."""
     repo = pathlib.Path(repo).resolve()
     if t is None:                       # --all: every version branch, oldest first
         for v in sorted(version_branches(repo), key=mc_key):
-            rc = ci(repo, v, modid, run, say, kit_version, tags_of)
+            rc = ci(repo, v, modid, run, say, kit_version, tags_of, runner)
             if rc:
                 return rc
         return 0
     if not resolve_branch(repo, branch_name(t)):
         say(f"fork-branches: no branch {branch_name(t)}"); return 2
     try:
-        args = ci_args(repo, t, modid, kit_version)
+        mods = ci_mods_args(repo, t, kit_version)      # several mods: one workflow per mod; one mod: []
+        if not mods and not modid:
+            say("fork-branches: ci --target/--all: --modid is required"); return 2
+        args = None if mods else ci_args(repo, t, modid, kit_version)
     except ValueError as e:
         say(f"fork-branches: {e}"); return 2
     if kit_version is None:
         say("fork-branches: Port CI kit: the newest published (port-ci.py's default; the port branch's pin is not "
             "carried over); --kit-version N pins another")
-    say(f"fork-branches: {branch_name(t)}: python3 tools/port-ci.py --repo <its checkout> {' '.join(args)}")
+    for name, margs in mods:
+        say(f"fork-branches: {branch_name(t)} ({name}): python3 tools/port-ci.py --repo <its checkout> {' '.join(margs)}")
+    if not mods:
+        say(f"fork-branches: {branch_name(t)}: python3 tools/port-ci.py --repo <its checkout> {' '.join(args)}")
     props = parse_props(reader_of_ref(repo, fresh_branch(repo, branch_name(t)))(f"{REC}/{t}/{BRANCH_PROPS}"))
     for ga, tag, best, slug in newer_recuts(props, t, tags_of):
         say(f"fork-branches: WARNING {branch_name(t)} pins {ga} to {slug}'s release {tag}, and {best} is a newer re-cut "
@@ -5291,7 +5364,11 @@ def ci(repo, t, modid, run=False, say=print, kit_version=None, tags_of=remote_ta
     work, why = worktree_for(repo, t)
     if work is None:
         say(f"fork-branches: {why}"); return 2
-    rc = subprocess.run([sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(work), *args]).returncode
+    for _name, margs in mods or [("", args)]:
+        rc = (runner or (lambda c: subprocess.run(c).returncode))(
+            [sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(work), *margs])
+        if rc:
+            break
     if rc == 0:
         say(f"fork-branches: committed on {branch_name(t)} in {work}; nothing pushed: git push origin {branch_name(t)}")
     return rc
@@ -5382,7 +5459,8 @@ def main():
     cit.add_argument("--target"); cit.add_argument("--all", action="store_true", help="every version branch")
     cit.add_argument("--head", action="store_true", help="the head (port) branch: its workflow regenerated from itself, "
                      "the kit moved to the newest (ci-check names it when it ignores no round records)")
-    ci_.add_argument("--modid", help="required with --target/--all; with --head the workflow's own (a different one refuses)")
+    ci_.add_argument("--modid", help="required with --target/--all (not for a version branch of several mods: each mod's "
+                     "is read from its folder); with --head the workflow's own (a different one refuses)")
     ci_.add_argument("--run", action="store_true")
     cc = sub.add_parser("ci-check", help="warn about version branches whose Port CI workflow is older than the kit or "
                         "boots no jar of a variant they keep shipped-jar expectations for, and about a head branch whose "
@@ -5413,8 +5491,6 @@ def main():
         return cutout_check(a.repo, a.branch, a.fix)
     if a.cmd == "ci" and a.head:
         return ci_head(a.repo, a.modid, a.run, kit_version=a.kit_version)
-    if a.cmd == "ci" and not a.modid:
-        ap.error("ci --target/--all: --modid is required")
     if a.cmd == "ci":
         return ci(a.repo, None if a.all else a.target, a.modid, a.run, kit_version=a.kit_version)
     if a.cmd == "ci-check":
@@ -5858,6 +5934,75 @@ def _check_push_advice(expect):
     expect("git push origin neoforge-1.21.3:keep-current/<date>-1.21.3" in rnd and "open its PR into neoforge-1.21.3" in rnd
            and "then neoforge-1.21.4 the same way" in rnd and "nothing was pushed: git push" not in rnd,
            f"in a round the advice is the keep-current PR, never a direct push: {rnd}")
+
+
+def _check_ci_several_mods(expect):
+    """ci on a version branch of SEVERAL MODS (#274 C2): each mod's workflow rendered from the port branch's
+    port-ci-<NAME>.yml (its --mod-dir/--also-path read back, its --modid from its folder, its --dep-jar re-pinned to the
+    branch's port_jar pin, the workflow-only one too), no --modid needed; ci-check and ci --head read every mod's
+    workflow."""
+    ld = load("layer_deps_fb", "layer-deps.py")
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d) / "multi"
+        r.mkdir()
+        g = lambda *a: git(r, *a, check=True)
+        g("init", "-q", "-b", "neoforge-1.21.1"); g("config", "user.email", "t@example.invalid"); g("config", "user.name", "t")
+        ld.several_mods_fixture(r, "1.21.1")
+        g("add", "-A"); g("commit", "-qm", "two mods at 1.21.1")
+        g("checkout", "-q", "-b", "neoforge-1.21.4")
+        for n in ("alpha", "zeta"):
+            f = r / n / "gradle.properties"
+            f.write_text(f.read_text(encoding="utf-8").replace("minecraft_version=1.21.1", "minecraft_version=1.21.4"),
+                         encoding="utf-8")
+        rel = "https://github.com/owner/examplelib/releases/download/examplelib-1.1-mc1.21.4"
+        (r / ".port/1.21.4").mkdir(parents=True)
+        (r / f".port/1.21.4/{BRANCH_PROPS}").write_text(
+            "parent=neoforge-1.21.1\nport_branch=neoforge-1.21.1\n"
+            "substitute.com.example\\:examplelib=com.example:examplelib:1.0-mc1.21.4\n"
+            f"port_jar.com.example\\:examplelib={rel}/examplelib-1.1.jar {'a' * 64}\n"
+            "substitute.com.example\\:examplelib-core=com.example:examplelib-core:1.0-mc1.21.4\n"
+            f"port_jar.com.example\\:examplelib-core={rel}/examplelib-core-1.1.jar {'b' * 64}\n", encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "1.21.4")
+        said, ran = [], []
+        rc = ci(r, "1.21.4", None, run=True, say=said.append, kit_version=7, tags_of=lambda s_: [],
+                runner=lambda c: (ran.append(c), 0)[1])
+        dep = lambda c: [c[i + 1] for i in range(len(c) - 1) if c[i] == "--dep-jar"]
+        arg = lambda c, k: c[c.index(k) + 1]
+        expect(rc == 0 and len(ran) == 2 and [arg(c, "--mod-dir") for c in ran] == ["alpha", "zeta"]
+               and [arg(c, "--modid") for c in ran] == ["examplealpha", "examplezeta"]
+               and dep(ran[0]) == ["owner/examplelib@examplelib-1.1-mc1.21.4/examplelib-1.1.jar="
+                                   "com.example:examplelib:1.0-mc1.21.4"]
+               and dep(ran[1]) == ["owner/examplelib@examplelib-1.1-mc1.21.4/examplelib-core-1.1.jar="
+                                   "com.example:examplelib-core:1.0-mc1.21.4"]
+               and all(arg(c, "--also-path") == "shared" and c[-4:] == ["--kit-version", "7", "--branch", "neoforge-1.21.4"]
+                       for c in ran)
+               and sum("python3 tools/port-ci.py" in l for l in said) == 2,
+               f"ci --run on a version branch of several mods: each mod's workflow, no --modid: {said} {ran}")
+        said.clear()
+        expect(ci(r, "1.21.4", None, say=said.append, kit_version=7, tags_of=lambda s_: []) == 0 and len(ci_mods_args(r, "1.21.4")) == 2,
+               f"ci without --run: the two commands printed: {said}")
+        # the port branch with no workflow per mod: refused, saying how to install them
+        g("checkout", "-q", "neoforge-1.21.1")
+        g("rm", "-q", ".github/workflows/port-ci-alpha.yml", ".github/workflows/port-ci-zeta.yml"); g("commit", "-qm", "none")
+        said.clear()
+        expect(ci(r, "1.21.4", None, say=said.append, kit_version=7) == 2 and "--mod-dir" in said[-1],
+               f"no workflow per mod on the port branch: refused: {said}")
+        # ci-check: each mod's workflow of the version branch read, named in the warning; ci --head reads each of the
+        # head's (here none: its workflows were removed), a one-mod branch as before (the other checks)
+        lines = ci_check(r, kit_version=10)
+        w14 = [l for l in lines if "WARNING neoforge-1.21.4" in l]
+        expect(len(w14) == 1 and "port-ci-alpha.yml: its workflow pins Port CI kit 9, older than kit 10" in w14[0]
+               and "port-ci-zeta.yml: " in w14[0] and "no .github/workflows/port-ci.yml" not in w14[0],
+               f"ci-check: every mod's workflow of a version branch: {lines}")
+        g("revert", "--no-edit", "HEAD")
+        said.clear()
+        rc = ci_head(r, None, run=False, say=said.append, kit_version=10)
+        expect(rc == 0 and sum("python3 tools/port-ci.py" in l for l in said) == 2
+               and any("port-ci-zeta.yml" in l and "--mod-dir zeta" in l and "--branch neoforge-1.21.1" in l for l in said),
+               f"ci --head: each mod's head workflow regenerated from itself: {said}")
+        hl = [l for l in ci_check(r, kit_version=10) if "(the head branch)" in l]
+        expect(len(hl) == 1 and "port-ci-alpha.yml: " in hl[0] and "port-ci-zeta.yml: " in hl[0],
+               f"ci-check: the head's every mod workflow: {hl}")
 
 
 def _check_ci_check(expect):
@@ -8161,6 +8306,7 @@ def self_check():
         _check_ab_reuse(expect)
         _check_check_done_rows(expect)
         _check_ci_check(expect)
+        _check_ci_several_mods(expect)
         _check_change_reviews(expect)
         _check_release_gate_record(expect)
         _check_ledgered_not_ok(expect)

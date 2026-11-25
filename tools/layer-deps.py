@@ -7,6 +7,7 @@
                                 [--bump DEP[=VERSION] ...] [--bump-all]
     python3 tools/layer-deps.py updates --repo DIR [--target MC] [--json]
     python3 tools/layer-deps.py library-done --target 1.21.4 (--port-checkout owner/repo=DIR | --port-release owner/repo@TAG)
+    python3 tools/layer-deps.py head-repin --repo DIR --port-release owner/repo@TAG [...] --branch neoforge-<mc>
     python3 tools/layer-deps.py --self-check
 
 A version branch (tools/fork-branches.py: branch neoforge-<t>, checked out) compiles the authors' code against another
@@ -79,6 +80,23 @@ LIBRARY FIRST
   ("Library pre-release (not done)") and the dependent's version is then not done until the library's is and the pin
   is re-resolved; a person who played the pair may still promote it, and port-publish.py publishes it only once that
   exact library release is promoted and published. A full Release, or a pre-release with red gates, is refused.
+
+A REPOSITORY OF SEVERAL MODS (no mod_id in the root gradle.properties; top-level folders that each name one, each with
+its own Port CI workflow `.github/workflows/port-ci-<NAME>.yml` from port-ci.py --mod-dir) is read whole: the sibling
+pins are the union of every mod's workflow (the same coordinate pinned differently by two of them, or a CurseForge/Modrinth
+dependency two mods' builds pin at different builds, is refused, exit 2,
+naming both), the dependencies the union of the root build.gradle (when there is one) and each mod folder's, and the
+version branch is the one every mod folder's gradle.properties names. A --dep-jar coordinate no build names (the build
+reads the jar from mavenLocal through a `${...}` version, or as a file) gets its row all the same, on every kind of
+repository: --port-release re-pins it and writes its port_jar./substitute. lines like a named one's.
+
+HEAD-REPIN (a head: a single-version fork's port branch, or a version-branch fork's head, whose library pins live in its
+workflows): `head-repin --repo DIR --port-release owner/repo@TAG --branch neoforge-<mc>` regenerates each Port CI workflow
+(port-ci.yml, or each mod's port-ci-<NAME>.yml) whose --dep-jar or --dep-jar-variant pins that library, with the asset of
+the new release that stands for the pinned one (as a version branch's resolve picks it) and its sha256 (port-ci.py
+downloads it), every other option and the kit read back as they are. Written, not committed: the round's repin-head job
+runs the fork's after_repin commands, then commits it all. Exit 2 when no workflow pins the library or the release has
+no asset for the pin.
 
 ISOLATION. A dependent never builds a sibling's checkout: --port-checkout copies the jar the checkout built and pins it
 as `port_jar_dev.` -- development only, refused by the dependent's done check.
@@ -171,6 +189,78 @@ def port_deps(workflow):
     return out
 
 
+def workflows(repo):
+    """[(path, text)] of the fork's Port CI workflows in the checkout at `repo`: its port-ci.yml, or for a repository of
+    several mods each port-ci-<NAME>.yml (tools/fork-kind.py port_ci_workflows, the list round.py reads too)."""
+    fk = _fork_kind()
+    return [(path, fk.workflow_text(repo, path)) for _n, path in fk.port_ci_workflows(repo)]
+
+
+def union_pins(repo, read):
+    """{group:artifact: value} of `read` (port_deps, workflow_pins) over every Port CI workflow of the checkout: one
+    workflow's for a one-mod repository; for a repository of several mods their union. The same coordinate pinned
+    differently by two mods' workflows raises ValueError naming both: which release is the build's cannot be told."""
+    out, where = {}, {}
+    for path, text in workflows(repo):
+        for ga, val in read(text).items():
+            if ga in out and out[ga] != val:
+                show = lambda v: (f"{v['repo']}@{v['tag']}/{v['asset']} as {v['version']}" if isinstance(v, dict)
+                                  else f"{v[1].split()[0]} as {v[0]}")
+                raise ValueError(f"{ga} is pinned differently by {where[ga]} ({show(out[ga])}) and {path} "
+                                 f"({show(val)}): pin one release of it in both workflows")
+            out.setdefault(ga, val)
+            where.setdefault(ga, path)
+    return out
+
+
+def fork_port_deps(repo):
+    """port_deps over every Port CI workflow of the checkout (union_pins)."""
+    return union_pins(repo, port_deps)
+
+
+def build_files(repo):
+    """[(path, text)] of the checkout's Gradle builds: the root build.gradle when there is one, then for a repository of
+    several mods each mod folder's build.gradle (tools/fork-kind.py mod_dirs, read from the working tree)."""
+    repo = pathlib.Path(repo)
+    rels = ["build.gradle"] + [f"{m}/build.gradle" for m in _fork_kind().mod_dirs(repo, None)]
+    return [(r, (repo / r).read_text(encoding="utf-8")) for r in rels if (repo / r).is_file()]
+
+
+def fork_gradle_deps(repo):
+    """gradle_deps over every build of the checkout (build_files), one row per group:module in build_files' order (the
+    root's, then each mod's by folder name). A CurseForge/Modrinth dependency two builds pin at different coordinates
+    raises ValueError naming both: one mod would be built and gated against a version it never asked for."""
+    out, seen = [], {}
+    for path, text in build_files(repo):
+        for d in gradle_deps(text):
+            ga = f"{d['group']}:{d['module']}"
+            if ga in seen:
+                p0, d0 = seen[ga]
+                if d["kind"] in ("curse", "modrinth") and d0["coord"] != d["coord"]:
+                    raise ValueError(f"{ga} is pinned differently by {p0} ({d0['coord']}) and {path} ({d['coord']}): pin "
+                                     "one build of it in both")
+                continue
+            seen[ga] = (path, d)
+            out.append(d)
+    return out
+
+
+def workflow_only(ports, deps):
+    """A row like gradle_deps' for each sibling port a workflow installs (`--dep-jar`) that no build names as a pinned
+    coordinate (the build reads the jar from mavenLocal through a `${...}` version, or as a file): resolve gives it a
+    port row as it gives a named one, so --port-release re-pins it too."""
+    named = {f"{d['group']}:{d['module']}" for d in deps}
+    out = []
+    for ga in sorted(ports):
+        if ga in named:
+            continue
+        g, a = ga.split(":", 1)
+        v = ports[ga]["version"]
+        out.append({"conf": "implementation", "coord": f"{ga}:{v}", "group": g, "module": a, "version": v,
+                    "kind": "maven", "workflow_only": True})
+    return out
+
+
 def pick(files, target, loader="neoforge"):
     """The build to use for `target`: files whose game versions include it exactly and whose loaders include the
     loader; newest release, else newest beta, else newest alpha. None when there is none.
@@ -207,9 +297,14 @@ def branch_target(repo, target):
     repo = pathlib.Path(repo)
     if not (repo / ".port" / target / "branch.properties").is_file():
         return False
-    gp = repo / "gradle.properties"        # read here, not through fork-branches.py: a fork's CI kit carries this file only
-    m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
-    return bool(m) and m.group(1) == target
+    def mc(gp):                            # read here, not through fork-branches.py: a fork's CI kit carries this file only
+        m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
+        return m.group(1) if m else None
+    if mc(repo / "gradle.properties"):
+        return mc(repo / "gradle.properties") == target
+    # a repository of several mods: each mod folder's gradle.properties names the version, every one this target
+    mods = _fork_kind().mod_dirs(repo, None)
+    return bool(mods) and all(mc(repo / m / "gradle.properties") == target for m in mods)
 
 
 def target_dir(repo, target):
@@ -397,8 +492,7 @@ def install_workflow_pins(repo, pin_jar=None):
     it), through install_pin. A single-version fork pins its library there, not in .port/<mc>/branch.properties; a
     workflow with no such step, or none, installs nothing. Its --dep-jar-variant legs are CI's alone. -> [(ok,
     message)], one per step."""
-    wf = pathlib.Path(repo) / ".github/workflows/port-ci.yml"
-    pins = workflow_pins(wf.read_text(encoding="utf-8") if wf.is_file() else "")
+    pins = union_pins(repo, workflow_pins)
     return [(pin_jar or install_pin)(ga, ver, val) for ga, (ver, val) in sorted(pins.items())]
 
 
@@ -654,12 +748,17 @@ def library_done(repo, co, target):
     return False, f"{co} has no version branch for {target}", []
 
 
+_FK = []
+
+
 def _fork_kind():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("fork_kind_for_layer_deps", ROOT / "tools/fork-kind.py")
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
+    if not _FK:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("fork_kind_for_layer_deps", ROOT / "tools/fork-kind.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        _FK.append(m)
+    return _FK[0]
 
 
 def _library_first(why):
@@ -810,18 +909,18 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
           "mr_id": mr_project_id, "pin_jar": install_pin, "library_done": library_done,
           "prerelease": library_prerelease, **(lookups or {})}
     pins = pins or {}
-    build = (repo / "build.gradle").read_text(encoding="utf-8")
     mpath = repo / ".github/port-install.json"
     manifest = json.loads(mpath.read_text(encoding="utf-8")) if mpath.exists() else None
     roles = manifest_roles(manifest)
-    wf = repo / ".github/workflows/port-ci.yml"
-    ports = port_deps(wf.read_text(encoding="utf-8") if wf.exists() else "")
+    ports = fork_port_deps(repo)                # every Port CI workflow: one per mod of a repository of several
+    deps = fork_gradle_deps(repo)               # the root build.gradle and each mod folder's
+    deps += workflow_only(ports, deps)          # a --dep-jar no build names: a port row all the same
     kept, bumps = kept or {}, bumps or {}
-    regs = [f"{d['group']}:{d['module']}" for d in gradle_deps(build) if d["kind"] in ("curse", "modrinth")]
+    regs = [f"{d['group']}:{d['module']}" for d in deps if d["kind"] in ("curse", "modrinth")]
     # CurseForge is asked only when some dependency is looked up (a resolve that keeps every pin needs no network)
     cf = lk["cf"]() if any(pin_choice(ga, kept, bumps)[0] in ("lookup", "bump") for ga in regs if ga not in ports) else None
     cache, ids, rows, missing_required, refused = {}, {}, [], [], []
-    for d in gradle_deps(build):
+    for d in deps:
         ga = f"{d['group']}:{d['module']}"
         row = dict(d)
         unnamed = "required" if manifest is None or d["conf"] in RUNTIME_CONFS else "build-only"
@@ -1086,10 +1185,10 @@ def cmd_resolve(a):
         print(f"layer-deps: the checkout is not version branch {a.target} (a single-version fork has nothing to resolve; "
               "its pins are build.gradle's, moved only by --bump)")
         return 2
-    build = (repo / "build.gradle").read_text(encoding="utf-8") if (repo / "build.gradle").is_file() else ""
     try:
+        fork_port_deps(repo)        # two mods' workflows pinning one library differently: refused before anything
         bumps = parse_bumps(getattr(a, "bump", []), getattr(a, "bump_all", False),
-                            [d for d in gradle_deps(build) if d["kind"] in ("curse", "modrinth")])
+                            [d for d in fork_gradle_deps(repo) if d["kind"] in ("curse", "modrinth")])
     except ValueError as e:
         print(f"layer-deps: {e}"); return 2
     checkouts = {}
@@ -2002,6 +2101,7 @@ def self_check():
            + "a" * 64 in blk2, f"pin line: {blk2}")
     _check_pins_and_bumps(expect)
     _check_install_pins(expect)
+    _check_several_mods(expect)
     if bad:
         print("layer-deps self-check: FAIL\n  " + "\n  ".join(bad))
         return 1
@@ -2308,6 +2408,184 @@ DEP_JAR_STEP = (
     "\"$HOME/.m2/repository/com/example/examplelib/2.0/examplelib-2.0.pom\"")
 
 
+def several_mods_fixture(root, mc, lib_tag="examplelib-1.0-mc1.21.1", zeta_tag=None, sha_of=None):
+    """A repository of two mods (alpha/, zeta/, a shared/ folder; no mod_id at the root) whose Port CI workflows
+    port-ci-alpha.yml and port-ci-zeta.yml each --dep-jar a jar of owner/examplelib's release: alpha's named in its
+    build.gradle, zeta's (another artifact of the release) named by no build -- a workflow-only pin. Also used by
+    tools/round.py's and tools/fork-branches.py's self-checks."""
+    root = pathlib.Path(root)
+    pc = _port_ci()
+    sha_of = sha_of or (lambda url: hashlib.sha256(url.encode("utf-8")).hexdigest())
+    w = lambda rel, t: ((root / rel).parent.mkdir(parents=True, exist_ok=True), (root / rel).write_text(t, encoding="utf-8"))
+    w("gradle.properties", "org.gradle.jvmargs=-Xmx2G\n")
+    w("shared/level.gradle", "// shared\n")
+    specs = {"alpha": f"owner/examplelib@{lib_tag}/examplelib-1.0.jar=com.example:examplelib:1.0",
+             "zeta": f"owner/examplelib@{zeta_tag or lib_tag}/examplelib-core-1.0.jar=com.example:examplelib-core:1.0"}
+    for n in ("alpha", "zeta"):
+        w(f"{n}/gradle.properties", f"mod_id=example{n}\nmod_version=0.1.0\nminecraft_version={mc}\nneo_version=21.1.1\n"
+                                    "lib_version=1.0\n")
+        w(f"{n}/build.gradle", "apply from: '../shared/level.gradle'\ndependencies {\n"
+          + ('    implementation "com.example:examplelib:1.0"\n    implementation "curse.maven:somelib-111:999"\n' if n == "alpha"
+             else '    implementation "com.example:examplelib-core:${lib_version}"\n') + "}\n")
+        w(f".github/workflows/port-ci-{n}.yml",
+          f'name: Port CI {n}\non:\n  push:\n    paths: ["{n}/**", "shared/**", ".github/workflows/port-ci-{n}.yml"]\n'
+          "jobs:\n  gates:\n    steps:\n"
+          f'      - run: curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" https://example.invalid/port-ci-kit-v9/port-ci-kit-v9.tar.gz\n'
+          f'          echo "{"a" * 64}  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -\n'
+          + pc.dep_jars([specs[n]], sha_of=sha_of) + "\n"
+          f'      - run: python3 .port-tools/tools/ci-gates.py --repo {n} --modid "example{n}" --gatec "launch,spawn"\n')
+    w(".github/workflows/ci.yml", "name: the repository's own CI\n")
+    return specs
+
+
+def _check_several_mods(expect):
+    """A REPOSITORY OF SEVERAL MODS (#274 C2): every reader takes the union of the mods' workflows and builds; the same
+    coordinate pinned differently is refused naming both workflows; resolve --port-release re-pins a workflow-only pin
+    like a named one; head-repin regenerates each mod's workflow; a one-mod workflow-only pin gets its row too."""
+    import contextlib, io
+    with tempfile.TemporaryDirectory() as td:
+        m = pathlib.Path(td) / "multi"
+        several_mods_fixture(m, "1.21.4")
+        expect(sorted(fork_port_deps(m)) == ["com.example:examplelib", "com.example:examplelib-core"],
+               f"the pins: the union of both mods' workflows: {sorted(fork_port_deps(m))}")
+        expect([p_ for p_, _t in build_files(m)] == ["alpha/build.gradle", "zeta/build.gradle"]
+               and [f"{d['group']}:{d['module']}" for d in fork_gradle_deps(m)] == ["com.example:examplelib",
+                                                                                     "curse.maven:somelib-111"],
+               f"the builds: each mod folder's (no root build.gradle): {build_files(m)}")
+        expect([r["module"] for r in workflow_only(fork_port_deps(m), fork_gradle_deps(m))] == ["examplelib-core"],
+               "zeta's --dep-jar no build names: a workflow-only row")
+        (m / ".port/1.21.4").mkdir(parents=True)
+        (m / ".port/1.21.4/branch.properties").write_text("parent=neoforge-1.21.1\n", encoding="utf-8")
+        expect(branch_target(m, "1.21.4") and not branch_target(m, "1.21.5"),
+               "a version branch of several mods: the version every mod folder names")
+        # resolve --port-release: both pins re-pinned through resolve_port (the release's asset list, the download and
+        # its sha256), the workflow-only one exactly as the named one
+        G, saved = globals(), {k: globals()[k] for k in ("release_assets", "_get")}
+        rel = ("examplelib-1.1-mc1.21.4", ["examplelib-1.1.jar", "examplelib-core-1.1.jar", "examplelib-1.1-sources.jar"])
+        G["release_assets"] = lambda repo, tag, get=None: (
+            [(n, f"https://github.com/{repo}/releases/download/{tag}/{n}") for n in rel[1]], None)
+        G["_get"] = lambda url, headers=None: f"jar at {url}".encode("utf-8")
+        old_m2 = os.environ.get("MMVU_M2_REPO")
+        os.environ["MMVU_M2_REPO"] = str(pathlib.Path(td) / "m2")
+        try:
+            lk = {"cf": lambda: None, "library_done": lambda r, co, t: (True, "fake done", []),
+                  "curse": lambda d, t, cf, c: {"to": f"maven.modrinth:{d['module']}:v{t}", "source": "fake"}}
+            rows, stop = resolve(m, "1.21.4", {"owner/examplelib": rel[0]}, lk)
+            by = {r["module"]: r for r in rows}
+            expect(stop is None and by["examplelib-core"].get("to") == "com.example:examplelib-core:1.0-mc1.21.4"
+                   and by["examplelib-core"]["role"] == "required"
+                   and by["examplelib-core"]["pin"].startswith(f"https://github.com/owner/examplelib/releases/download/"
+                                                               f"{rel[0]}/examplelib-core-1.1.jar ")
+                   and by["examplelib"]["pin"].split()[0].endswith("/examplelib-1.1.jar") and "somelib-111" in by,
+                   f"--port-release: the workflow-only pin re-pinned like the named one: {stop} {rows}")
+            write(m, "1.21.4", rows, stop)
+            props = (m / ".port/1.21.4/branch.properties").read_text(encoding="utf-8")
+            sha = hashlib.sha256(f"jar at https://github.com/owner/examplelib/releases/download/{rel[0]}/"
+                                 "examplelib-core-1.1.jar".encode("utf-8")).hexdigest()
+            expect("substitute.com.example\\:examplelib-core=com.example:examplelib-core:1.0-mc1.21.4\n" in props
+                   and f"port_jar.com.example\\:examplelib-core=https://github.com/owner/examplelib/releases/download/"
+                       f"{rel[0]}/examplelib-core-1.1.jar {sha}\n" in props
+                   and "port_jar.com.example\\:examplelib=" in props,
+                   f"branch.properties: port_jar./substitute. for the workflow-only pin as for the named one: {props}")
+            expect(sorted(sibling_substitutes(m, "1.21.4")) == ["com.example:examplelib", "com.example:examplelib-core"],
+                   f"sibling_substitutes: both mods' siblings: {sibling_substitutes(m, '1.21.4')}")
+        finally:
+            G.update(saved)
+            if old_m2 is None:
+                os.environ.pop("MMVU_M2_REPO", None)
+            else:
+                os.environ["MMVU_M2_REPO"] = old_m2
+        got = []
+        install_workflow_pins(m, pin_jar=lambda ga, v, val: (got.append((ga, v)), (True, "fake"))[1])
+        expect(got == [("com.example:examplelib", "1.0"), ("com.example:examplelib-core", "1.0")],
+               f"install_workflow_pins: every mod's pins: {got}")
+        # the same coordinate pinned differently by two mods' workflows: refused, naming both
+        c = pathlib.Path(td) / "conflict"
+        several_mods_fixture(c, "1.21.4")
+        zf = c / ".github/workflows/port-ci-zeta.yml"
+        zf.write_text(zf.read_text(encoding="utf-8").replace("examplelib-core", "examplelib").replace("lib-1.0-mc", "lib-0.9-mc"),
+                      encoding="utf-8")
+        try:
+            fork_port_deps(c)
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        expect("port-ci-alpha.yml" in err and "port-ci-zeta.yml" in err and "com.example:examplelib" in err,
+               f"one coordinate pinned differently by two mods: an error naming both workflows: {err!r}")
+        (c / ".port/1.21.4").mkdir(parents=True)
+        (c / ".port/1.21.4/branch.properties").write_text("x=1\n", encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_resolve(argparse.Namespace(repo=str(c), target="1.21.4", port_checkout=[], port_release=[],
+                                                dry_run=True, bump=[], bump_all=False))
+        expect(rc == 2 and "port-ci-zeta.yml" in buf.getvalue(), f"resolve refuses it (exit 2): {rc} {buf.getvalue()}")
+        # a CurseForge/Modrinth dependency two mods' builds pin at different files: refused, naming both builds; the
+        # same file in both is one row
+        r_ = pathlib.Path(td) / "registry"
+        several_mods_fixture(r_, "1.21.4")
+        zb = r_ / "zeta/build.gradle"
+        zb.write_text(zb.read_text(encoding="utf-8").replace("dependencies {\n", "dependencies {\n    implementation "
+                                                             "\"curse.maven:somelib-111:999\"\n"), encoding="utf-8")
+        expect([f"{d['group']}:{d['module']}" for d in fork_gradle_deps(r_)].count("curse.maven:somelib-111") == 1,
+               "the same registry build pinned by two mods: one row, no error")
+        zb.write_text(zb.read_text(encoding="utf-8").replace("somelib-111:999", "somelib-111:998"), encoding="utf-8")
+        try:
+            fork_gradle_deps(r_)
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        expect("alpha/build.gradle" in err and "zeta/build.gradle" in err and "curse.maven:somelib-111" in err
+               and ":999" in err and ":998" in err,
+               f"a registry dependency two mods pin at different builds: an error naming both builds and both: {err!r}")
+        (r_ / ".port/1.21.4").mkdir(parents=True)
+        (r_ / ".port/1.21.4/branch.properties").write_text("x=1\n", encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_resolve(argparse.Namespace(repo=str(r_), target="1.21.4", port_checkout=[], port_release=[],
+                                                dry_run=True, bump=[], bump_all=False))
+        expect(rc == 2 and "zeta/build.gradle" in buf.getvalue(), f"resolve refuses it (exit 2): {rc} {buf.getvalue()}")
+        # head-repin: each mod's workflow that pins the library regenerated with its new release's assets
+        h = pathlib.Path(td) / "head"
+        several_mods_fixture(h, "1.21.1")
+        (h / ".github/workflows/port-ci-other.yml").write_text("name: the repository's own\n", encoding="utf-8")
+        cmds, out = [], []
+        assets = lambda repo, tag: (["examplelib-1.1.jar", "examplelib-core-1.1.jar", "examplelib-1.1-sources.jar"], None)
+        rc = head_repin(h, {"owner/examplelib": "examplelib-1.1-mc1.21.1"}, "neoforge-1.21.1", assets,
+                        runner=lambda cmd: (cmds.append(cmd), 0)[1], say=out.append)
+        dep = lambda cmd: [cmd[i + 1] for i in range(len(cmd) - 1) if cmd[i] == "--dep-jar"]
+        expect(rc == 0 and len(cmds) == 2
+               and [c_[c_.index("--mod-dir") + 1] for c_ in cmds] == ["alpha", "zeta"]
+               and dep(cmds[0]) == ["owner/examplelib@examplelib-1.1-mc1.21.1/examplelib-1.1.jar=com.example:examplelib:1.0"]
+               and dep(cmds[1]) == ["owner/examplelib@examplelib-1.1-mc1.21.1/examplelib-core-1.1.jar="
+                                    "com.example:examplelib-core:1.0"]
+               and all(c_[-3:] == ["--branch", "neoforge-1.21.1", "--no-commit"] and c_[c_.index("--kit-version") + 1] == "9"
+                       and "--also-path" in c_ for c_ in cmds),
+               f"head-repin: each mod's workflow, its own options and kit, the new release's asset: {rc} {cmds} {out}")
+        cmds.clear()
+        rc = head_repin(h, {"owner/other": "other-1.0-mc1.21.1"}, "neoforge-1.21.1", assets,
+                        runner=lambda cmd: (cmds.append(cmd), 0)[1], say=out.append)
+        expect(rc == 2 and not cmds and "owner/other" in out[-1], f"a library no workflow pins: exit 2: {out[-1:]}")
+        rc = head_repin(h, {"owner/examplelib": "examplelib-1.1-mc1.21.1"}, "neoforge-1.21.1",
+                        lambda r, t: (["other-1.1.jar"], None), runner=lambda cmd: (cmds.append(cmd), 0)[1], say=out.append)
+        expect(rc == 2 and not cmds and "no asset" in out[-1], f"a release with no asset for the pin: exit 2: {out[-1:]}")
+        # one mod: a workflow-only pin gets its row too; the head's one workflow regenerated as before
+        one = pathlib.Path(td) / "one"
+        (one / ".github/workflows").mkdir(parents=True)
+        (one / "gradle.properties").write_text("mod_id=examplemod\nminecraft_version=1.21.1\nneo_version=21.1.1\n",
+                                               encoding="utf-8")
+        (one / "build.gradle").write_text('dependencies {\n    implementation files("libs/x.jar")\n}\n', encoding="utf-8")
+        (one / ".github/workflows/port-ci.yml").write_text(
+            (h / ".github/workflows/port-ci-zeta.yml").read_text(encoding="utf-8").replace("--repo zeta", "--repo ."),
+            encoding="utf-8")
+        expect([r["module"] for r in workflow_only(fork_port_deps(one), fork_gradle_deps(one))] == ["examplelib-core"],
+               "one mod: a --dep-jar no build names gets its row")
+        cmds.clear()
+        rc = head_repin(one, {"owner/examplelib": "examplelib-1.1-mc1.21.1"}, "neoforge-1.21.1", assets,
+                        runner=lambda cmd: (cmds.append(cmd), 0)[1], say=out.append)
+        expect(rc == 0 and len(cmds) == 1 and "--mod-dir" not in cmds[0] and cmds[0][cmds[0].index("--modid") + 1] == "examplezeta",
+               f"one mod: its port-ci.yml regenerated alone: {cmds}")
+
+
 def _check_install_pins(expect):
     """install_pins: the version's pins into ~/.m2 (a stand-in download, a temporary home), sha256-checked, a jar there
     with that sha256 never fetched again; a single-version fork with pins gets them, one without is untouched."""
@@ -2422,15 +2700,18 @@ SUBSTITUTE = re.compile(r"(?m)^substitute\.(.+?)=(\S+)\s*$")
 
 def sibling_substitutes(repo, target):
     """{group:module: substitute coordinate} for each sibling port the target's layer-deps block swaps to that port's
-    per-target jar: a coordinate the fork's port-ci.yml installs from a sibling's release (`--dep-jar`), substituted with
-    version <v>-mc<target> (resolve_port's form). A fork with no sibling port, or a target with no block: {}."""
+    per-target jar: a coordinate the fork's port-ci.yml (each mod's port-ci-<NAME>.yml in a repository of several mods)
+    installs from a sibling's release (`--dep-jar`), substituted with version <v>-mc<target> (resolve_port's form). A
+    fork with no sibling port, or a target with no block: {}."""
     repo = pathlib.Path(repo)
     tp = props_file(repo, target)
     text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
     if BEGIN not in text or END not in text:
         return {}
-    wf = repo / ".github/workflows/port-ci.yml"
-    ports = port_deps(wf.read_text(encoding="utf-8") if wf.is_file() else "")
+    try:
+        ports = fork_port_deps(repo)
+    except ValueError:
+        ports = {}              # two mods pin a library differently: resolve says so; no sibling is booted on a guess
     out = {}
     for k, coord in SUBSTITUTE.findall(text[text.index(BEGIN):text.index(END)]):
         ga = k.replace("\\:", ":")
@@ -2452,6 +2733,112 @@ def sibling_jars(repo, target, home=None):
         if jar.is_file():
             out.append(str(jar))
     return out
+
+
+# ---------------------------------------------------------------- a head's re-pin (single-version: the workflow pins)
+
+_PC = []
+
+
+def _port_ci():
+    if not _PC:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("port_ci_for_layer_deps", ROOT / "tools/port-ci.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        _PC.append(m)
+    return _PC[0]
+
+
+def head_repin_args(rec, releases, assets_of, mc):
+    """A head workflow's read-back port-ci.py arguments `rec` (port-ci.py recover_args) with each --dep-jar and
+    --dep-jar-variant of a released library moved to its new release: `releases` {owner/repo (lower case): tag}; the
+    asset is the one of that release standing for the pinned one (pick_release_asset: the same name and variant, as
+    resolve_port reads a release), the coordinate kept (the build names it). assets_of(repo, tag) -> ([names], None) or
+    (None, why). -> (args, [(old spec, new spec)]); ValueError when a release has no asset that stands for the pin."""
+    out, moved, i = [], [], 0
+    while i < len(rec):
+        if rec[i] in ("--dep-jar", "--dep-jar-variant") and i + 1 < len(rec):
+            spec = rec[i + 1]
+            m = re.fullmatch(r"([\w.-]+/[\w.-]+)@([^/=]+)/([^/=]+\.jar)=(.+)", spec)
+            tag = releases.get(m.group(1).lower()) if m else None
+            if tag:
+                names, why = assets_of(m.group(1), tag)
+                if names is None:
+                    raise ValueError(f"{m.group(1)}'s release {tag}: {why}")
+                name, why = pick_release_asset(names, m.group(3), mc)
+                if not name:
+                    raise ValueError(f"{m.group(1)}'s release {tag}: {why}")
+                new = f"{m.group(1)}@{tag}/{name}={m.group(4)}"
+                if new != spec:
+                    moved.append((spec, new))
+                spec = new
+            out += [rec[i], spec]
+            i += 2
+            continue
+        out.append(rec[i])
+        i += 1
+    return out, moved
+
+
+def head_repin(repo, releases, branch, assets_of=None, runner=None, say=print):
+    """`head-repin`: every Port CI workflow of the head checkout `repo` (port-ci.yml, or each mod's port-ci-<NAME>.yml
+    of a repository of several mods) whose --dep-jar pins a released library regenerated with that library's new
+    release (head_repin_args), its other options and its kit read back as they are; port-ci.py downloads the new
+    asset and pins its sha256, as it pins every --dep-jar. Written, not committed: the round's repin-head job runs the
+    fork's after_repin commands and commits it all at once. -> 0, or 2 (nothing pins a named library; a release with
+    no asset for the pin; two mods' workflows pinning one coordinate differently)."""
+    repo = pathlib.Path(repo)
+    try:
+        fork_port_deps(repo)
+    except ValueError as e:
+        say(f"layer-deps: head-repin: {e}"); return 2
+    pc = _port_ci()
+    assets_of = assets_of or (lambda r, t: (lambda a: ([n for n, _u in a[0]] if a[0] is not None else None, a[1]))(
+        release_assets(r, t)))
+    hit, rc = set(), 0
+    for path, text in workflows(repo):
+        try:
+            rec = pc.recover_args(text)
+        except SystemExit as e:
+            say(f"layer-deps: head-repin: {path} cannot be read back: {e}"); return 2
+        mod_dir = rec[rec.index("--mod-dir") + 1] if "--mod-dir" in rec else ""
+        gp = repo / mod_dir / "gradle.properties"
+        mc = (re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) or [None, ""])[1] \
+            if gp.is_file() else ""
+        try:
+            args, moved = head_repin_args(rec, releases, assets_of, mc)
+        except ValueError as e:
+            say(f"layer-deps: head-repin: {path}: {e}"); return 2
+        hit |= {pd["repo"].lower() for pd in port_deps(text).values() if pd["repo"].lower() in releases}
+        if not moved:
+            continue
+        for old, new in moved:
+            say(f"layer-deps: head-repin: {path}: {old} -> {new}")
+        cmd = [sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(repo), *args, "--branch", branch, "--no-commit"]
+        rc = (runner or (lambda c: subprocess.run(c).returncode))(cmd)
+        if rc:
+            say(f"layer-deps: head-repin: port-ci.py exit {rc} regenerating {path}"); return rc
+    missing = sorted(set(releases) - hit)
+    if missing:
+        say("layer-deps: head-repin: no Port CI workflow of the checkout pins a release of " + ", ".join(missing)
+            + " (--dep-jar): nothing to re-pin there"); return 2
+    say("layer-deps: head-repin: written, not committed (run the fork's after_repin commands, then commit it all)")
+    return 0
+
+
+def cmd_head_repin(a):
+    repo = pathlib.Path(a.repo).resolve()
+    why = _fork_kind().refuse_layer(repo, "layer-deps")
+    if why:
+        print(why); return 2
+    releases = {}
+    for s_ in a.port_release:
+        k, _, v = s_.partition("@")
+        if not v or not re.fullmatch(r"[\w.-]+/[\w.-]+", k) or not re.fullmatch(r"[\w.+-]+", v):
+            print(f"layer-deps: --port-release must be owner/repo@TAG, got {s_!r}"); return 2
+        releases[k.lower()] = v
+    return head_repin(repo, releases, a.branch)
 
 
 def cmd_library_done(a):
@@ -2498,6 +2885,13 @@ def main():
                    "Minecraft line): what a ticked bump's build needs, as the weekly plan names it")
     r.add_argument("--allow-undone-library", action="store_true",
                    help="development only: build against a --port-checkout sibling whose target is not done (recorded in DEPS.md)")
+    hr = sub.add_parser("head-repin", help="a head (single-version) checkout: regenerate each Port CI workflow whose "
+                        "--dep-jar pins a released library with that release (written, not committed)")
+    hr.add_argument("--repo", required=True)
+    hr.add_argument("--port-release", action="append", required=True, metavar="OWNER/REPO@TAG",
+                    help="the library's new release; repeat for several libraries")
+    hr.add_argument("--branch", required=True, help="the head branch the workflow runs on (neoforge-<mc>), never the "
+                    "work branch checked out")
     ld = sub.add_parser("library-done", help="is a sibling library's target done? exit 0 yes, 18 no")
     ld.add_argument("--target", required=True)
     ld.add_argument("--port-checkout", help="owner/repo=DIR")
@@ -2515,6 +2909,8 @@ def main():
         return cmd_updates(a)
     if a.cmd == "library-done":
         return cmd_library_done(a)
+    if a.cmd == "head-repin":
+        return cmd_head_repin(a)
     ap.print_help()
     return 2
 

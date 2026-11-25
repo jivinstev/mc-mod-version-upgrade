@@ -9,7 +9,8 @@ Wednesday. Both are made only by the keep-current skill's setup, which runs `ins
                                          [--ledger-issues REPO=N[,N]] [--depends-on REPO=REPO[,REPO]]
                                          [--replace-task NAME ...] [--trailer "K: V" ...]
                                          [--migrator-repo OWNER/REPO] [--migrator-sha SHA] [--default-branch-too]
-                                         [--release-bump [OWNER/REPO=]FILE:KEY ...] [--keep-existing] [--no-commit] [--print]
+                                         [--release-bump [OWNER/REPO=]FILE:KEY ...] [--after-repin REPO="CMD" ...]
+                                         [--keep-existing] [--no-commit] [--print]
     python3 tools/weekly-plan.py round-task (--repo DIR | --config FILE) [--existing NAME ...] [--migrator-repo O/R]
     python3 tools/weekly-plan.py fetch    --config FILE --repo DIR --work DIR      # the workflow's steps, in order
     python3 tools/weekly-plan.py cascade  --work DIR
@@ -36,6 +37,14 @@ the take ships. Stored as the fork's `release_bump`. A repository of SEVERAL MOD
 file (alpha/gradle.properties:mod_version): a mod's version moves only when the take changes its folder or a shared path
 (one in no mod folder), and every bump of the round is one PR. A dependent named with OWNER/REPO= must take its own
 repository (`=https://github.com/OWNER/REPO.git#main` on its --fork).
+
+--after-repin REPO="CMD" (repeatable, run in the order given): a command of the fork's own the round runs in its
+checkout after every re-pin of it to a library's new release -- the version branches' (round.py repin) and the head's
+(the repin-head job, whose task names each command) -- and before that re-pin's commit, so files the repository derives
+from its pins (e.g. ["python3", "scripts/write-pins.py", "--write"]) land in the same commit; a non-zero exit stops the
+re-pin, naming the command. CMD is split as a shell would (shlex) and run without a shell. It is the repository's own
+code run in its own checkout: the same trust as its Gradle build, which the round runs anyway. Stored per fork as
+`after_repin` (a list of argv lists); a re-run that does not re-pass it warns, or keeps it with --keep-existing.
 
 `.github/weekly-plan.json` on the first fork's head branch is the fork set's ONLY source for the round: per fork its
 head, role (library / dependent), the authors' upstream URL and branch, `depends_on` (a dependent: the library unless
@@ -126,7 +135,7 @@ again at its start against current MMVU (round.py init).
 Exit codes: 0 ok; 1 a step failed (the workflow run fails, no issue is opened); 2 bad input; 3 the head branch is not
 the default branch (install). Standard library only.
 """
-import argparse, contextlib, copy, datetime, io, json, os, pathlib, re, subprocess, sys, tempfile
+import argparse, contextlib, copy, datetime, io, json, os, pathlib, re, shlex, subprocess, sys, tempfile
 
 TOOLS = pathlib.Path(__file__).resolve().parent
 ROOT = TOOLS.parent
@@ -565,6 +574,7 @@ def install(a, say=print, repo_info=None):
     info = repo_info or (lambda s: k.gh_api(f"/repos/{s}"))
     resolve_upstreams(forks, info, {forks[0]["repo"]} if _first_is_own(repo, forks[0]["repo"], info) else set())
     rbump = release_bumps_of(a, repo, forks)
+    arepin = after_repins_of(a, forks)
     owner_login = forks[0]["repo"].split("/")[0]
     otype = a.owner_type
     old, warns = None, []
@@ -617,9 +627,21 @@ def install(a, say=print, repo_info=None):
             again = " ".join(f"--release-bump {of['repo']}={b['file']}:{b['key']}" for b in bumps_of(old_rb))
             print(f"weekly-plan: warning: the existing {CONFIG} has a release bump for {of['repo']}, which this run "
                   f"drops: re-pass {again}, or rerun with --keep-existing", file=sys.stderr)
+    for of in ((old or {}).get("forks") or []) if isinstance(old, dict) else []:
+        old_ar = of.get("after_repin")
+        if not old_ar or of.get("repo") in arepin or of.get("repo") not in {f["repo"] for f in forks}:
+            continue
+        if a.keep_existing:          # like the per-fork values: kept with --keep-existing, else warned about
+            arepin[of["repo"]] = old_ar
+        else:
+            again = " ".join(f"--after-repin {of['repo']}={shlex.quote(shlex.join(c))}" for c in old_ar)
+            print(f"weekly-plan: warning: the existing {CONFIG} has after_repin commands for {of['repo']}, which this "
+                  f"run drops: re-pass {again}, or rerun with --keep-existing", file=sys.stderr)
     for f in cfg["forks"]:
         if f["repo"] in rbump:
             f["release_bump"] = rbump[f["repo"]]
+        if f["repo"] in arepin:
+            f["after_repin"] = arepin[f["repo"]]
     cfg_text = json.dumps(cfg, indent=2, sort_keys=True) + "\n"
     if a.print:
         say(wf, end="")
@@ -713,6 +735,27 @@ def release_bumps_of(a, repo, forks):
             raise Fail(f"--release-bump: {f['repo']} {rb['file']} given twice")
         have.append(rb)
     return {k: v[0] if len(v) == 1 else sorted(v, key=lambda b: b["file"]) for k, v in by.items()}
+
+
+def after_repins_of(a, forks):
+    """install --after-repin REPO="CMD" (repeatable; run in the order given) -> {repo: [argv, ...]}: the fork's own
+    command the round runs in its checkout after each re-pin and before that re-pin's commit (its derived pin files then
+    land in the same commit). CMD is split as a shell would (shlex), never run through a shell."""
+    names = {f["repo"].lower(): f["repo"] for f in forks}
+    out = {}
+    for spec in getattr(a, "after_repin", None) or []:
+        who, eq, cmd = spec.partition("=")
+        repo = names.get(who.strip().lower())
+        if not eq or not repo:
+            raise Fail(f"--after-repin {spec!r}: REPO=\"CMD\" with REPO one of the forks ({', '.join(names.values())})")
+        try:
+            argv = shlex.split(cmd)
+        except ValueError as e:
+            raise Fail(f"--after-repin {spec!r}: {e}")
+        if not argv:
+            raise Fail(f"--after-repin {spec!r}: no command")
+        out.setdefault(repo, []).append(argv)
+    return out
 
 
 def norm_repo_url(u):
@@ -1739,6 +1782,25 @@ def self_check():
                and "owned (the author's own mod): its upstream is its own default branch main" in o,
                f"install on an owned head: its own default branch is its upstream, no fork parent asked: {rc} {o}")
         gq(fork, "rm", "-q", ".github/port-publish.json"); gq(fork, "commit", "-qm", "a fork again")
+        # --after-repin: per fork, shlex-split, in order; dropped with a warning naming the flag, kept with --keep-existing
+        par = lambda s_: {"parent": {"clone_url": "https://github.com/a/lib.git", "default_branch": "main"}}
+        ar = ["--after-repin", "o/lib=python3 scripts/write-pins.py --write", "--after-repin", 'O/LIB=echo "a b"']
+        rc, o = inst("--plan-owner", "someone", *ar, argv=argv2, info=par)
+        c6 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
+        expect(rc == 0 and c6["forks"][0]["after_repin"] == [["python3", "scripts/write-pins.py", "--write"], ["echo", "a b"]],  # exec-ok: fixture data (a key/argv in a test), not a program run
+               f"--after-repin: stored per fork as argv lists, in order: {rc} {o} {c6['forks'][0]}")
+        rc, o = inst("--plan-owner", "someone", argv=argv2, info=par)
+        c7 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
+        expect(rc == 0 and "after_repin" not in c7["forks"][0] and "re-pass --after-repin o/lib=" in o
+               and "write-pins.py --write" in o, f"a re-run without it: dropped, warned about with the flag: {o}")
+        inst("--plan-owner", "someone", *ar, argv=argv2, info=par)
+        rc, o = inst("--plan-owner", "someone", "--keep-existing", argv=argv2, info=par)
+        expect(rc == 0 and json.loads((fork / CONFIG).read_text(encoding="utf-8"))["forks"][0]["after_repin"]
+               == c6["forks"][0]["after_repin"], f"--keep-existing keeps it: {o}")
+        for spec in ("o/other=x", "o/lib=", "x", 'o/lib=echo "open'):
+            rc, o = inst("--plan-owner", "someone", "--after-repin", spec, argv=argv2, info=par)
+            expect(rc == 2 and "--after-repin" in o, f"--after-repin {spec!r} refused: {rc} {o}")
+        inst("--plan-owner", "someone", argv=argv2, info=par)
         expect(c3["migrator_sha"] == "a" * 40, f"install records the pinned migrator_sha in the config: {c3}")
         # a re-run drops what it is not given (the default, unchanged) but warns for each; --keep-existing keeps it.
         # A three-fork set: a dependent with non-default depends_on and ledger issues
@@ -2185,6 +2247,10 @@ def build_parser():
                    help="an owned fork (default: the first): bump KEY in FILE (gradle.properties:mod_version) on the "
                         "default branch before the round takes it, when it names no version past the head's; "
                         "repeatable, one per mod's version file in a repository of several mods")
+    p.add_argument("--after-repin", action="append", metavar='REPO="CMD"',
+                   help="a command the round runs in REPO's checkout after each re-pin of it (head and version), before "
+                        "that re-pin's commit (shlex-split; repeatable, run in order): the repository's own derived pin "
+                        "files land in the same commit")
     p.add_argument("--default-branch-too", action="store_true",
                    help="also commit the workflow to the default branch when that is not the head branch")
     p.add_argument("--keep-existing", action="store_true",
