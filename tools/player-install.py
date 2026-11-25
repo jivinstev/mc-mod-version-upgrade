@@ -518,7 +518,7 @@ def ensure_game(src, plat, mcdir, mc, neo, dry, log=print, full=False):
 
 def ensure_python(ask, dry, log=print):
     """--with python: Python 3 on the PATH for the game. Installs Python 3.12 for this user only (Windows: winget)."""
-    for c in (["python3"], ["python"], ["py", "-3"]):
+    for c in (["python3"], ["python"], ["py", "-3"]):   # exec-ok: is a Python on the PATH for the GAME, not this script
         try:
             r = subprocess.run(c + ["-c", "import sys; print(sys.version.split()[0])"], capture_output=True, text=True,
                                encoding="utf-8", timeout=30)
@@ -676,7 +676,7 @@ def make_parser():
     ap.add_argument("--yes", "-y", action="store_true", help="take every default, ask nothing")
     ap.add_argument("--dry-run", action="store_true", help="show the plan, write nothing")
     ap.add_argument("--list", action="store_true", help="list released mods and Minecraft versions")
-    ap.add_argument("--with", dest="with_", action="append", choices=["python"], help="optional extras")
+    ap.add_argument("--with", dest="with_", action="append", choices=["python"], help="optional extras")   # exec-ok: an option name
     ap.add_argument("--boot-test", action="store_true", help="after installing, boot it headless and check the mods load")
     ap.add_argument("--self-check", action="store_true", help=argparse.SUPPRESS)
     return ap
