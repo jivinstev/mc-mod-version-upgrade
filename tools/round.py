@@ -123,7 +123,7 @@ version's merge (it is a finding on the library version, not a reopen later).
 Exit codes: 0 ok (drive: progress made or the round done); 3 nothing can run (blocked items listed); 2 bad input.
 Standard library only.
 """
-import argparse, concurrent.futures, contextlib, datetime, hashlib, importlib.util, io, json, os, pathlib, re, shlex
+import argparse, concurrent.futures, contextlib, datetime, fnmatch, hashlib, importlib.util, io, json, os, pathlib, re, shlex
 import shutil, stat, subprocess, sys, tempfile, threading, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -510,6 +510,11 @@ def build_queue(frozen, cfg, forks, date):
         # the fork's own commands after each re-pin (weekly-plan.py install --after-repin), before that re-pin's commit
         ar = next((c.get("after_repin") for c in cfg.get("forks", []) if c.get("repo") == slug), None)
         arp = {"after_repin": ar} if ar else {}
+        # the fork's own commands after a merge into a version branch (weekly-plan.py install --post-merge, #325): a
+        # vendored per-version component re-vendored at each version; never reached on a single-version fork, which
+        # has no merge-ups
+        pm = next((c.get("post_merge") for c in cfg.get("forks", []) if c.get("repo") == slug), None)
+        pmp = {"post_merge": pm} if pm else {}
         casc = f.get("cascade") or {}
         head_cascade = f.get("head_cascade", True)
         authors_up = bool(f.get("take_authors")) and head_cascade
@@ -599,7 +604,8 @@ def build_queue(frozen, cfg, forks, date):
                 # port_taken, so it holds none of the authors' untaken code) is carried up with --port-ref; the versions
                 # above take it by their own merge-ups (keep-current, "A fork with version branches" step 2)
                 cascade_of[v] = addv("mergeup", extra={"from": F["head"], "port_refs": [f"fix/{x['id']}" for x in at[base]],
-                                                       "why": "the head's fixes on their fix/<ID> branches (no authors' code)"})
+                                                       "why": "the head's fixes on their fix/<ID> branches (no authors' code)",
+                                                       **pmp})
             elif k == 0 and not head_cascade:
                 cascade_of[v] = addv("mergeup", extra={"from": None, "why": "the plan does not take the authors' code: no "
                                                        "cascade from the head (only the selected fixes move)"})
@@ -610,7 +616,8 @@ def build_queue(frozen, cfg, forks, date):
                 # ONE hop per version (#206 A): a version the merge leaves red is that version's fixer job, and holds
                 # only itself and the versions above it
                 cascade_of[v] = addv("mergeup", extra={"from": prev, "head_cascade": k == 0,
-                                                       "decisions_file": authors_up and bool(casc.get("decisions"))})
+                                                       "decisions_file": authors_up and bool(casc.get("decisions")),
+                                                       **pmp})
             rel = [lb for lb in libs if rel_at(lb, v)]
             if rel or bumps.get(v):
                 addv("repin", deps=[release_of[(lb, v)] for lb in rel],
@@ -621,7 +628,8 @@ def build_queue(frozen, cfg, forks, date):
             resynced = False
             if not (v in sync_v or v in rec_v or v in adopt_v or at.get(v)):
                 if below_works:            # nochange pushes this branch to origin: never with v-1's unmerged commits
-                    addv("resync", deps=[merge_of[prev_seg]], extra={"from": f"neoforge-{prev_seg}", "before": "nochange"})
+                    addv("resync", deps=[merge_of[prev_seg]], extra={"from": f"neoforge-{prev_seg}", "before": "nochange",
+                                                                     **pmp})
                     resynced = True
                 addv("nochange")       # the merge-up alone: nothing shipped may have changed (t_nochange)
             if v in rec_v:
@@ -641,7 +649,7 @@ def build_queue(frozen, cfg, forks, date):
             addv("freeze", extra={"libraries": rel})
             if below_works and not resynced:
                 # v-1 merged since v cascaded: its merge (a reviewer's fix included) comes up first
-                addv("resync", deps=[merge_of[prev_seg]], extra={"from": f"neoforge-{prev_seg}"})
+                addv("resync", deps=[merge_of[prev_seg]], extra={"from": f"neoforge-{prev_seg}", **pmp})
             for s in ("pr", "ci"):
                 addv(s)
             if F.get("library"):     # after its PR's CI (depgate_ci takes that run's candidate jar), before the merge
@@ -2449,6 +2457,7 @@ def t_mergeup(st, it, log):
     d, v = F["dir"], it["version"]
     git(d, "fetch", "-q", "origin", check=True)
     frm = x["from"]
+    before = git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/neoforge-{v}").stdout.strip()
     cmd = [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d]
     dec = st.rdir / "round/decisions" / (it["fork"].replace("/", "__") + ".decisions.json")
     if x.get("decisions_file") and dec.is_file():
@@ -2465,7 +2474,8 @@ def t_mergeup(st, it, log):
         for r in refs:
             sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d, f"{frm}..{v}", "--port-ref", r,
                         "--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
-        return f"{', '.join(refs)} carried into neoforge-{v} (--port-ref), A/B green", {}
+        pn, pr_ = post_merge(st, it, before, log)
+        return f"{', '.join(refs)} carried into neoforge-{v} (--port-ref), A/B green" + pn, pr_
     try:
         sh(st, it, cmd + ["--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
     except StepError as e:
@@ -2474,7 +2484,58 @@ def t_mergeup(st, it, log):
             raise StepError(f"{e} -- {len(open_)} open REMERGE.json entr{'y' if len(open_) == 1 else 'ies'} at {v}: "
                             + "; ".join(open_[:6]))      # weekly round 2026-10-30: two fixers fixed the build only)
         raise
-    return f"{frm} merged into neoforge-{v}, A/B green", {}
+    pn, pr_ = post_merge(st, it, before, log)
+    return f"{frm} merged into neoforge-{v}, A/B green" + pn, pr_
+
+
+def owns(path, owned):
+    """Is `path` (a repository path) one a post-merge command owns: equal to, under, or matching (fnmatch) `owned`?"""
+    o = owned.rstrip("/")
+    return path == o or path.startswith(o + "/") or fnmatch.fnmatch(path, owned)
+
+
+def post_merge(st, it, before, log):
+    """#325: the fork's own commands after a merge into version branch v (its config's `post_merge`, weekly-plan.py
+    install --post-merge: [{"run": argv, "owns": [paths], "values": {mc: {key: value}}}]), each run in the version's
+    checkout only when the merge (`before`..the branch now) changed a path it owns, its argv templated with `{mc}` and
+    the version's `values`; what they write is committed as one commit on the version's branch, before its gates and
+    review, and named in the step's note (so in the version's PR). A vendored component built per Minecraft version is
+    then re-vendored at each version instead of arriving as the head's copy. A failure is a StepError naming the
+    command. -> (a note suffix, the result)."""
+    cmds = it["extra"].get("post_merge") or []
+    v = it["version"]
+    d = st.fork(it["fork"])["dir"]
+    after = git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/neoforge-{v}").stdout.strip()
+    if not cmds or not before or not after or before == after:
+        return "", {}
+    changed = git(d, "diff", "--name-only", "--no-renames", before, after).stdout.splitlines()
+    co, ran = None, []
+    for pm in cmds:
+        hit = [f for f in changed if any(owns(f, o) for o in pm.get("owns") or [])]
+        if not hit:
+            continue
+        vals = {"mc": v, **((pm.get("values") or {}).get(v) or {})}
+
+        def fill(c):
+            def one(m):
+                if m.group(1) not in vals:
+                    raise StepError(f"the fork's post_merge command `{shlex.join(pm['run'])}` names {{{m.group(1)}}}, "
+                                    f"which has no value at {v} (its `values`)")
+                return str(vals[m.group(1)])
+            return re.sub(r"\{(\w+)\}", one, c)
+        argv = [fill(c) for c in pm["run"]]
+        cmd = [sys.executable if c == "python3" and i == 0 else c for i, c in enumerate(argv)]
+        co = co or vco(st, it["fork"], v)
+        try:
+            sh(st, it, cmd, log, cwd=co)
+        except (StepError, OSError) as e:
+            raise StepError(f"the fork's post_merge command `{shlex.join(argv)}` failed at {v} in {co}: {e}")
+        ran.append(shlex.join(argv))
+    if not ran:
+        return "", {}
+    c = commit_paths(co, ["."], f"Post-merge at {v}: {'; '.join(ran)} (keep-current round)")
+    return (f"; post-merge ran {'; '.join(ran)}" + (f", committed {c[:12]}" if c else ", nothing to commit")), {
+        "post_merge": ran, "post_merge_commit": c}
 
 
 def open_remerges(d, v):
@@ -2506,10 +2567,11 @@ def t_resync(st, it, log):
     before = git(d, "rev-parse", f"refs/heads/neoforge-{v}").stdout.strip()
     sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d, f"{frm}..{v}", "--gates", "ab",
                 "--untaken-ok", st.data["frozen"]] + (["--reuse-ab"] if mod("fb").reuse_on() else []), log)
+    pn, pr_ = post_merge(st, it, before, log)          # #325: what the merge brought into a path a command owns
     after = git(d, "rev-parse", f"refs/heads/neoforge-{v}").stdout.strip()
     moved = shipped_changes(d, before, after, v) if before and after and before != after else []
     return (f"{frm} brought up again: " + (f"{len(moved)} shipped file(s) changed ({', '.join(moved[:4])})" if moved
-                                           else "nothing shipped changed")), {"moved": moved}
+                                           else "nothing shipped changed") + pn), {"moved": moved, **pr_}
 
 
 NOT_SHIPPED = (".port/", ".github/", "docs/")
@@ -6693,6 +6755,56 @@ def self_check_default_first(expect):
         G.update(keep)
 
 
+def self_check_post_merge(expect):
+    """#325: post_merge runs the fork's command in the version's checkout only when the merge changed a path it owns,
+    templated with {mc} and the version's values, and commits what it wrote as one commit; an undefined {key} stops it."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td)
+        d = tmp / "mod"
+        git(tmp, "init", "-q", "-b", "neoforge-1.21.10", str(d), check=True)
+        git(d, "config", "core.autocrlf", "false")
+        (d / "Main.java").write_text("class Main {}\n", encoding="utf-8")
+        git(d, "add", "-A"); git(d, "commit", "-qm", "base", check=True)
+        F = {"dir": str(d), "head": "neoforge-1.21.8", "name": "mod", "kind": "branches", "base": "1.21.8",
+             "versions": ["1.21.10"]}
+
+        class _St:
+            rdir = tmp
+            data = {"date": "2026-12-02", "allow": []}
+
+            def fork(self, _):
+                return F
+        vendor = ("import pathlib, sys; p = pathlib.Path('third_party/compiler/VERSION'); "
+                  "p.parent.mkdir(parents=True, exist_ok=True); p.write_text(sys.argv[1] + chr(10), encoding='utf-8')")
+        pm = [{"run": ["python3", "-c", vendor, "{ref}@{mc}"], "owns": ["third_party/compiler"],
+               "values": {"1.21.10": {"ref": "1.21.10-ladder"}}}]
+        it = {"id": "mod@1.21.10:mergeup", "fork": "o/mod", "version": "1.21.10", "step": "mergeup",
+              "extra": {"post_merge": pm}, "result": {}}
+        log = tmp / "log"
+        before = git(d, "rev-parse", "HEAD").stdout.strip()
+        (d / "Main.java").write_text("class Main { int x; }\n", encoding="utf-8")
+        git(d, "commit", "-qam", "a merge that owns nothing", check=True)
+        note, res = post_merge(_St(), it, before, str(log))
+        expect(note == "" and res == {}, f"#325: a merge touching no owned path runs nothing: {note} {res}")
+        before = git(d, "rev-parse", "HEAD").stdout.strip()
+        (d / "third_party/compiler").mkdir(parents=True)
+        (d / "third_party/compiler/VERSION").write_text("head\n", encoding="utf-8")
+        git(d, "add", "-A"); git(d, "commit", "-qm", "the head's vendored copy arrives by merge", check=True)
+        note, res = post_merge(_St(), it, before, str(log))
+        got = (d / "third_party/compiler/VERSION").read_text(encoding="utf-8")
+        expect(res.get("post_merge_commit") and got == "1.21.10-ladder@1.21.10\n"
+               and git(d, "rev-parse", "HEAD").stdout.strip() == res["post_merge_commit"]
+               and "post-merge ran" in note and not git(d, "status", "--porcelain").stdout.strip(),
+               f"#325: an owned path changed: the command re-vendors at the version's own values, one commit: {note} {res} {got!r}")
+        bad = [dict(pm[0], run=["python3", "-c", "pass", "{nope}"])]
+        before = git(d, "rev-parse", "HEAD~1").stdout.strip()
+        try:
+            post_merge(_St(), dict(it, extra={"post_merge": bad}), before, str(log))
+            expect(False, "#325: an undefined {key} ran")
+        except StepError as e:
+            expect("{nope}" in str(e) and "1.21.10" in str(e), f"#325: an undefined {{key}} stops it, named: {e}")
+
+
 def self_check_bump(expect):
     """An OWNED fork's release bump (weekly-plan.py install --release-bump): the queue puts `bump` between setup and the
     authors' take only when the fork has one; the step needs merge-fork-prs and the fork's automerge; on a local origin
@@ -6710,6 +6822,10 @@ def self_check_bump(expect):
     expect(with_[:5] == ["ci-check", "setup", "bump", "upstream", "authors"] and "bump" not in without
            and [x for x in with_ if x != "bump"] == without,
            f"release bump: `bump` before the take only with release_bump; nothing else moves: {with_} / {without}")
+    sv_pm = build_queue(fz, {"forks": [{"repo": "o/mod", "post_merge": [{"run": ["x"], "owns": ["third_party"]}]}]},
+                        F, "2026-12-02")
+    expect(not any("post_merge" in (x.get("extra") or {}) for x in sv_pm) and "mergeup" not in [x["step"] for x in sv_pm],
+           "#325: a single-version fork never reaches a post_merge command (no merge-ups)")
     fz_off = json.loads(json.dumps(fz)); fz_off["forks"][0]["take_authors"] = False
     expect("bump" not in [x["step"] for x in build_queue(fz_off, {"forks": [{"repo": "o/mod", "release_bump": rb}]},
                                                          F, "2026-12-02")],
@@ -6926,6 +7042,7 @@ def self_check():
         rc = fn(*a_, out=buf.append)
         return rc, "\n".join(buf)
     self_check_bump(expect)
+    self_check_post_merge(expect)
     self_check_default_first(expect)
     self_check_multimod(expect)
     self_check_repin_several(expect)
@@ -7382,6 +7499,18 @@ def self_check():
                and "after_repin" not in by["examplemod@1.21.4:repin"]["extra"]
                and not any("after_repin" in x["extra"] for x in by_ar.values() if x["fork"] != DEP),
                "a fork's after_repin rides on its re-pin items only; a fork without it: as before")
+        cfg_pm = json.loads(json.dumps(cfg))
+        PM = [{"run": ["python3", "tools/vendor.py", "--ref", "{mc}"], "owns": ["third_party/compiler"]}]  # exec-ok: fixture data (a key/argv in a test), not a program run
+        for c_ in cfg_pm["forks"]:
+            if c_["repo"] == DEP:
+                c_["post_merge"] = PM
+        with State.tx(state, write=False) as st_:
+            by_pm = {x["id"]: x for x in build_queue(fz(), cfg_pm, json.loads(json.dumps(st_.data["forks"])), "2026-10-21")}
+        carry = sorted({x["step"] for x in by_pm.values() if x.get("extra", {}).get("post_merge")})
+        expect(by_pm["examplemod@1.21.4:mergeup"]["extra"]["post_merge"] == PM and carry
+               and set(carry) <= {"mergeup", "resync"}
+               and not any("post_merge" in x.get("extra", {}) for x in by_pm.values() if x["fork"] != DEP),
+               f"#325: a fork's post_merge rides on its merge-ups and resyncs only; a fork without it: as before: {carry}")
         # a dependent's bump that moves NeoForge at a version moves its library there first, in the library's own cycle
         with State.tx(state, write=False) as st_:
             forks_ = json.loads(json.dumps(st_.data["forks"]))

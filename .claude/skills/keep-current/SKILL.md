@@ -970,7 +970,7 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
            [--allow push-version-branches --allow pre-release --allow merge-fork-prs] \
            [--ledger-issues <owner/dep>=12,15] [--depends-on <owner/dep>=<owner/lib>] \
            [--replace-task "<old task name>"] \
-           [--release-bump [<owner/repo>=]<file>:<key> ...] [--after-repin <owner/repo>="<command>" ...] \
+           [--release-bump [<owner/repo>=]<file>:<key> ...] [--after-repin <owner/repo>="<command>" ...] [--post-merge <owner/repo>=<json> ...] \
            [--default-branch-too] [--keep-existing] [--trailer "<Key>: <value>" ...]
 
    One `--fork` per fork, the library first (a fork alone: one). A `--fork` without `=URL#BRANCH` takes the authors'
@@ -1006,6 +1006,14 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    SEVERAL MODS repeats the flag, one per mod's version file (`alpha/gradle.properties:mod_version`): a mod's version
    moves only when the take changes its folder or a shared path (one in no mod folder), every bump of the round is one
    PR (`Versions alpha 1.2.4, zeta 0.3.1: ...`), and the plan has a line per mod.
+   **A fork with version branches that vendors a per-version component** (a compiler or generator kept as a source tree,
+   built once per Minecraft version upstream) names the command that re-vendors it: `--post-merge
+   <owner/repo>='{"run": "python3 tools/vendor.py --ref {ref}", "owns": ["third_party/compiler"], "values": {"1.21.10":
+   {"ref": "1.21.10-ladder"}}}'` (repeatable, run in order; stored as the fork's `post_merge`; #325). The round runs it in
+   a version branch's checkout right after each merge into it (`mergeup`, `resync`), only when that merge changed a path
+   it `owns`, with `{mc}` and the version's `values` filled in, and commits what it wrote as that version's own commit,
+   before the version's gates and review; the step's note names it, so the version's PR does. Without it the head's copy
+   merges into every version unchanged. A single-version fork has no merge-ups, so it never runs there.
    **A fork that derives files from its pins** (a pin table its build reads, generated from its workflows or
    branch.properties) names the command that regenerates them: `--after-repin <owner/repo>="python3 scripts/write-pins.py
    --write"` (repeatable, run in order; split like a shell, run without one; stored as the fork's `after_repin`). The
