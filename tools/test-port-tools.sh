@@ -1154,6 +1154,8 @@ class FakeGates:                  # tools/port_gates.py with no Gradle: Gate A g
     Fail = PG.Fail
     gate_gradle_args_file, gate_gradle_args, with_gradle_args = (
         staticmethod(PG.gate_gradle_args_file), staticmethod(PG.gate_gradle_args), staticmethod(PG.with_gradle_args))
+    # the fork's own Gate C (.port/<mc>/gate-c.json, #308): the real readers -- these fixtures have no such file
+    fork_gatec_file, fork_gatec = staticmethod(PG.fork_gatec_file), staticmethod(PG.fork_gatec)
     qtc = True
 
     @staticmethod

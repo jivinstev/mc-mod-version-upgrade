@@ -815,9 +815,12 @@ def fork_gatec_check():
         return types.SimpleNamespace(env=env, gatec=gatec, gatec_set=gatec_set, no_fork_gatec=no_fork_gatec,
                                      modid="examplemod")
     saved = {k: os.environ.pop(k, None) for k in ("PORT_BRANCH_MC", "GITHUB_REF", "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH")}
+    # not TemporaryDirectory: on Windows the timeout case's `sleep` (an MSYS process taskkill /T does not reach) still
+    # holds gate-c-fork.log when the block ends, and its cleanup then raises WinError 32; removed at the end, tolerantly
+    tmp_root = tempfile.mkdtemp(prefix="fork-gatec-")
     try:
-        with tempfile.TemporaryDirectory() as d:
-            d = pathlib.Path(d).resolve()
+        if True:
+            d = pathlib.Path(tmp_root).resolve()
             sv = d / "sv"                                  # a single-version fork (P2: the single-version route)
             (sv / "tools/gate").mkdir(parents=True)
             (sv / "gradle.properties").write_text("mod_id=examplemod\nminecraft_version=1.21.4\n", encoding="utf-8")
@@ -1031,6 +1034,7 @@ def fork_gatec_check():
         for k, v in saved.items():
             if v is not None:
                 os.environ[k] = v
+        shutil.rmtree(tmp_root, ignore_errors=True)      # a file a lingering Windows process holds stays behind, harmless
     for w in why:
         print(f"ci-gates self-check FAIL [fork's own Gate C]: {w}")
     return ok
