@@ -2798,6 +2798,26 @@ def gate_run_cmd(d, v, stage, frozen, *extra, gates="full"):
             "--budget", "0", "--max-errors", "0", *extra, "--untaken-ok", frozen]
 
 
+ENV_STOP = "environmental, not a code failure"
+
+
+def gate_sh(st, it, cmd, log, **kw):
+    """A gate run (sh) whose red result fork-port.py judged ENVIRONMENTAL -- a JVM the machine killed, too little free
+    memory, or a suite stopped at the gate's time budget (#330) -- blocks the step with fork-port's own reason instead of
+    going to a model fixer: nothing in the code failed, so a fixer could only make changes nothing asked for."""
+    at = log_size(log)
+    try:
+        return sh(st, it, cmd, log, **kw)
+    except StepError as e:
+        said = log_since(log, at)
+        if ENV_STOP in said:
+            line = next((ln.strip() for ln in said.splitlines() if ENV_STOP in ln), ENV_STOP)
+            raise Blocked(f"the gate run stopped for the machine, not the code: {line[:400]} -- no fixer job; re-run it "
+                          "once that is dealt with (for a suite over Gate B's time budget: declare the fork's gate subset "
+                          "in .port/<mc>/gate-gradle-args.txt)") from e
+        raise
+
+
 def t_gates(st, it, log):
     """ONE full gate run on the version's checkout. Records what it gated (gated_head, before the records commit) and
     when, after removing the checkout's old jars: the library's pre-merge dependent gate takes only a jar this run
@@ -2823,8 +2843,8 @@ def t_gates(st, it, log):
                             f"{reused['exit']}; records only since)")
             else:
                 try:
-                    r_ = sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"], gates="ab"), log, ok=(0, 18))
-                except StepError:
+                    r_ = gate_sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"], gates="ab"), log, ok=(0, 18))
+                except (StepError, Blocked):
                     fb.drop_ab_green(F["dir"], v)        # red: a retry never reuses an older green
                     raise
                 fb.note_ab_green(F["dir"], d, v, st.data["frozen"], r_.returncode)
@@ -2834,7 +2854,7 @@ def t_gates(st, it, log):
                     + (f", records {pre[:12]} before" if pre else "") + (f", records {c[:12]}" if c else "")), {
                 "gated_head": gated, "gated_at": at, "head_after": head(d), "ci_record": True}
         with full_gate_lock(it["id"], say_to(log)) as lk:
-            sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"]), log, ok=(0, 18), hold=lk)
+            gate_sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"]), log, ok=(0, 18), hold=lk)
         for label, rd in gate_records(d, v):
             if (rd / "GATES-RED.md").is_file():
                 raise StepError(f"{label}/GATES-RED.md: the full run is not green")
@@ -6433,6 +6453,39 @@ def self_check():
         if not c:
             ok = False
             print("FAIL:", msg)
+
+    # #330: a gate run fork-port judged environmental (here: Gate B stopped at its time budget) blocks the step with
+    # fork-port's reason and no fixer job; a code failure is a StepError (the fixer's) as before
+    with tempfile.TemporaryDirectory() as td_:
+        glog = str(pathlib.Path(td_) / "g.log")
+        pathlib.Path(glog).write_text("earlier\n", encoding="utf-8")
+        def env_sh(st_, it_, cmd, log, **k_):
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write("STOPPED at gates: environmental, not a code failure: Gate B -- headless server: FAIL -- "
+                         "stopped by the gate loop at the 1500 s budget\n")
+            raise StepError("fork-port exit 11")
+        def code_sh(st_, it_, cmd, log, **k_):
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write("STOPPED at gates: 1 gate(s) red: Gate B: FAIL -- 3 tests failed\n")
+            raise StepError("fork-port exit 11")
+        sh = env_sh
+        try:
+            gate_sh(None, {"id": "x"}, ["fork-port"], glog)
+            expect(False, "an environmental gate stop passed")
+        except Blocked as e_:
+            expect("not the code" in str(e_) and "1500 s budget" in str(e_) and "gate-gradle-args.txt" in str(e_),
+                   f"an environmental gate stop blocks with its reason, no fixer: {e_}")
+        except StepError:
+            expect(False, "an environmental gate stop went to the fixer (StepError)")
+        sh = code_sh
+        try:
+            gate_sh(None, {"id": "x"}, ["fork-port"], glog)
+            expect(False, "a red gate run passed")
+        except Blocked:
+            expect(False, "a code failure was blocked instead of going to the fixer")
+        except StepError:
+            pass
+        sh = real_sh
 
     def q(fn, *a_):
         buf = []

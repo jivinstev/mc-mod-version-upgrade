@@ -91,9 +91,10 @@ tree. Then:
   run, the authors' build, Gate A, B and C, in both passes, full and minimal (and every variant leg), and writes a
   REPORT row naming them in the gate summary; a line that is not one option fails the run before any gate. The file is
   read at run time, so regenerating the workflow keeps it (`port-ci.py` and `port-ci.py check` warn about a
-  hand-added `PORT_GRADLE_ARGS` in the installed workflow until the file holds it). The full tier is the local one:
-  the weekly round's and `fork-port.py`'s gates call `ci-gates.py` without `--port-ci` and run the whole suite. The
-  `shipped jars` job is not a gate run and does not read it. Without the file, nothing changes.
+  hand-added `PORT_GRADLE_ARGS` in the installed workflow until the file holds it). `fork-port.py`'s gate runs (so
+  the weekly round's) apply it too (`ci-gates.py --gate-args`), so the round gates what Port CI gates (#330); a Gate B
+  the gate loop stops at its time budget is environmental there (the round blocks it, no fixer). Only a bare
+  `ci-gates.py` run without `--gate-args` or `--port-ci` gates the whole suite. The `shipped jars` job is not a gate run and does not read it. Without the file, nothing changes.
 - **A release gate of the fork's own** (opt-in): a fork that needs more evidence before a release than Port CI's gates
   give (say, a green run of its whole test tier for the exact commit) commits `port-release-gate.json` under `.github`:
   `{"schema": 1, "script": "ci/release-gate.py", "args": ["--wait", "150"], "timeout_minutes": 180}`.

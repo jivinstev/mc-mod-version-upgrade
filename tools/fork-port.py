@@ -1493,7 +1493,7 @@ def stop_block(stop):
 
 # A red gate that is the MACHINE's, not the code's (issue #113): tools/gate-loop.py's `killed` (the JVM was SIGKILLed with no
 # verdict, usually the OOM killer) and its pre-Gate-C free-memory guard. Re-run when memory is free; never a fixer's job.
-ENVIRONMENTAL = re.compile(r"JVM killed \(exit \d+|not enough free memory \(")
+ENVIRONMENTAL = re.compile(r"JVM killed \(exit \d+|not enough free memory \(|stopped by the gate loop at the \d+ s budget")
 
 
 # Issue #122: a run's own Gradle invocations before Gate C (stage, measure, the loop's compiles, the audit's
@@ -1565,9 +1565,14 @@ def environmental_stop(failed, code, resume, free_now=None, holders=None):
         evidence.append(f"free memory now: {free_now[0]} MB ({free_now[1]})")
     if holders:
         evidence.append("memory held by (largest resident first): " + "; ".join(holders))
+    budget = any("s budget" in l and "stopped by the gate loop" in l for l in failed)
+    first = (f"a suite over the gate's time budget is the run's size, not a code failure (#330): declare the fork's gate "
+             f"subset in .port/<mc>/gate-gradle-args.txt (the Port CI shard, e.g. -Pshard=ci), then re-run: {resume}"
+             if budget else
+             f"re-run when memory is free (stop other Gradle/Minecraft runs on this machine first): {resume}")
     return {"stop": "environmental, not a code failure: " + "; ".join(l[:120] for l in failed[:2]), "code": code,
             "gates": [l[:200] for l in failed], "detail": evidence, "environment": evidence,
-            "choices": [f"re-run when memory is free (stop other Gradle/Minecraft runs on this machine first): {resume}",
+            "choices": [first,
                         "do NOT send a fixer after the code or exclude a dependency for this: nothing in the code failed"]}
 
 
@@ -1839,8 +1844,10 @@ class Run:
         # forever while the tool that would fix it is never asked
         shutil.rmtree(self.work / "gates", ignore_errors=True)
         summ.unlink(missing_ok=True)      # an earlier run's summary must never stand for this run's (GATES.md, GATES-RED.md)
+        # the fork's declared gate subset (.port/<mc>/gate-gradle-args.txt) on this run too, as Port CI applies it (#330):
+        # the round's gate run of a suite the fork gates by shard ran the whole tier into Gate B's time budget
         cmd = [self.py, str(ROOT / "tools/ci-gates.py"), "--repo", str(self.repo), "--modid", modid, "--base",
-               self.a.base, "--mc", self.t, "--summary", str(summ), "--work-dir", str(self.work / "gates")]
+               self.a.base, "--mc", self.t, "--summary", str(summ), "--work-dir", str(self.work / "gates"), "--gate-args"]
         if self.a.gates == "ab":
             cmd += ["--gatec", "", "--no-fork-gatec"]   # A/B: no real client, the fork's own Gate C neither
         if self.shipped_expected():    # the fork lists what its shipped jar must log
@@ -1915,7 +1922,8 @@ class Run:
             summ, log = self.work / f"ci-gates-summary-{m}.md", self.work / f"ci-gates-{m}.log"
             summ.unlink(missing_ok=True)
             cmd = [self.py, str(ROOT / "tools/ci-gates.py"), "--repo", str(folder), "--modid", modid, "--base",
-                   self.a.base, "--mc", self.t, "--summary", str(summ), "--work-dir", str(self.work / "gates" / m)]
+                   self.a.base, "--mc", self.t, "--summary", str(summ), "--work-dir", str(self.work / "gates" / m),
+                   "--gate-args"]
             if self.a.gates == "ab":
                 cmd += ["--gatec", "", "--no-fork-gatec"]   # A/B: no real client, the fork's own Gate C neither
             if self.shipped_expected():
@@ -3453,6 +3461,30 @@ def self_check():
                        and not any("fix" in c.lower() and "not" not in c.lower() for c in st["choices"]),
                        "RESIDUE.md for a killed client: re-run when memory is free, with the evidence, no fixer")
                 expect(any("free" in e for e in st["environment"]), "the evidence carries the free-memory figure")
+        # #330: a Gate B suite the gate loop stopped at its time budget is the run's size, not the code: environmental,
+        # its choice the fork's gate subset, no fixer; and the round's gate runs apply that subset (--gate-args)
+        seen_cmd = []
+        run = Run(a_); run.compile_errors = lambda: 0; run.modid = lambda: "m"
+        def tsh(cmd, log=None, cwd=None):
+            seen_cmd.append([str(c) for c in cmd])
+            pathlib.Path(log).parent.mkdir(parents=True, exist_ok=True)
+            pathlib.Path(log).write_text("[ci-gates] Gate B -- headless server loads the mod, GameTests: FAIL -- stopped "
+                                         "by the gate loop at the 1500 s budget, with no verdict (TIMEOUT after 1500s) -- "
+                                         "a timeout, not a crash\n", encoding="utf-8")
+            return CompletedProcess(cmd, 1, "", "")
+        run.sh = tsh
+        st = run.s_gates()
+        expect(st.get("code") == 11 and st.get("environment") and "gate-gradle-args.txt" in st["choices"][0]
+               and "do NOT send a fixer" in st["choices"][1],
+               f"a Gate B timeout at the budget: environmental, the subset named, no fixer: {st.get('choices')}")
+        expect(seen_cmd and "--gate-args" in seen_cmd[0],
+               f"fork-port's gate run passes --gate-args (the fork's declared subset): {seen_cmd[:1]}")
+        a_ab = argparse.Namespace(**dict(vars(a_), gates="ab"))
+        seen_cmd.clear()
+        run = Run(a_ab); run.compile_errors = lambda: 0; run.modid = lambda: "m"; run.sh = tsh
+        run.s_gates()
+        expect(seen_cmd and "--gate-args" in seen_cmd[0] and "--no-fork-gatec" in seen_cmd[0],
+               f"--gates ab passes --gate-args too: {seen_cmd[:1]}")
     md, _d = residue_report("gates", "x", [], None, [], ["Gate B: FAIL -- tests"], "r")
     expect("Fix what is listed here" in md and "Environmental" not in md, "a code failure's RESIDUE.md is unchanged")
     # ---- issue #122: the run's own Gradle leaves no resident daemon before Gate C, and a refused

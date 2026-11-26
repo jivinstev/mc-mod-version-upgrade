@@ -546,7 +546,7 @@ def exempt_rows(rows, pu, repo, modid):
                     "; ".join(f"{e}: {r}".replace("|", "/") for e, r in ex)[:600] + " |")
 
 
-def gate_args_rows(port_ci, pu, repo, rows, record):
+def gate_args_rows(port_ci, pu, repo, rows, record, round_run=False):
     """A Port CI run (--port-ci): the fork's .port/<mc>/gate-gradle-args.txt appended to PORT_GRADLE_ARGS (after what
     it already holds), so every Gradle call of the run -- the author's build, Gate A, Gate B, Gate C, both environments
     -- carries it, and a REPORT row saying so: a run that gated a subset says which in its summary. A bad file fails the
@@ -556,9 +556,9 @@ def gate_args_rows(port_ci, pu, repo, rows, record):
     if f is None:
         return
     rel = f.relative_to(repo).as_posix()
-    if not port_ci:
-        print(f"[ci-gates] {rel}: not applied -- it is for the fork's Port CI runs (--port-ci); this run gates with no "
-              "extra Gradle arguments", flush=True)
+    if not (port_ci or round_run):
+        print(f"[ci-gates] {rel}: not applied -- it is for the fork's Port CI runs (--port-ci) and its round gate runs "
+              "(--gate-args); this run gates with no extra Gradle arguments", flush=True)
         return
     try:
         extra = pu.gate_gradle_args(repo)
@@ -569,9 +569,11 @@ def gate_args_rows(port_ci, pu, repo, rows, record):
         return
     os.environ["PORT_GRADLE_ARGS"] = pu.with_gradle_args(os.environ.get("PORT_GRADLE_ARGS"), extra)
     shown = " ".join(f"`{x}`" for x in extra).replace("|", "/")
-    rows.append(f"| Gate run -- extra Gradle arguments (`{rel}`) | REPORT | {shown} on every Gradle call of this Port CI "
-                "run (the gates ran what these select) |")
-    print(f"[ci-gates] Port CI: every Gradle call carries {' '.join(extra)} ({rel})", flush=True)
+    what = "Port CI run" if port_ci else "round gate run (--gate-args, as Port CI)"
+    rows.append(f"| Gate run -- extra Gradle arguments (`{rel}`) | REPORT | {shown} on every Gradle call of this "
+                f"{what} (the gates ran what these select) |")
+    print(f"[ci-gates] {'Port CI' if port_ci else 'gate run'}: every Gradle call carries {' '.join(extra)} ({rel})",
+          flush=True)
 
 
 # The fork's own Gate C (issue #308): .port/<mc>/gate-c.json, else the nearest lower version's (port_gates.fork_gatec,
@@ -1260,7 +1262,10 @@ def main():
     ap.add_argument("--port-ci", action="store_true",
                     help="this is the fork's Port CI run (the workflow passes it): the fork's .port/<mc>/gate-gradle-args.txt "
                          "(one Gradle argument a line, e.g. -Pshard=ci) is appended to PORT_GRADLE_ARGS for every Gradle "
-                         "call of the run; without it (a round's or fork-port.py's local gates) the file is not read")
+                         "call of the run; without it (and without --gate-args) the file is not read")
+    ap.add_argument("--gate-args", action="store_true",
+                    help="apply the fork's .port/<mc>/gate-gradle-args.txt as --port-ci does, on a run that is not Port CI's "
+                         "(fork-port.py's gates, so the round's gate run selects the subset the fork declared, #330)")
     ap.add_argument("--mc", help="the Minecraft version of the version branch checked out (tools/fork-branches.py; "
                                  "it must be that branch's): the run takes build/.fork-port.lock, so a second run on the "
                                  "same checkout is refused (exit 14)")
@@ -1308,7 +1313,7 @@ def main():
         rows.append(f"| {name} | {'PASS' if passed else 'FAIL'} | {detail} |")
         print(f"[ci-gates] {name}: {'PASS' if passed else 'FAIL'} -- {detail}", flush=True)
 
-    gate_args_rows(a.port_ci, pu, repo, rows, record)
+    gate_args_rows(a.port_ci, pu, repo, rows, record, round_run=a.gate_args)
     fork = None              # the fork's own Gate C: a bad file fails the run before anything is built, never ignored
     gf = pu.fork_gatec_file(repo)
     if gf is not None:
