@@ -171,6 +171,10 @@ run is green, and it is then gated against the dependency's NEW build.
    `.port/<mc>/gate-gradle-args.txt` (e.g. `-Pshard=ci`) as its Port CI runs do (#330), so the round gates the same
    subset and its summary names it; a hand run of `ci-gates.py` without `--gate-args` (or `--port-ci`) gates the whole
    suite. A Gate B the gate loop stopped at its time budget is environmental: the round blocks the step, no fixer.
+   A release never ships on a narrowed tier alone (#339): when those arguments narrow Gate B (a `-Pshard=` or a
+   `-Pgametests=`), the round's `gates` step, and its `release` step again on the merged commit, block unless the
+   version's Port CI workflow backs its release with the release gate (a `release-gate` job the `release` job needs and
+   requires): run the whole tier at that version, or add `.github/port-release-gate.json` and regenerate the workflow.
    Never move those arguments back into the workflow by hand.
    **A shipped-jar expectation that fails right after an upstream merge is not yet a regression.** The authors may
    have reworded the log line the expectation reads (e.g. a class logged by its internal name,

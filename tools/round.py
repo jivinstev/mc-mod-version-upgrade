@@ -166,7 +166,7 @@ _MODS = {}
 def mod(key):
     files = {"fb": "fork-branches.py", "ki": "known-issues.py", "pc": "port-ci.py", "lc": "checkout-lock.py",
              "fk": "fork-kind.py", "ld": "layer-deps.py", "rp": "round-preflight.py", "cg": "ci-gates.py",
-             "wp": "weekly-plan.py", "fp": "fork-port.py"}
+             "wp": "weekly-plan.py", "pg": "port_gates.py", "fp": "fork-port.py"}
     if key not in _MODS:
         sys.dont_write_bytecode = True
         _MODS[key] = load(f"round_{key}", files[key])
@@ -2903,6 +2903,59 @@ def gate_sh(st, it, cmd, log, **kw):
         raise
 
 
+NARROWING = re.compile(r"^-P(?:shard|gametests)=")
+
+
+def narrowing_args(d, v):
+    """The fork's gate arguments at version v (.port/<v>/gate-gradle-args.txt, or the nearest lower version's: what
+    `ci-gates.py --gate-args` applies) that narrow Gate B -- a `-Pshard=` shard or a `-Pgametests=` class filter
+    (#339): the file exists to fit Gate B's budget, so a shard there is a subset of the fork's whole tier. -> [arg]."""
+    try:
+        args = mod("pg").gate_gradle_args(d, v)
+    except Exception:       # noqa: BLE001 -- a bad file fails the gate run itself, by name
+        return []
+    return [a for a in args if NARROWING.match(a)]
+
+
+def narrowing_ref(d, v, ref):
+    """Is there any gate-gradle-args.txt under .port/ at git `ref` (a cheap test before narrowing_args needs a
+    checkout of it)?"""
+    return any(f.endswith("/gate-gradle-args.txt")
+               for f in git(d, "ls-tree", "-r", "--name-only", ref, "--", ".port").stdout.splitlines())
+
+
+def release_gated(wf):
+    """Does this Port CI workflow back its release with the fork's release gate (#306): a `release-gate` job, and the
+    `release` job needing it and requiring its success?"""
+    jobs = "\n" + wf.split("\njobs:\n", 1)[1] if "\njobs:\n" in wf else ""     # never the `on: release:` trigger
+    if "\n  release-gate:\n" not in jobs or "\n  release:\n" not in jobs:
+        return False
+    rel = jobs.split("\n  release:\n", 1)[1]
+    m = re.search(r"(?m)^    needs: (\[[^\]]*\]|\S+)$", rel.split("\n    steps:", 1)[0])
+    needs = [x.strip() for x in m.group(1).strip("[]").split(",")] if m else []
+    return "release-gate" in needs and "needs.release-gate.result == 'success'" in rel.split("\n    steps:", 1)[0]
+
+
+def narrowed_guard(st, it, d, v, ref=None):
+    """#339: a release must never ship on a narrowed test tier alone. When the round's gates at version v narrow Gate B
+    (narrowing_args), every Port CI workflow of the version (at git `ref`, else the checkout) must back its release with
+    the release gate (release_gated), whose full-tier run then stands before anything is published; else Blocked,
+    naming the version, the argument and the two ways out. Run before the gates and again before the release (a
+    re-render in between can drop the job)."""
+    narrow = narrowing_args(d, v)
+    if not narrow:
+        return
+    bad = [path for _n, path in (port_ci_wfs(d, ref) or [("", PORT_CI_WF)]) if not release_gated(wf_text(d, path, ref))]
+    if bad:
+        raise Blocked(f"{it['fork']} {v}: the round's gates narrow Gate B ({' '.join(narrow)}, from .port/<mc>/"
+                      f"gate-gradle-args.txt), and {', '.join(bad)} has no release gate backing its release (a "
+                      f"`release-gate` job the `release` job needs): it would gate and release on the subset alone. "
+                      f"Either run the whole tier at {v} (drop the narrowing argument from that version's "
+                      f"gate-gradle-args.txt), or add the release gate (.github/port-release-gate.json, then regenerate "
+                      f"the workflow with port-ci.py / fork-branches.py ci); then `round.py retry "
+                      f"{it.get('id', '<this item>')}`")
+
+
 def t_gates(st, it, log):
     """ONE full gate run on the version's checkout. Records what it gated (gated_head, before the records commit) and
     when, after removing the checkout's old jars: the library's pre-merge dependent gate takes only a jar this run
@@ -2910,6 +2963,7 @@ def t_gates(st, it, log):
     F, v = st.fork(it["fork"]), it["version"]
     if is_vb(st, it):
         d = vco(st, it["fork"], v)
+        narrowed_guard(st, it, d, v)
         pre = commit_records(d, v)
         clean(d)
         for j in built_jars(d):
@@ -2950,6 +3004,7 @@ def t_gates(st, it, log):
         return "full gates green" + (f", records {pre[:12]} before" if pre else "") + (f", records {c[:12]}" if c else ""), {"gated_head": gated, "gated_at": at,
                                                                             "head_after": head(d)}
     d = checkout(F["dir"], branch_of(st, it))
+    narrowed_guard(st, it, d, v)
     commit_records(d, v)
     if seg_ids(st, it, ("depgate",)):       # a library's candidate: only a jar this run builds counts (t_depgate)
         for j in built_jars(d):
@@ -3975,7 +4030,18 @@ def t_release(st, it, log):
     if mg.get("skipped"):
         return "nothing merged: no release", {"skipped": True, "tag": None}
     base = base_of(st, it)
-    wfs = port_ci_wfs(st.fork(slug)["dir"], mg["merge_sha"]) or [("", PORT_CI_WF)]
+    d0 = st.fork(slug)["dir"]
+    git(d0, "fetch", "-q", "origin", base)
+    if narrowing_ref(d0, v, mg["merge_sha"]):       # #339: again, on what is released (a re-render can drop the job)
+        where = st.rdir / "round/work" / f"release-guard-{st.fork(slug)['name']}-{v}"
+        if where.exists():
+            git(d0, "worktree", "remove", "--force", str(where))
+        git(d0, "worktree", "add", "-q", "--detach", str(where), mg["merge_sha"], check=True)
+        try:
+            narrowed_guard(st, it, str(where), v, mg["merge_sha"])
+        finally:
+            git(d0, "worktree", "remove", "--force", str(where))
+    wfs = port_ci_wfs(d0, mg["merge_sha"]) or [("", PORT_CI_WF)]
     tags = {}
     for name, path in wfs:
         tags[name] = release_one(st, it, log, slug, v, base, mg, name, path)
@@ -6844,6 +6910,50 @@ def self_check_kit_pin(expect):
             G.update(keep)
 
 
+def self_check_narrowed_guard(expect):
+    """#339, both kinds of fork: a round whose gates narrow Gate B (a -Pshard= or -Pgametests= in gate-gradle-args.txt)
+    blocks unless the version's Port CI workflow backs its release with the release gate; with the gate it goes on; with
+    no narrowing nothing changes. A version branch with no file of its own inherits the nearest lower version's."""
+    pc = mod("pc")
+    plain, gated = pc.fixture(False), pc.fixture(False, gate=pc.GATE_FIX)
+    expect(not release_gated(plain) and release_gated(gated)
+           and not release_gated(gated.replace("needs.release-gate.result == 'success'", "true")),
+           "#339: release_gated reads the release-gate job, the release's need of it and its success condition")
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td)
+
+        class _St:
+            def fork(self, _):
+                return {"name": "mod"}
+        for kind, v in (("single", "1.21.8"), ("branches", "1.21.10")):
+            d = tmp / kind
+            (d / ".github/workflows").mkdir(parents=True)
+            (d / "gradle.properties").write_text("minecraft_version=1.21.8\n", encoding="utf-8")
+            (d / ".port/1.21.8").mkdir(parents=True)
+            it = {"id": f"mod@{v}:gates", "fork": "o/mod", "version": v}
+            wf = d / PORT_CI_WF
+
+            def guard():
+                try:
+                    narrowed_guard(_St(), it, str(d), v)
+                    return None
+                except Blocked as e:
+                    return str(e)
+            wf.write_text(plain, encoding="utf-8")
+            expect(guard() is None, f"#339 ({kind}): no gate-gradle-args.txt: nothing changes")
+            (d / ".port/1.21.8/gate-gradle-args.txt").write_text("# a subset\n--info\n", encoding="utf-8")
+            expect(guard() is None, f"#339 ({kind}): arguments that narrow nothing: nothing changes")
+            (d / ".port/1.21.8/gate-gradle-args.txt").write_text("-Pshard=ci\n", encoding="utf-8")
+            why = guard()
+            expect(why and "-Pshard=ci" in why and v in why and "port-release-gate.json" in why and "drop the narrowing" in why,
+                   f"#339 ({kind}): a narrowed shard with no release gate blocks, naming both remedies: {why}")
+            wf.write_text(gated, encoding="utf-8")
+            expect(guard() is None, f"#339 ({kind}): with the release gate backing the release it goes on")
+            (d / ".port/1.21.8/gate-gradle-args.txt").write_text("-Pgametests=com.example.SomeTest\n", encoding="utf-8")
+            wf.write_text(plain, encoding="utf-8")
+            expect(guard() and "-Pgametests=" in guard(), f"#339 ({kind}): a class filter narrows too")
+
+
 def self_check_bump(expect):
     """An OWNED fork's release bump (weekly-plan.py install --release-bump): the queue puts `bump` between setup and the
     authors' take only when the fork has one; the step needs merge-fork-prs and the fork's automerge; on a local origin
@@ -7078,6 +7188,7 @@ def self_check():
         rc = fn(*a_, out=buf.append)
         return rc, "\n".join(buf)
     self_check_bump(expect)
+    self_check_narrowed_guard(expect)
     self_check_default_first(expect)
     self_check_kit_pin(expect)
     self_check_multimod(expect)
