@@ -4972,10 +4972,58 @@ def ci_args(repo, t, modid, kit_version=None):
     read = reader_of_ref(repo, t_ref)
     p = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
     pc = load("port_ci_fb", "port-ci.py")
-    wf = git(repo, "show", f"{fresh_branch(repo, p.get('port_branch', 'neoforge-1.21.1'))}:.github/workflows/port-ci.yml")
-    args = pc.recover_args(wf.stdout) if wf.returncode == 0 else ["--modid", modid, "--gatec", "launch,spawn,battle,gauntlet"]
+    # #328: the base version branch's branch.properties names no port_branch -- it IS where the workflow is read;
+    # never an invented neoforge-1.21.1 (a branch that need not exist, whose failed read used to default the phases)
+    port = p.get("port_branch") or branch_name(t)
+    port_ref = fresh_branch(repo, port)
+    if not port_ref:
+        raise ValueError(f"{branch_name(t)}: its port branch {port} does not exist here or on origin: nothing is invented "
+                         "in its place")
+    wf = git(repo, "show", f"{port_ref}:{PORT_CI_PATH}")
+    if wf.returncode == 0:
+        args = pc.recover_args(wf.stdout)
+        own = own_gatec(repo, t_ref, PORT_CI_PATH) if port != branch_name(t) else None
+        if own is not None:
+            args = with_gatec(args, own)
+    else:
+        # no workflow on the port branch: the version's own, read back whole; neither -> refused, never invented
+        mine = git(repo, "show", f"{t_ref}:{PORT_CI_PATH}") if t_ref else None
+        if mine is None or mine.returncode != 0:
+            raise ValueError(f"{branch_name(t)}: neither it nor its port branch {port} has {PORT_CI_PATH} to read the "
+                             "workflow's options back from (port-ci.py installs it); nothing is invented in its place")
+        args = pc.recover_args(mine.stdout)
     return add_variant_jars(remap_ci_args(args, p, modid, kit_version), shipped_variants(repo, t_ref, t)) + [
         "--branch", branch_name(t)]
+
+
+PORT_CI_PATH = ".github/workflows/port-ci.yml"
+
+
+def own_gatec(repo, ref, path):
+    """The --gatec of the Port CI workflow `path` at `ref` (a version branch's own workflow), or None when it has no such
+    workflow or names none: a version's Gate C phases are its own decision (#328) -- regenerating it from the port
+    branch's workflow must not replace them (a base branch regenerated first by `ci --all` then leaks its phases into
+    every rung that reads it)."""
+    if not ref:
+        return None
+    r = git(repo, "show", f"{ref}:{path}")
+    if r.returncode != 0:
+        return None
+    try:
+        rec = load("port_ci_fb", "port-ci.py").recover_args(r.stdout)
+    except SystemExit:
+        return None
+    return rec[rec.index("--gatec") + 1] if "--gatec" in rec and rec.index("--gatec") + 1 < len(rec) else None
+
+
+def with_gatec(args, gatec):
+    """port-ci.py arguments with --gatec set to `gatec` (replaced, or added when absent)."""
+    out = list(args)
+    if "--gatec" in out and out.index("--gatec") + 1 < len(out):
+        out[out.index("--gatec") + 1] = gatec
+    else:
+        out += ["--gatec", gatec]
+    return out
 
 
 def ci_mods_args(repo, t, kit_version=None):
@@ -4990,7 +5038,7 @@ def ci_mods_args(repo, t, kit_version=None):
         return []
     read = reader_of_ref(repo, t_ref)
     p = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
-    port = p.get("port_branch", "neoforge-1.21.1")
+    port = p.get("port_branch") or branch_name(t)                   # #328: the base branch reads its own
     port_ref = fresh_branch(repo, port)
     fk, pc = fork_kind(), load("port_ci_fb", "port-ci.py")
     wfs = fk.port_ci_workflows(repo, port_ref) if port_ref else []
@@ -5008,6 +5056,9 @@ def ci_mods_args(repo, t, kit_version=None):
         if not modid:
             raise ValueError(f"{port}'s {path}: " + (f"{md}/gradle.properties at {branch_name(t)} names no mod_id" if md
                                                      else "it names no --mod-dir"))
+        own = own_gatec(repo, t_ref, path) if port != branch_name(t) else None    # the mod's phases at t are t's (#328)
+        if own is not None:
+            rec = with_gatec(rec, own)
         out.append((name, remap_ci_args(rec, p, modid, kit_version) + ["--branch", branch_name(t)]))
     return out
 
@@ -6153,6 +6204,48 @@ def _check_cascade_mod_workflows(expect):
         expect(len(merged) == 2 and all("names neoforge-1.21.1, not neoforge-1.21.5" in x for x in merged)
                and any("WARNING neoforge-1.21.5" in l and "not neoforge-1.21.5" in l for l in lines),
                f"the head's workflow on a version branch: not its own, and ci-check warns: {merged} {lines}")
+
+
+def _check_ci_own_gatec(expect):
+    """#328: `ci --all` regenerating a version branch keeps ITS Gate C phases. The base version branch (its
+    branch.properties names no port_branch) reads its own workflow, never an invented neoforge-1.21.1 with the full
+    phase set as a fallback; a rung whose port branch the run already re-rendered (locally, ahead of origin, as --all
+    commits the base first) keeps its own --gatec; a rung at launch,spawn keeps exactly that; a missing port branch
+    and a workflow on neither side are refused."""
+    golden = (ROOT / "tools/golden/port-ci-single-nodeps.yml").read_text(encoding="utf-8")
+    with_g = lambda g: golden.replace('--gatec "launch,spawn"', f'--gatec "{g}"')
+    with tempfile.TemporaryDirectory() as td:
+        r = pathlib.Path(td) / "r"
+        r.mkdir()
+        g = lambda *a: git(r, "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a, check=True)
+        g("init", "-q", "-b", "neoforge-1.21.8"); g("config", "core.autocrlf", "false")
+        def put(files, msg):
+            for k, v in files.items():
+                (r / k).parent.mkdir(parents=True, exist_ok=True)
+                (r / k).write_text(v, encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", msg)
+        put({".port/1.21.8/branch.properties": "minecraft_version=1.21.8\n", PORT_CI_PATH: with_g("none")}, "base")
+        for v, gc in (("1.21.10", "none"), ("1.21.11", "launch,spawn")):
+            g("checkout", "-q", "-b", f"neoforge-{v}", "neoforge-1.21.8")
+            put({f".port/{v}/branch.properties": f"minecraft_version={v}\nport_branch=neoforge-1.21.8\n",
+                 PORT_CI_PATH: with_g(gc)}, v)
+        gcof = lambda a: a[a.index("--gatec") + 1] if "--gatec" in a else None
+        expect(gcof(ci_args(r, "1.21.8", "examplemod", 9)) == "none",
+               f"the base branch (no port_branch) reads its own workflow: {gcof(ci_args(r, '1.21.8', 'examplemod', 9))}")
+        # ci --all commits the base first, locally: here with the full phase set it used to invent
+        g("checkout", "-q", "neoforge-1.21.8")
+        put({PORT_CI_PATH: with_g("launch,spawn,battle,gauntlet")}, "base re-rendered by --all")
+        a10, a11 = ci_args(r, "1.21.10", "examplemod", 9), ci_args(r, "1.21.11", "examplemod", 9)
+        expect(gcof(a10) == "none" and "--kit-version" in a10 and a10[a10.index("--kit-version") + 1] == "9",
+               f"a rung at --gatec none keeps none after the base was re-rendered first; only the kit moves: {a10}")
+        expect(gcof(a11) == "launch,spawn", f"a rung at launch,spawn keeps exactly that: {gcof(a11)}")
+        g("checkout", "-q", "-b", "neoforge-1.21.4", "neoforge-1.21.8")
+        put({".port/1.21.4/branch.properties": "minecraft_version=1.21.4\nport_branch=neoforge-9.9\n"}, "orphan")
+        try:
+            ci_args(r, "1.21.4", "examplemod", 9)
+            expect(False, "a missing port branch was defaulted")
+        except ValueError as e:
+            expect("neoforge-9.9 does not exist" in str(e), f"a missing port branch is refused: {e}")
 
 
 def _check_ci_check(expect):
@@ -8512,6 +8605,7 @@ def self_check():
         _check_ab_reuse(expect)
         _check_check_done_rows(expect)
         _check_ci_check(expect)
+        _check_ci_own_gatec(expect)
         _check_ci_several_mods(expect)
         _check_cascade_mod_workflows(expect)
         _check_change_reviews(expect)
