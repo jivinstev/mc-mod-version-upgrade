@@ -6757,7 +6757,7 @@ def self_check_kit_pin(expect):
     workflow stale (ci-check, setup's regeneration and the pr check all compare and render at the pin) and is named in
     the close instead; `retry --kit N` moves the pin; a state with no pin takes the kit the head already carries."""
     G = globals()
-    keep = {k: G[k] for k in ("sh", "KIT_NEWEST")}
+    keep = {k: G[k] for k in ("sh", "KIT_NEWEST")}  # exec-ok: fixture data (a key/argv in a test), not a program run
     with tempfile.TemporaryDirectory() as td:
         tmp = pathlib.Path(td)
         bare, d = tmp / "o.git", tmp / "mod"
