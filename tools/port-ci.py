@@ -338,8 +338,8 @@ def hand_gradle_args(wf, repo, mc):
 
 # The player-install bootstrap the player-install job runs (a release of the migrator repository, never replaced): the
 # tag and its install.sh's sha256. Move both together, to a release whose acceptance passed (player-install.yml).
-PLAYER_INSTALL = {"PLAYER_INSTALL_TAG": "player-install-v3", "PLAYER_INSTALL_SHA256":
-                  "da9a778ba2b349f782a22ec2c9e4028d9f3d2e9b921a47e43b0c688d2b9185e0"}
+PLAYER_INSTALL = {"PLAYER_INSTALL_TAG": "player-install-v4", "PLAYER_INSTALL_SHA256":
+                  "924d562230ab32a39dd3f20f9d1ff54887085c82a67dc986727ec2a625e6e102"}
 
 
 def render(text, values):
@@ -1836,7 +1836,9 @@ def _without_reuse(wf):
                  "jar in another repository's run artifact\n",
                  "          run-id: ${{ inputs.from_run || github.run_id }}\n",
                  "          github-token: ${{ inputs.from_run && github.token || '' }}\n",
-                 "          FROM_RUN: ${{ inputs.from_run }}\n", "${FROM_RUN:+ (jars and gates of run $FROM_RUN, the same tree)}",
+                 "          FROM_RUN: ${{ inputs.from_run }}\n",
+                 "            ${{ runner.temp }}/port-ci/gate-c-out/\n",    # a later change: a fork's Gate C evidence (#318)
+                 "${FROM_RUN:+ (jars and gates of run $FROM_RUN, the same tree)}",
                  ' ${gates[@]+"${gates[@]}"}',
                  ' --port-ci'):     # a later change: the gates run reads .port/<mc>/gate-gradle-args.txt (ci-gates.py)
         w = w.replace(gone, "")
