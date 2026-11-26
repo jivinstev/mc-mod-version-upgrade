@@ -101,8 +101,9 @@ tree. Then:
   `port-ci.py` reads it when it renders the workflow, on every kind of fork (a version branch has it by merge, and every
   mod's workflow of a repository of several mods gets it), and refuses a bad one: `script` a `.py` or `.sh` file in the
   repository (no `..`, no component starting with `-`), `args` at most 32 strings of `[A-Za-z0-9_.:=/@+-]`,
-  `timeout_minutes` 1 to 360 (default 60), no other key. The workflow then has a `release-gate` job between the gates and
-  the release: it checks out the release commit and runs the script as an argv (`python3` for `.py`, `bash` for `.sh`,
+  `timeout_minutes` 1 to 360 (default 60), no other key. The workflow then has a `release-gate` job that runs in parallel
+  with the gates (no `needs`: a long gate, such as a sharded run it starts and waits for, does not wait for them) and
+  before the release, which needs both: it checks out the release commit and runs the script as an argv (`python3` for `.py`, `bash` for `.sh`,
   each argument a quoted literal; nothing from a workflow input reaches it), with `GATE_SHA` (the commit being released:
   on a `from_run` release the dispatch's own commit, the tree released), `GATE_REF`, `GITHUB_REPOSITORY` and `GH_TOKEN`
   in its environment. The script is the fork's own code, trusted like its Gradle build, and its job holds `contents:

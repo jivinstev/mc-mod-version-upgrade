@@ -628,11 +628,11 @@ RELEASE_GATE_ARG = re.compile(r"[A-Za-z0-9_.:=/@+-]+")
 RELEASE_GATE_KEYS = {"schema", "script", "args", "timeout_minutes"}
 RELEASE_GATE_TIMEOUT = (1, 360, 60)                 # minutes: least, most, default
 RELEASE_GATE_IF = " && needs.release-gate.result == 'success'"
-# the release-gate job's condition: exactly the release's (RELEASE_IF, + RELEASE_SHIPPED_IF with --variant-jar) less its
-# own result, and never on a dep_override run (which never releases)
+# the release-gate job's condition: the release's trigger (RELEASE_IF's run kinds) without any job's result -- it runs IN
+# PARALLEL with the gates (no needs: a fork's full-tier gate can be long, a sharded run it starts and waits for), and
+# the release needs both to succeed -- and never on a dep_override run (which never releases)
 RELEASE_GATE_RUNS = ("!cancelled() && github.event_name != 'release' && (startsWith(github.ref, 'refs/tags/') || "
-                     "inputs.release || inputs.from_run) && !inputs.dep_override && (needs.gates.result == 'success' || "
-                     "(inputs.from_run && needs.gates.result == 'skipped'))")
+                     "inputs.release || inputs.from_run) && !inputs.dep_override")
 
 
 def release_gate(repo=None, text=None):
@@ -688,12 +688,13 @@ def release_gate_argv(gate):
 
 def release_gate_values(values, gate=None):
     """RELEASE_GATE_JOB / RELEASE_GATE_IF, and the release's needs: empty and unchanged without a gate (byte for byte the
-    old workflow); with one, the `release-gate` job (needing what the release needs, running when it would) and the
-    release needing it to succeed. After variant_values, which sets RELEASE_NEEDS."""
+    old workflow); with one, the `release-gate` job -- no needs: it starts with the gates and runs alongside them, on
+    every run that would release -- and the release needing both it and what it already needed to succeed. After
+    variant_values, which sets RELEASE_NEEDS."""
     if not gate:
         return dict(values, RELEASE_GATE_JOB="", RELEASE_GATE_IF="")
     needs = values["RELEASE_NEEDS"]
-    runs = RELEASE_GATE_RUNS + (values.get("RELEASE_SHIPPED_IF") or "")
+    runs = RELEASE_GATE_RUNS
     s = gate["script"]
     job = f"""
 
@@ -703,8 +704,8 @@ def release_gate_values(values, gate=None):
     # build; it runs as an argv with the commit being released (GATE_SHA: on a from_run release this dispatch's commit,
     # the tree released) and may find or start a workflow run of this repository (actions: write), never holding the
     # release's contents: write. The release needs it to succeed: a failure, a skip or a cancel here releases nothing.
-    # It runs exactly when the release would, except on a dep_override run, which never releases.
-    needs: {needs}
+    # It runs on every run that would release (never a dep_override run), in parallel with the gates: no needs, so a
+    # long gate (a sharded full tier it starts and waits for) does not wait for them, and the release needs both.
     if: ${{{{ {runs} }}}}
     runs-on: ubuntu-24.04
     timeout-minutes: {gate["timeout_minutes"]}
@@ -2179,8 +2180,34 @@ def release_gate_check():
     wf = fixture(False, gate=GATE_FIX)
     rg, rel = job(wf, "release-gate"), job(wf, "release")
     argv = "python3 'tools/gate/gate.py' 'release-gate' '--wait' '150' '--repo=o/examplemod' 'a.b:c@d+e'"
-    for case, s in (("needs the gates", "\n    needs: gates\n"),
-                    ("permissions", "\n    permissions:\n      contents: read\n      actions: write\n    steps:\n"),
+    def needs_graph(w_):            # every job -> the jobs it needs, read off the generated workflow
+        out = {}
+        jobs_ = w_.split("\njobs:\n", 1)[1]
+        heads = list(re.finditer(r"(?m)^  ([a-z][a-z0-9-]*):\n", jobs_))
+        for i_, m_ in enumerate(heads):
+            blk = jobs_[m_.end():heads[i_ + 1].start() if i_ + 1 < len(heads) else len(jobs_)]
+            n_ = re.search(r"(?m)^    needs: (\[[^\]]*\]|\S+)$", blk)
+            out[m_.group(1)] = [x.strip() for x in (n_.group(1).strip("[]").split(",") if n_ else []) if x.strip()]
+        return out
+
+    def upstream_of(g, j, seen=None):
+        seen = set() if seen is None else seen
+        for n in g.get(j, []):
+            if n not in seen:
+                seen.add(n)
+                upstream_of(g, n, seen)
+        return seen
+    for tag_, w_, rel_needs in (("one jar", fixture(False, gate=GATE_FIX), {"gates", "release-gate"}),
+                                ("--variant-jar", fixture(True, gate=dict(GATE_FIX, script="ci/gate.sh", args=[]),
+                                                          variant_jars=["*_mr.jar"]), {"gates", "shipped", "release-gate"})):
+        g = needs_graph(w_)
+        ok &= want(f"gate: needs graph ({tag_}): release-gate parallel to the gates, the release after all",
+                   "gates" in g and g.get("release-gate") == [] and not upstream_of(g, "release-gate")
+                   and set(g.get("release", [])) == rel_needs and "release-gate" not in upstream_of(g, "gates"),
+                   f"release-gate: [], release: {sorted(rel_needs)}", g)
+    ok &= want("gate: runs in parallel with the gates (no needs)", "\n    needs:" not in rg
+               and "needs.gates" not in rg and "needs.shipped" not in rg, "no needs", rg[:900])
+    for case, s in (("permissions", "\n    permissions:\n      contents: read\n      actions: write\n    steps:\n"),
                     ("timeout", "\n    timeout-minutes: 180\n"),
                     ("checks out the release commit", "      - uses: actions/checkout@v4\n        with:\n          ref: ${{ github.sha }}\n"),
                     ("env", "        env:\n          GATE_SHA: ${{ github.sha }}\n          GATE_REF: ${{ github.ref_name }}\n"
@@ -2199,8 +2226,8 @@ def release_gate_check():
     sh = fixture(True, gate=dict(GATE_FIX, script="ci/gate.sh", args=[]), variant_jars=["*_mr.jar"])
     rg_s, rel_s = job(sh, "release-gate"), job(sh, "release")
     ok &= want("gate: .sh runs with bash", "\n          bash 'ci/gate.sh' 2>&1 | tee" in rg_s, "bash 'ci/gate.sh'", rg_s[-900:])
-    ok &= want("gate: with --variant-jar, needs and runs like the release", "\n    needs: [gates, shipped]\n" in rg_s
-               and f"if: ${{{{ {RELEASE_GATE_RUNS}{RELEASE_SHIPPED_IF} }}}}" in rg_s
+    ok &= want("gate: with --variant-jar, still parallel; the release needs all three", "\n    needs:" not in rg_s
+               and f"if: ${{{{ {RELEASE_GATE_RUNS} }}}}" in rg_s
                and "\n    needs: [gates, shipped, release-gate]\n" in rel_s
                and RELEASE_IF.format(RELEASE_SHIPPED_IF + RELEASE_GATE_IF) in rel_s, "shipped too", rg_s[:900])
     # the other readers of a workflow are not disturbed by the job
@@ -2276,8 +2303,12 @@ def release_gate_check():
                     old = _gh_if(RELEASE_IF.format(RELEASE_SHIPPED_IF if shipped else "").strip()[len("if: "):], ctx)
                     runs = _gh_if(gate_if, ctx)
                     tag = f"{'shipped, ' if shipped else ''}{ev}, gates {gates}{', cancelled' if cancelled else ''}"
-                    # the gate runs exactly when the release would have, except on dep_override (which never releases)
-                    ok &= want(f"gate: runs when the release would ({tag})", runs == (old and ev != "dep_override"), old, runs)
+                    # the gate runs on every run that would release once its gates pass -- whatever they say yet: it is
+                    # parallel to them -- except on dep_override (which never releases)
+                    trig = _gh_if(RELEASE_IF.format(RELEASE_SHIPPED_IF if shipped else "").strip()[len("if: "):],
+                                  dict(ctx, **{"needs.gates.result": "success", "needs.shipped.result": "success"}))
+                    ok &= want(f"gate: runs on every run that would release ({tag})", runs == (trig and ev != "dep_override"),
+                               trig, runs)
                     outcomes = ("success", "failure", "cancelled") if runs else ("skipped",)
                     for out in outcomes:
                         rel_runs = _gh_if(rel_if, dict(ctx, **{"needs.release-gate.result": out}))
