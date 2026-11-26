@@ -4174,6 +4174,59 @@ def write_test_items(repo, t, sv=None):
 # ---------------------------------------------------------------- a new version branch
 
 
+def post_merge_fill(pm, v):
+    """#325: a post_merge entry's template filler at version v -- `{mc}` and the version's `values` -> fill(text);
+    a `{key}` with no value raises ValueError naming it."""
+    vals = {"mc": v, **((pm.get("values") or {}).get(v) or {})}
+
+    def fill(c):
+        def one(m):
+            if m.group(1) not in vals:
+                raise ValueError(f"the fork's post_merge command `{' '.join(pm['run'])}` names {{{m.group(1)}}}, which "
+                                 f"has no value at {v} (its `values`)")
+            return str(vals[m.group(1)])
+        return re.sub(r"\{(\w+)\}", one, c)
+    return fill
+
+
+def parse_source(text):
+    """A vendored component's source record (#325): a JSON object, or `key = value` / `key: value` lines -> {key: value}."""
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return {str(k): str(v) for k, v in obj.items()}
+    except ValueError:
+        pass
+    out = {}
+    for ln in text.splitlines():
+        m = re.match(r"\s*([\w.-]+)\s*[=:]\s*(.*?)\s*$", ln)
+        if m and not ln.lstrip().startswith("#"):
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def source_moved(repo, ref_at, src, fill):
+    """Has the upstream a post_merge command vendors from moved past the commit the version's source record names
+    (#325)? `src`: {"file": the record's path, "repo_key", "commit_key": its keys, "ref": the upstream ref, templated by
+    `fill`}; the record read at git ref `ref_at`. -> (moved?, why). An unreadable record or an unreachable upstream is
+    not a move: it is said, and nothing runs for it. The round's mergeup and the Tuesday plan both ask this."""
+    r = git(repo, "show", f"{ref_at}:{src['file']}")
+    if r.returncode:
+        return False, f"no {src['file']} on {ref_at}"
+    rec = parse_source(r.stdout)
+    url, have = rec.get(src["repo_key"]), rec.get(src["commit_key"])
+    if not url or not have:
+        return False, f"{src['file']} names no {src['repo_key'] if not url else src['commit_key']}"
+    ref = fill(src["ref"])
+    ls = git(repo, "ls-remote", url, ref)
+    tip = (ls.stdout.split() or [""])[0] if not ls.returncode else ""
+    if not tip:
+        return False, f"{ref} not found at {url}"
+    if tip.startswith(have) or have.startswith(tip):
+        return False, f"{ref} is still at {have[:12]}"
+    return True, f"{ref} moved {have[:12]} -> {tip[:12]}"
+
+
 def version_branches(repo):
     """{version: commit} of every version branch in the clone (local first, then origin's)."""
     out = {}

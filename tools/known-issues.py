@@ -1067,6 +1067,11 @@ def render_plan(inp):
         if not n and not un:
             lines.append(f"No new commits from the authors: the head has `{f['upstream']}` `{f['upstream_branch']}` "
                          f"at `{(f.get('upstream_commit') or '?')[:12]}`.")
+        if f.get("vendored"):          # #325: information only, nothing to tick
+            lines += ["", "### Vendored component moved (information)", "",
+                      "The upstream a vendored component is copied from has moved at these versions; the round re-vendors "
+                      "it there (the fork's post_merge command) at that version's merge-up, before its gates:", ""]
+            lines += [f"- `neoforge-{x['version']}`: {md(x['why'])}" for x in f["vendored"]]
         lines += ["", "### Known issues", ""]
         ticks = pticks.get(repo, {})
         sel, cand = f.get("selection", []), f.get("candidates", [])

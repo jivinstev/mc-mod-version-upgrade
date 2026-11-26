@@ -186,7 +186,8 @@ the release job by hand. Commit `.github/port-release-gate.json` --
 1-360 minutes, default 60) -- then regenerate the workflow with `port-ci.py`, which refuses a bad file. Its
 `release-gate` job runs the script (the fork's own code, trusted like its Gradle build) as an argv on the release
 commit, with `GATE_SHA`, `GATE_REF`, `GITHUB_REPOSITORY` and `GH_TOKEN` and the permissions `contents: read`,
-`actions: write`; the release needs it to succeed, `from_run` releases included, so a failed, skipped or cancelled gate
+`actions: write`. It starts with the gates and runs in parallel with them (it needs no job), on every run that would
+release; the release needs both it and the gates to succeed, `from_run` releases included, so a failed, skipped or cancelled gate
 releases nothing. `port-ci.py check` warns when the installed workflow and the file disagree.
 
 **A real-client check of the fork's own** (a script that boots a client under Xvfb and runs its client tests): commit
