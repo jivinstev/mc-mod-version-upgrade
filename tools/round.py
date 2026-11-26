@@ -6806,6 +6806,17 @@ def self_check_kit_pin(expect):
             note2, res2 = sv_ci_check(_St(), it, log)
             expect(not res2.get("stale_workflow") and cmds[-1][cmds[-1].index("--kit-version") + 1] == "92",
                    f"#337: a state with no pin takes the kit the head already carries: {note2} {cmds[-1]}")
+            # the live case: the take is frozen at a commit before main's own regeneration to kit 93, so the work branch
+            # pins 92 while main pins 93; with no pin recorded, pr's workflow check passes on the branch's own kit
+            git(d, "checkout", "-q", "-b", "main")
+            (d / PORT_CI_WF).write_text("      - run: curl -L .../port-ci-kit-v93.tar.gz\n", encoding="utf-8")
+            git(d, "commit", "-qam", "kit 93 on main", check=True)
+            git(d, "push", "-q", "origin", "main", check=True)
+            git(d, "checkout", "-q", "-b", "keep-current/2026-12-02", "origin/neoforge-1.21.8")
+            expect(stale_wf(_St(), it, str(d), "keep-current/2026-12-02", log) is None,
+                   f"#337: a work branch pinning an older kit than main passes pr with no pin recorded: {cmds[-1]}")
+            expect(stale_wf(_St(kit=93), it, str(d), "keep-current/2026-12-02", log),
+                   "#337: and is stale once the pin is moved to main's kit")
             st = _St(kit=92)
             expect(kit_lines(st) and "kit 93" in kit_lines(st)[0] and "kit 92" in kit_lines(st)[0]
                    and kit_lines(_St(kit=93)) == [],
