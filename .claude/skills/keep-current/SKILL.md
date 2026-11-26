@@ -166,7 +166,8 @@ run is green, and it is then gated against the dependency's NEW build.
 5. **Gate** (`ci-gates.py`, full and minimal; one run at a time -- the software-rendered client gives false
    failures under CPU contention, and the A/B worktrees share `~/.gradle`, so they count too; in the weekly round the
    driver runs it under the machine-wide gate lock, and a worker runs any full gate run as `round.py gate -- <command>`). Then each mode's reproduction, for the modes this run decided.
-   The round's gate runs (`fork-port.py`, which passes `ci-gates.py --gate-args`) apply the fork's
+   The round's gate runs (`fork-port.py` on a version branch, and the driver's own `ci-gates.py` runs on a head, both
+   passing `ci-gates.py --gate-args`) apply the fork's
    `.port/<mc>/gate-gradle-args.txt` (e.g. `-Pshard=ci`) as its Port CI runs do (#330), so the round gates the same
    subset and its summary names it; a hand run of `ci-gates.py` without `--gate-args` (or `--port-ci`) gates the whole
    suite. A Gate B the gate loop stopped at its time budget is environmental: the round blocks the step, no fixer.
