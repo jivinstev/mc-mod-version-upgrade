@@ -176,7 +176,8 @@ built exactly this commit's tree, and releases nothing otherwise (then release w
 comments), e.g. `-Pshard=ci` for a build that selects a test subset from that property. A version with no
 file of its own uses the nearest lower version's (never a higher one's); an empty file of its own gates the whole suite. Port CI's gates job
 (`ci-gates.py --port-ci`, both passes, full and minimal) appends it to every Gradle call and lists it in the gate
-summary; local gate runs (`fork-port.py`, the weekly round) do not read it, so they run the full tier. `port-ci.py`
+summary; `fork-port.py`'s gate runs (the weekly round's) apply it too (`--gate-args`, #330); a bare `ci-gates.py`
+run without either flag gates the whole suite. `port-ci.py`
 and `port-ci.py check` warn about a hand-added `PORT_GRADLE_ARGS` until the file holds it.
 
 **A release gate of the fork's own** (`> Make the fork's releases wait for its full test run`): never add a step to

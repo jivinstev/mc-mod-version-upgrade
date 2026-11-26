@@ -166,9 +166,11 @@ run is green, and it is then gated against the dependency's NEW build.
 5. **Gate** (`ci-gates.py`, full and minimal; one run at a time -- the software-rendered client gives false
    failures under CPU contention, and the A/B worktrees share `~/.gradle`, so they count too; in the weekly round the
    driver runs it under the machine-wide gate lock, and a worker runs any full gate run as `round.py gate -- <command>`). Then each mode's reproduction, for the modes this run decided.
-   These local runs gate the WHOLE suite: a fork's `.port/<mc>/gate-gradle-args.txt` (e.g. `-Pshard=ci`) is read only
-   by its Port CI runs (`ci-gates.py --port-ci`), so a fork whose Port CI gates a subset gets its full tier here. Never
-   pass `--port-ci` to a local run, and never move those arguments back into the workflow by hand.
+   The round's gate runs (`fork-port.py`, which passes `ci-gates.py --gate-args`) apply the fork's
+   `.port/<mc>/gate-gradle-args.txt` (e.g. `-Pshard=ci`) as its Port CI runs do (#330), so the round gates the same
+   subset and its summary names it; a hand run of `ci-gates.py` without `--gate-args` (or `--port-ci`) gates the whole
+   suite. A Gate B the gate loop stopped at its time budget is environmental: the round blocks the step, no fixer.
+   Never move those arguments back into the workflow by hand.
    **A shipped-jar expectation that fails right after an upstream merge is not yet a regression.** The authors may
    have reworded the log line the expectation reads (e.g. a class logged by its internal name,
    `net/minecraft/server/level/ServerLevel`, where it was `ServerLevel`). Before deciding, bisect it with the same
