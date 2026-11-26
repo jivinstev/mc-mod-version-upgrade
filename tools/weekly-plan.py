@@ -47,14 +47,15 @@ code run in its own checkout: the same trust as its Gradle build, which the roun
 `after_repin` (a list of argv lists); a re-run that does not re-pass it warns, or keeps it with --keep-existing.
 
 --post-merge REPO=JSON (repeatable, run in the order given; a fork with version branches, #325): a command of the
-fork's own the round runs in a version branch's checkout right after each merge into it (its merge-up from the version
-below, a resync), only when that merge changed a path the command owns, and before the version's gates; what it writes
-is the version's own commit, named in its PR. JSON is {"run": "CMD" or [argv], "owns": [path or glob, ...],
-"values": {"<mc>": {"key": "value"}}}: `{mc}` and each `{key}` in the command are that version's (e.g. a vendored
-per-version compiler re-vendored from its upstream's per-version branch, `{"run": "python3 tools/vendor.py --ref {ref}",
-"owns": ["third_party/compiler"], "values": {"1.21.10": {"ref": "1.21.10-ladder"}}}`). A single-version fork has no
-merge-ups, so it never runs there. Stored per fork as `post_merge`; a re-run that does not re-pass it warns, or keeps
-it with --keep-existing.
+fork's own the round runs in a version branch's checkout at its merge-up (and a resync), before the version's gates,
+when (a) that merge changed a path the command owns, or (b) the upstream ref its source record names has moved past
+the commit the record holds; what it writes is the version's own commit, named in its PR. JSON is {"run": "CMD" or
+[argv], "owns": [path or glob, ...], "values": {"<mc>": {"key": "value"}}, "source": {"file": "<record>",
+"repo_key": "<key>", "commit_key": "<key>", "ref": "<ref, templated>"}}: `{mc}` and each `{key}` in the command and
+the ref are that version's (e.g. a vendored per-version compiler re-vendored from its upstream's per-version branch:
+run your vendoring script with `--ref {ref}`, owns ["third_party/compiler"], values {"1.21.10": {"ref":
+"1.21.10-ladder"}}). The record is JSON or `key = value` lines. A single-version fork has no merge-ups, so it never
+runs there. Stored per fork as `post_merge`; a re-run that does not re-pass it warns, or keeps it with --keep-existing.
 
 `.github/weekly-plan.json` on the first fork's head branch is the fork set's ONLY source for the round: per fork its
 head, role (library / dependent), the authors' upstream URL and branch, `depends_on` (a dependent: the library unless
@@ -775,8 +776,8 @@ def post_merges_of(a, forks):
             pm = json.loads(js)
         except ValueError as e:
             raise Fail(f"--post-merge {spec!r}: not JSON ({e})")
-        if not isinstance(pm, dict) or set(pm) - {"run", "owns", "values"}:
-            raise Fail(f"--post-merge {spec!r}: an object with run, owns and (optional) values")
+        if not isinstance(pm, dict) or set(pm) - {"run", "owns", "values", "source"}:
+            raise Fail(f"--post-merge {spec!r}: an object with run, owns and (optional) values and source")
         run = pm.get("run")
         try:
             argv = shlex.split(run) if isinstance(run, str) else run
@@ -793,7 +794,15 @@ def post_merges_of(a, forks):
                 isinstance(m, str) and isinstance(kv, dict) and all(isinstance(k, str) and isinstance(x, str)
                                                                     for k, x in kv.items()) for m, kv in vals.items()):
             raise Fail(f"--post-merge {spec!r}: `values` maps a version to {{key: string}}")
-        out.setdefault(repo, []).append({"run": argv, "owns": own, **({"values": vals} if vals else {})})
+        src = pm.get("source")
+        keys = ("file", "repo_key", "commit_key", "ref")
+        if src is not None and (not isinstance(src, dict) or set(src) != set(keys)
+                                or not all(isinstance(src[k], str) and src[k] for k in keys)):
+            raise Fail(f"--post-merge {spec!r}: `source` is {{\"file\": the source record, \"repo_key\" and "
+                       "\"commit_key\": its keys for the upstream URL and the vendored commit, \"ref\": the upstream ref "
+                       "(templated, e.g. port-{mc})}")
+        out.setdefault(repo, []).append({"run": argv, "owns": own, **({"values": vals} if vals else {}),
+                                         **({"source": src} if src else {})})
     return out
 
 
@@ -1079,6 +1088,10 @@ def step_cascade(work):
         if f["untaken"]:
             print(f"weekly-plan: {f['repo']}: the head carries {len(f['untaken'])} commit(s) of the authors' that a version "
                   f"branch has not taken")
+        f["vendored"] = vendored_moves(fb, f, vs)
+        if f["vendored"]:
+            print(f"weekly-plan: {f['repo']}: a vendored component moved upstream at "
+                  + ", ".join(x["version"] for x in f["vendored"]))
         f["shared"] = shared_summary(fb, f["clone"], vs)
         sh = f["shared"]
         print(f"weekly-plan: {f['repo']}: " + (f"the shared-library check failed: {sh['error']}" if sh.get("error") else
@@ -1086,6 +1099,28 @@ def step_cascade(work):
               f"{len(sh['adopt'])} adopt candidate(s), {len(sh['ahead'])} file(s) marked ahead of it"))
     save_input(work, inp)
     return 0
+
+
+def vendored_moves(fb, f, versions):
+    """#325: each version branch whose vendored component's upstream moved past the commit its source record holds (the
+    fork's post_merge entries with a `source`; fork-branches.py source_moved) -> [{"version", "why"}]: information for
+    the plan -- the round re-vendors it at that version's merge-up, nothing to decide. [] for a fork without one."""
+    out = []
+    for pm in f.get("post_merge") or []:
+        if not pm.get("source"):
+            continue
+        for v in versions:
+            ref = next((r for r in (f"refs/remotes/origin/neoforge-{v}", f"refs/heads/neoforge-{v}")
+                        if git(f["clone"], "rev-parse", "--verify", "--quiet", r).returncode == 0), None)
+            if not ref:
+                continue
+            try:
+                moved, why = fb.source_moved(f["clone"], ref, pm["source"], fb.post_merge_fill(pm, v))
+            except ValueError as e:
+                moved, why = False, str(e)
+            if moved:
+                out.append({"version": v, "why": why})
+    return out
 
 
 def shared_summary(fb, clone, versions):
@@ -1876,7 +1911,13 @@ def self_check():
         rc, o = inst("--plan-owner", "someone", "--keep-existing", argv=argv2, info=par)
         expect(rc == 0 and json.loads((fork / CONFIG).read_text(encoding="utf-8"))["forks"][0].get("post_merge")
                == c8["forks"][0]["post_merge"], f"--post-merge: --keep-existing keeps it: {o}")
-        for spec in ('o/lib={"run": "x"}', 'o/lib={"owns": ["a"]}', "o/lib=notjson", 'o/other={"run": "x", "owns": ["a"]}',
+        src_ = {"file": "third_party/c.SOURCE", "repo_key": "repo", "commit_key": "commit", "ref": "port-{mc}"}
+        rc, o = inst("--plan-owner", "someone", "--post-merge",
+                     "o/lib=" + json.dumps({"run": "x", "owns": ["a"], "source": src_}), argv=argv2, info=par)
+        expect(rc == 0 and json.loads((fork / CONFIG).read_text(encoding="utf-8"))["forks"][0]["post_merge"][0]["source"]
+               == src_, f"--post-merge: a source record stored: {rc} {o}")
+        for spec in ('o/lib={"run": "x"}', 'o/lib={"owns": ["a"]}', "o/lib=notjson",
+                     'o/lib={"run": "x", "owns": ["a"], "source": {"file": "f"}}', 'o/other={"run": "x", "owns": ["a"]}',
                      'o/lib={"run": "x", "owns": ["a"], "values": {"1.21.10": "v"}}', 'o/lib={"run": "x", "owns": ["a"], "x": 1}'):
             rc, o = inst("--plan-owner", "someone", "--post-merge", spec, argv=argv2, info=par)
             expect(rc == 2 and "--post-merge" in o, f"--post-merge {spec!r} refused: {rc} {o}")
@@ -2208,6 +2249,26 @@ def self_check():
         expect(f9["new_count"] == 1 and not f9["authors_merged"] and f9["merge_conflicts"] == [] and f9.get("merge_error")
                and "Could not preview merging" in dec9 and "untracked" in dec9 and "needs an agent" not in dec9,
                f"fail soft: a trial merge that fails with no conflict is said so, with git's reason: {f9} {dec9}")
+        # #325: a vendored component whose upstream moved is information on the plan, at the versions it moved at
+        vu = d / "vendor-up"
+        gq(d, "init", "-q", "-b", "port-1.21.10", str(vu))
+        (vu / "c.txt").write_text("1\n", encoding="utf-8"); gq(vu, "add", "-A"); gq(vu, "commit", "-qm", "one")
+        v_one = git(vu, "rev-parse", "HEAD").stdout.strip()
+        (vu / "c.txt").write_text("2\n", encoding="utf-8"); gq(vu, "commit", "-qam", "two")
+        gq(sv3, "checkout", "-q", "-b", "neoforge-1.21.10")
+        (sv3 / "c.SOURCE").write_text(f"repo = {vu.as_posix()}\ncommit = {v_one}\n", encoding="utf-8")
+        gq(sv3, "add", "c.SOURCE"); gq(sv3, "commit", "-qm", "record")
+        gq(sv3, "checkout", "-q", "neoforge-1.21.1")
+        fv = {"clone": str(sv3), "post_merge": [{"run": ["x"], "owns": ["third_party"], "source": {
+            "file": "c.SOURCE", "repo_key": "repo", "commit_key": "commit", "ref": "port-{mc}"}}]}
+        vm = vendored_moves(fb_mod(), fv, ["1.21.10", "1.21.11"])
+        inp_v = json.loads(json.dumps(inp9)); inp_v["forks"][0]["vendored"] = vm
+        body_v = k.render_plan(inp_v)["body"]
+        expect([x["version"] for x in vm] == ["1.21.10"] and "moved" in vm[0]["why"]
+               and "### Vendored component moved (information)" in body_v and "`neoforge-1.21.10`" in body_v
+               and "### Vendored component moved" not in k.render_plan(inp9)["body"]
+               and vendored_moves(fb_mod(), dict(fv, post_merge=[]), ["1.21.10"]) == [],
+               f"#325: a moved vendored source is plan information at its version; none without it: {vm}")
         # previous / open against a fake GitHub: carry-forward from an unclosed plan, then supersede it
         issues, calls = {}, []
 

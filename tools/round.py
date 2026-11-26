@@ -2453,7 +2453,8 @@ def t_sync(st, it, log):
 def t_mergeup(st, it, log):
     F, x = st.fork(it["fork"]), it["extra"]
     if not x.get("from"):
-        return x.get("why", "nothing to merge"), {}
+        pn, pr_ = post_merge(st, it, None, log)      # nothing merged: only a moved source can run a command (#325)
+        return x.get("why", "nothing to merge") + pn, pr_
     d, v = F["dir"], it["version"]
     git(d, "fetch", "-q", "origin", check=True)
     frm = x["from"]
@@ -2496,33 +2497,37 @@ def owns(path, owned):
 
 def post_merge(st, it, before, log):
     """#325: the fork's own commands after a merge into version branch v (its config's `post_merge`, weekly-plan.py
-    install --post-merge: [{"run": argv, "owns": [paths], "values": {mc: {key: value}}}]), each run in the version's
-    checkout only when the merge (`before`..the branch now) changed a path it owns, its argv templated with `{mc}` and
-    the version's `values`; what they write is committed as one commit on the version's branch, before its gates and
-    review, and named in the step's note (so in the version's PR). A vendored component built per Minecraft version is
-    then re-vendored at each version instead of arriving as the head's copy. A failure is a StepError naming the
-    command. -> (a note suffix, the result)."""
+    install --post-merge: [{"run": argv, "owns": [paths], "values": {mc: {key: value}}, "source": {...}}]), each run in
+    the version's checkout when (a) the merge (`before`..the branch now) changed a path it owns, or (b) the upstream ref
+    its source record names has moved past the recorded commit (source_moved: the component's own changes, with no
+    merge to bring them), its argv templated with `{mc}` and the version's `values`. What they write is committed as
+    one commit on the version's branch, before its gates and review, and named in the step's note (so in the version's
+    PR). A vendored component built per Minecraft version is then re-vendored at each version instead of arriving as
+    the head's copy. An undefined {key} or a failing command is a StepError naming it. -> (a note suffix, the result)."""
     cmds = it["extra"].get("post_merge") or []
     v = it["version"]
     d = st.fork(it["fork"])["dir"]
-    after = git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/neoforge-{v}").stdout.strip()
-    if not cmds or not before or not after or before == after:
+    branch = f"refs/heads/neoforge-{v}"
+    after = git(d, "rev-parse", "--verify", "--quiet", branch).stdout.strip()
+    if not cmds or not after:
         return "", {}
-    changed = git(d, "diff", "--name-only", "--no-renames", before, after).stdout.splitlines()
-    co, ran = None, []
+    changed = (git(d, "diff", "--name-only", "--no-renames", before, after).stdout.splitlines()
+               if before and before != after else [])
+    co, ran, why = None, [], []
     for pm in cmds:
-        hit = [f for f in changed if any(owns(f, o) for o in pm.get("owns") or [])]
-        if not hit:
-            continue
-        vals = {"mc": v, **((pm.get("values") or {}).get(v) or {})}
+        fb_fill = mod("fb").post_merge_fill(pm, v)
 
-        def fill(c):
-            def one(m):
-                if m.group(1) not in vals:
-                    raise StepError(f"the fork's post_merge command `{shlex.join(pm['run'])}` names {{{m.group(1)}}}, "
-                                    f"which has no value at {v} (its `values`)")
-                return str(vals[m.group(1)])
-            return re.sub(r"\{(\w+)\}", one, c)
+        def fill(c, fb_fill=fb_fill):
+            try:
+                return fb_fill(c)
+            except ValueError as e:
+                raise StepError(str(e))
+        hit = [f for f in changed if any(owns(f, o) for o in pm.get("owns") or [])]
+        moved, said = mod("fb").source_moved(d, branch, pm["source"], fill) if pm.get("source") else (False, "")
+        if said:
+            why.append(said)
+        if not hit and not moved:
+            continue
         argv = [fill(c) for c in pm["run"]]
         cmd = [sys.executable if c == "python3" and i == 0 else c for i, c in enumerate(argv)]
         co = co or vco(st, it["fork"], v)
@@ -2530,9 +2535,9 @@ def post_merge(st, it, before, log):
             sh(st, it, cmd, log, cwd=co)
         except (StepError, OSError) as e:
             raise StepError(f"the fork's post_merge command `{shlex.join(argv)}` failed at {v} in {co}: {e}")
-        ran.append(shlex.join(argv))
+        ran.append(shlex.join(argv) + (f" ({said})" if moved else ""))
     if not ran:
-        return "", {}
+        return (f"; post-merge: nothing to run ({'; '.join(why)})" if why else ""), {}
     c = commit_paths(co, ["."], f"Post-merge at {v}: {'; '.join(ran)} (keep-current round)")
     return (f"; post-merge ran {'; '.join(ran)}" + (f", committed {c[:12]}" if c else ", nothing to commit")), {
         "post_merge": ran, "post_merge_commit": c}
@@ -6796,6 +6801,32 @@ def self_check_post_merge(expect):
                and git(d, "rev-parse", "HEAD").stdout.strip() == res["post_merge_commit"]
                and "post-merge ran" in note and not git(d, "status", "--porcelain").stdout.strip(),
                f"#325: an owned path changed: the command re-vendors at the version's own values, one commit: {note} {res} {got!r}")
+        # (b) the merge changed no owned path, but the upstream ref the source record names moved: the command runs
+        up = tmp / "upstream"
+        git(tmp, "init", "-q", "-b", "port-1.21.10", str(up), check=True)
+        (up / "c.txt").write_text("1\n", encoding="utf-8")
+        git(up, "add", "-A"); git(up, "commit", "-qm", "one", check=True)
+        one = git(up, "rev-parse", "HEAD").stdout.strip()
+        (d / "third_party/compiler.SOURCE").write_text(f"repo = {up.as_posix()}\ncommit = {one}\n", encoding="utf-8")
+        git(d, "add", "-A"); git(d, "commit", "-qm", "the source record", check=True)
+        spm = [{"run": ["python3", "-c", vendor, "src@{mc}"], "owns": ["third_party/compiler"],  # exec-ok: fixture data (post_merge runs python3 as sys.executable)
+                "source": {"file": "third_party/compiler.SOURCE", "repo_key": "repo", "commit_key": "commit",
+                           "ref": "port-{mc}"}}]
+        sit = dict(it, extra={"post_merge": spm})
+        here = git(d, "rev-parse", "HEAD").stdout.strip()
+        note, res = post_merge(_St(), sit, here, str(log))
+        expect(res == {} and "still at" in note, f"#325: the upstream ref still at the recorded commit: nothing runs: {note}")
+        (up / "c.txt").write_text("2\n", encoding="utf-8")
+        git(up, "commit", "-qam", "two", check=True)
+        note, res = post_merge(_St(), sit, here, str(log))
+        got = (d / "third_party/compiler/VERSION").read_text(encoding="utf-8")
+        expect(res.get("post_merge_commit") and got == "src@1.21.10\n" and "moved" in note,
+               f"#325: no owned path changed, the upstream ref moved: the command runs: {note} {res} {got!r}")
+        here = git(d, "rev-parse", "HEAD").stdout.strip()
+        note, res = post_merge(_St(), dict(sit, extra={"post_merge": [dict(spm[0], source=dict(spm[0]["source"],
+                                                                                              ref="nope-{mc}"))]}),
+                               here, str(log))
+        expect(res == {} and "not found" in note, f"#325: an unreachable ref is said, never a run: {note}")
         bad = [dict(pm[0], run=["python3", "-c", "pass", "{nope}"])]  # exec-ok: fixture data (a key/argv in a test), not a program run
         before = git(d, "rev-parse", "HEAD~1").stdout.strip()
         try:
