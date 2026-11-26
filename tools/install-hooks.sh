@@ -2,10 +2,12 @@
 # Install the local git hooks. Run once after cloning.
 #
 # The pre-push hook does three things CI cannot: it refuses a direct push to `main` (this repository
-# takes pull requests only), it runs the IP gate BEFORE anything leaves the machine, and it compares the
+# takes pull requests only), it runs the IP gate (names, mod code, and the licence check on the lines the pushed
+# commits add: tools/licence-scan.py) BEFORE anything leaves the machine, and it compares the
 # pushed template Java with the third-party sources on this machine (tools/check-similarity.py), which CI
 # cannot hold. The pre-commit hook runs that last check on each commit, and before it the portability checks
-# (tools/check-compat.py and the system bash -n -- bash 3.2 on a Mac) on the staged .py and .sh. CI is the
+# (tools/check-compat.py and the system bash -n -- bash 3.2 on a Mac) on the staged .py and .sh and the licence check
+# on the staged lines (tools/licence-scan.py --staged). CI is the
 # authority, but by the time CI speaks the content is already on GitHub -- and for the one thing this
 # gate guards, that is too late.
 set -uo pipefail
@@ -53,6 +55,22 @@ if [ -n "$names" ]; then
     }
   done <<< "$pushes"
 fi
+# Licences: the lines the pushed commits add may not bring in third-party text under a licence off the allow-list in
+# tools/licence-rules.json (tools/licence-scan.py; THIRD_PARTY.md is the register). The pre-commit hook judged them at
+# commit time; this catches a commit that never met it (a cherry-pick, a rebase, another clone). 2 (could not run)
+# refuses too.
+if [ -f "$root/tools/licence-scan.py" ]; then
+  zero="0000000000000000000000000000000000000000"
+  while read -r lsha rsha; do
+    [ -z "$lsha" ] || [ "$lsha" = "$zero" ] && continue
+    if [ "$rsha" = "$zero" ]; then range=("$lsha" --not --remotes); else range=("$rsha..$lsha"); fi
+    out="$(python3 "$root/tools/licence-scan.py" --repo "$root" --range -- "${range[@]}" 2>&1)" || {
+      printf '%s\n' "$out" >&2
+      echo "pre-push: REFUSED — the push brings in a licence this repository does not take (above; THIRD_PARTY.md). Nothing has been pushed." >&2
+      exit 1
+    }
+  done <<< "$pushes"
+fi
 # Similarity to third-party sources: the template Java this push publishes, compared with the NeoForge, Minecraft and
 # GeckoLib sources on THIS machine (tools/check-similarity.py; CI cannot hold them, so this hook is where it runs).
 # 1 refuses; 2 (no reference corpus here) refuses only with MMVU_SIMILARITY_STRICT=1, else the skip is announced.
@@ -86,7 +104,7 @@ python3 "$root/tools/check-readme.py" --root "$root" $base || {
 }
 HOOK
 chmod +x .git/hooks/pre-push
-echo "installed: .git/hooks/pre-push  (refuses pushes to main; runs check-no-ip.py, check-similarity.py and check-readme.py)"
+echo "installed: .git/hooks/pre-push  (refuses pushes to main; runs check-no-ip.py, licence-scan.py, check-similarity.py and check-readme.py)"
 # The pre-commit hook runs the similarity check on what the commit records, so an agent finds out at commit time rather
 # than at push time. A commit with no template Java staged returns before Python starts.
 cat > .git/hooks/pre-commit <<'HOOK'
@@ -123,6 +141,16 @@ if [ -n "$staged" ] && [ -f "$root/tools/check-compat.py" ]; then
     esac
   done
 fi
+# Licences (tools/licence-scan.py --staged): the lines this commit adds may not bring in third-party text under a
+# licence off the allow-list in tools/licence-rules.json; quiet when clean, and 2 (could not run) refuses too.
+if [ -f "$root/tools/licence-scan.py" ]; then
+  . "$root/tools/python.sh" || exit 1
+  out="$(python3 "$root/tools/licence-scan.py" --repo "$root" --staged 2>&1)" || {
+    printf '%s\n' "$out" >&2
+    echo "pre-commit: REFUSED — the staged lines bring in a licence this repository does not take (above; THIRD_PARTY.md). Nothing was committed." >&2
+    exit 1
+  }
+fi
 [ -f "$root/tools/check-similarity.py" ] || exit 0   # a branch from before the gate
 git diff --cached --name-only --diff-filter=AMRC -- templates/ | grep -qE '\.java(\.example|\.template)?$' || exit 0
 . "$root/tools/python.sh" || exit 1   # python3 on Windows too
@@ -143,4 +171,4 @@ fi
 exit 0
 HOOK
 chmod +x .git/hooks/pre-commit
-echo "installed: .git/hooks/pre-commit  (check-compat.py, check-encoding.py and the system bash -n on staged .py/.sh; check-similarity.py --staged when template Java is staged)"
+echo "installed: .git/hooks/pre-commit  (check-compat.py, check-encoding.py and the system bash -n on staged .py/.sh; licence-scan.py --staged; check-similarity.py --staged when template Java is staged)"

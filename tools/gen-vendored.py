@@ -38,11 +38,11 @@ PIPELINE = ROOT / ".claude/skills/migrate-mod/references/pipeline.md"
 MAKE_MV = ROOT / "tools/make-multiversion.sh"
 
 def _holder():
-    """(year, holder) from LICENSE's `Copyright (c) <year> <holder>` line: the one place the name lives."""
+    """(year, holder) from LICENSE's `Copyright (c) <year> <holder>` line: the one place the name lives (licence-scan: allow the form of that line, not a notice)."""
     m = re.search(r"(?m)^Copyright \(c\) (\d{4}) (.+?)\s*$", (ROOT / "LICENSE").read_text(encoding="utf-8")) \
         if (ROOT / "LICENSE").is_file() else None
     if not m:
-        sys.exit("gen-vendored: LICENSE has no `Copyright (c) <year> <holder>` line")
+        sys.exit("gen-vendored: LICENSE has no `Copyright (c) <year> <holder>` line")  # licence-scan: allow the form of LICENSE's line, not a notice
     return m.group(1), m.group(2)
 
 

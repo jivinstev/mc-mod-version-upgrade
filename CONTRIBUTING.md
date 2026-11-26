@@ -7,6 +7,7 @@ Four checks run on every pull request, and all must pass:
 | gate | question it answers |
 |---|---|
 | `tools/check-no-ip.py` | are we about to publish somebody else's work? |
+| `tools/licence-scan.py --tree` | does anything we add come under a licence we cannot take, or a copyright with no `THIRD_PARTY.md` row? |
 | `tools/check-catalog-fidelity.py` | did we quietly lose a migration rule? |
 | `tools/gen-vendored.py --check` | do the files we copy into *your* project carry the licence the manifest says? |
 | `tools/check-compat.py` | will it still run on a Mac (bash 3.2, BSD sed/grep, Python 3.9) and on Windows? See CLAUDE.md "Portability". A `macOS` CI job also runs the suites there. |
@@ -16,6 +17,7 @@ Run them locally the same way CI does:
 
 ```bash
 python3 tools/check-no-ip.py
+python3 tools/licence-scan.py --tree   # on a PR CI also runs --range -- origin/main..HEAD (the lines it adds)
 python3 tools/check-catalog-fidelity.py --base origin/main   # honours `Catalog-removed:` lines (below)
 python3 tools/gen-vendored.py --check
 python3 tools/check-compat.py      # macOS / Windows portability (CLAUDE.md "Portability"); ~1 s

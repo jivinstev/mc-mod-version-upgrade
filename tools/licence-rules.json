@@ -1,0 +1,60 @@
+{
+  "_comment": "Rules for tools/licence-scan.py (copied, MPL-2.0; see THIRD_PARTY.md). Every list stays short and every exemption gives its reason (the scanner refuses to load one without). The allow-list is this repository's licence policy: widening it is a maintainer decision, not a contributor's. This repository is MIT (LICENSE).",
+
+  "allow": {
+    "MIT": ["mit license", "the mit license", "expat"],
+    "BSD-2-Clause": ["bsd 2-clause", "simplified bsd", "freebsd", "the bsd 2-clause license"],
+    "BSD-3-Clause": ["bsd 3-clause", "new bsd", "modified bsd", "revised bsd", "bsd license", "the bsd license", "bsd", "the bsd 3-clause license"],
+    "Apache-2.0": ["apache 2.0", "apache license 2.0", "apache license, version 2.0", "the apache license, version 2.0", "the apache software license, version 2.0", "asl 2.0"],
+    "MPL-2.0": ["mpl 2.0", "mozilla public license 2.0", "mozilla public license, version 2.0"],
+    "ISC": ["isc license"],
+    "Zlib": ["zlib license", "the zlib license"],
+    "Unlicense": ["the unlicense"],
+    "CC0-1.0": ["cc0", "cc0 1.0", "cc0 1.0 universal", "public domain"]
+  },
+
+  "wording": [
+    {"id": "gnu-gpl", "pattern": "\\bGNU\\s+(?:Affero\\s+|Lesser\\s+|Library\\s+)?General\\s+Public\\b", "why": "GNU GPL, LGPL or AGPL licence text: copyleft, not on the allow-list"},
+    {"id": "gnu-lgpl", "pattern": "\\b(?:GNU\\s+Lesser|Lesser\\s+General\\s+Public)\\b", "why": "GNU LGPL licence text: copyleft, not on the allow-list"},
+    {"id": "agpl", "pattern": "\\bAffero\\b", "why": "GNU AGPL: network copyleft, not on the allow-list"},
+    {"id": "fsf", "pattern": "\\bFree\\s+Software\\s+Foundation\\b", "why": "the Free Software Foundation, named by GPL-family headers"},
+    {"id": "licence-id", "pattern": "\\b(?:(?:A|L)?GPL(?:-?v?\\d(?:\\.\\d)?)?(?:\\+|-only|-or-later)?|EUPL(?:-\\d\\.\\d)?|EPL(?:-\\d\\.\\d)?|CDDL(?:-\\d\\.\\d)?|SSPL(?:-\\d\\.\\d)?|OFL(?:-\\d\\.\\d)?|CC[- ]BY[- ](?:NC|SA|ND)(?:[- ](?:SA|ND))?(?:[- ]\\d\\.\\d)?)(?![\\w-])", "why": "a licence identifier that is not on the allow-list"},
+    {"id": "all-rights-reserved", "pattern": "\\bAll\\s+rights\\s+reserved\\b", "header_only": true, "why": "'All rights reserved' in a header: no permission to copy"},
+    {"id": "stack-exchange", "pattern": "\\b(?:stackoverflow\\.com|stackexchange\\.com|superuser\\.com|serverfault\\.com)/(?:questions|a)/", "why": "a Stack Exchange answer: CC BY-SA, not on the allow-list for code"}
+  ],
+
+  "provenance": [
+    {"id": "glibc", "pattern": "\\b(?:glibc|GNU\\s+C\\s+Library)\\b", "why": "glibc is LGPL-2.1: its code may not be copied or ported"},
+    {"id": "ibm-accurate", "pattern": "\\bIBM\\s+Accurate\\s+Mathematical\\s+Library\\b", "why": "glibc's IBM math library, LGPL-2.1"},
+    {"id": "ultimate-solution", "pattern": "\\bUltimate\\s+Solution\\b", "why": "the IBM 'Ultimate Solution' routines in glibc, LGPL-2.1"}
+  ],
+
+  "permissions": {
+    "_comment": "Code used by its author's permission with no open-source licence. A register row says `PERMISSION <name>`; each name says where the permission is recorded. None is recorded; adding one is the maintainer's decision."
+  },
+
+  "scoped": {
+    "_comment": "Licences allowed for named files only, never as a general code licence: licence id -> {aliases, globs, why}. A register row or SPDX id passes only when every file it covers matches the globs. Adding one is the maintainer's decision.",
+    "CC-BY-4.0": {
+      "aliases": ["cc by 4.0", "creative commons attribution 4.0", "creative commons attribution 4.0 international"],
+      "globs": ["*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.ogg", "*.wav", "*.mp3", "*.nbt", "*/assets/*/models/*", "*/assets/*/blockstates/*", "*/assets/*/sounds.json", "*/assets/*/lang/*"],
+      "why": "assets only (images, sounds, models, structures), never code"
+    }
+  },
+
+  "own_copyright": ["\\bJason\\s+Hendrickson\\b"],
+
+  "exempt": [
+    {"glob": "tools/licence-scan.py", "why": "the scanner names the rules it enforces"},
+    {"glob": "tools/licence-rules.json", "why": "the rules"},
+    {"glob": "tools/test-licence-scan.py", "why": "the scanner's tests"},
+    {"glob": "THIRD_PARTY.md", "why": "the register names each third-party licence"},
+    {"glob": "LICENSE", "why": "this repository's licence text"},
+    {"glob": "tools/gen-vendored.py", "why": "writes and checks the SPDX headers of the files the scaffolders copy (VENDORED.tsv), so it names the identifiers it writes"},
+    {"glob": "tools/port-upstream.py", "why": "port-fork's licence stage: it reads a fork's licence file and names each licence it can recognise, copyleft ones included, to decide whether a public fork may go ahead"},
+    {"glob": "tools/port-publish.py", "why": "publish-port: writes a fork's own licence (whatever its authors chose) onto the pages it generates"},
+    {"glob": "tools/test-port-publish.py", "why": "publish-port's tests: forks under different licences"},
+    {"glob": "tools/golden/port-publish-*", "why": "publish-port's generated pages, which name the fork's licence"},
+    {"glob": ".claude/skills/publish-port/SKILL.md", "why": "the publish-port skill: how a fork's licence and its authors' permission decide what may be published"}
+  ]
+}

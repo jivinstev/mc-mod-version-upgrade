@@ -281,6 +281,8 @@ jobs:
 
       - name: check-no-ip
         run: python3 tools/check-no-ip.py
+      - name: licence-scan --tree
+        run: python3 tools/licence-scan.py --tree
       - name: catalogue fidelity
         run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
