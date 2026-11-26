@@ -280,14 +280,16 @@ def gate_gradle_args(repo, mc=None):
 GATE_SCRIPT_ARG = re.compile(r"[A-Za-z0-9_.:=/@+-]+")
 GATE_SCRIPT_PATH = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
 GATE_SCRIPT_TIMEOUT = (1, 360, 60)                 # minutes: least, most, default
+GATE_SCRIPT_CODE = (3, 125)                       # an exit code a file may give a meaning: never 0, 1, 2, nor a shell's 126+
 GATE_SCRIPT_SHAPE = '{"schema": 1, "script": "<path>.py|.sh", "args": ["..."], "timeout_minutes": N}'
 
 
-def gate_script(text, name, repo=None, lists=("args",), shape=GATE_SCRIPT_SHAPE):
+def gate_script(text, name, repo=None, lists=("args",), shape=GATE_SCRIPT_SHAPE, codes=()):
     """A fork's own gate declaration (`text`, the JSON of the file `name`), validated: {script, timeout_minutes, and
-    each of `lists`} -- `args` defaults to [], any other list (gate-c.json's release_args) to None when absent. A bad
-    file raises Fail naming `name` and what is wrong; it never falls back to a default. `repo` None: the script's
-    existence is not checked (a file read at a git ref)."""
+    each of `lists` and `codes`} -- `args` defaults to [], any other list (gate-c.json's release_args) to None when
+    absent; each of `codes` (gate-c.json's release_flaky_exit) is an exit code from GATE_SCRIPT_CODE, None when absent.
+    A bad file raises Fail naming `name` and what is wrong; it never falls back to a default. `repo` None: the
+    script's existence is not checked (a file read at a git ref)."""
     def bad(why):
         return Fail(f"{name}: {why} -- expected {shape}")
     try:
@@ -296,7 +298,7 @@ def gate_script(text, name, repo=None, lists=("args",), shape=GATE_SCRIPT_SHAPE)
         raise bad(f"not JSON ({e})")
     if not isinstance(cfg, dict):
         raise bad("not a JSON object")
-    keys = {"schema", "script", "timeout_minutes", *lists}
+    keys = {"schema", "script", "timeout_minutes", *lists, *codes}
     if set(cfg) - keys:
         raise bad("unknown key(s) " + ", ".join(sorted(set(cfg) - keys)))
     if cfg.get("schema") != 1 or isinstance(cfg.get("schema"), bool):
@@ -321,6 +323,13 @@ def gate_script(text, name, repo=None, lists=("args",), shape=GATE_SCRIPT_SHAPE)
             if not isinstance(x, str) or len(x) > 200 or not GATE_SCRIPT_ARG.fullmatch(x):
                 raise bad(f"each of {k} must be 1-200 characters of [A-Za-z0-9_.:=/@+-], got {x!r}")
         out[k] = list(v)
+    for k in codes:
+        c = cfg.get(k)
+        if c is not None and (not isinstance(c, int) or isinstance(c, bool)
+                              or not GATE_SCRIPT_CODE[0] <= c <= GATE_SCRIPT_CODE[1]):
+            raise bad(f"{k} must be an exit code from {GATE_SCRIPT_CODE[0]} to {GATE_SCRIPT_CODE[1]} (0, 1 and 2 "
+                      f"keep their meaning: pass, fail, could not run), got {c!r}")
+        out[k] = c
     lo, hi, default = GATE_SCRIPT_TIMEOUT
     t = cfg.get("timeout_minutes", default)
     if not isinstance(t, int) or isinstance(t, bool) or not lo <= t <= hi:
@@ -332,7 +341,7 @@ def gate_script(text, name, repo=None, lists=("args",), shape=GATE_SCRIPT_SHAPE)
 # The fork's own Gate C (issue #308): .port/<mc>/gate-c.json, else the nearest lower version's (port_file).
 FORK_GATEC = "gate-c.json"
 FORK_GATEC_SHAPE = ('{"schema": 1, "script": "<path>.py|.sh", "args": ["..."], "release_args": ["..."], '
-                    '"timeout_minutes": N}')
+                    '"release_flaky_exit": N, "timeout_minutes": N}')
 
 
 def fork_gatec_file(repo, mc=None):
@@ -349,7 +358,7 @@ def fork_gatec(repo, mc=None):
     root = port_root(pathlib.Path(repo))
     rel = f.relative_to(root).as_posix()
     g = gate_script(f.read_text(encoding="utf-8", errors="replace"), rel, root, ("args", "release_args"),
-                    FORK_GATEC_SHAPE)
+                    FORK_GATEC_SHAPE, ("release_flaky_exit",))
     return dict(g, file=rel)
 
 

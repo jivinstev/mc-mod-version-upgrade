@@ -114,7 +114,7 @@ tree. Then:
   Without the file, the workflow is unchanged byte for byte.
 - **The fork's own Gate C** (opt-in): a fork with a real-client check of its own (a script that boots a client under
   Xvfb and runs its client tests) commits `.port/<mc>/gate-c.json`, `{"schema": 1, "script": "<path>.sh", "args":
-  [...], "release_args": [...], "timeout_minutes": 60}`, on every kind of fork (the version's own file, else the
+  [...], "release_args": [...], "timeout_minutes": 60}` (optionally `"release_flaky_exit": N`, below), on every kind of fork (the version's own file, else the
   nearest lower version's, as above). `script` is a `.sh` or `.py` file of the repository (relative to its root, no
   `..`); `args` and `release_args` are lists of plain words (`[A-Za-z0-9_.:=/@+-]`); `timeout_minutes` is 1 to 360
   (default 60). It is validated by the same code as the fork's release gate file (#306; `port_gates.gate_script`); a bad
@@ -126,7 +126,10 @@ tree. Then:
   on a Port CI run that can publish (a tag, or a `release = true` dispatch without `dep_override`), where
   `release_args` replace `args`, else `full` (`--gatec-set release|full` says it outright). Its exit code is the
   verdict and the Gate C row of `gates.md`: `Gate C -- fork's own (<script>, release set) | PASS`, or `FAIL` with
-  the last output lines. The minimal environment does not run it and records it as `full only`, which the release
+  the last output lines. A script that retries a flaky check can give the "passed, one check only on its retry" case
+  an exit code of its own and name it in `"release_flaky_exit": N` (3 to 125; optional): on the release set that exit
+  is a PASS whose row starts `WARNING FLAKY` (so the release notes, which quote `gates.md`, show it) plus a workflow
+  warning; on the full set, pushes and pull requests, it is a FAIL like any other non-zero exit. The minimal environment does not run it and records it as `full only`, which the release
   record (`fork-branches.py`, so `layer-deps.py`'s library-first check) and `round-audit.py` accept only beside the
   release's full summary with that row PASS. Local gate runs (`fork-port.py --gates full`, the weekly round) run it
   too; `fork-port.py`'s A/B tier does not (`--no-fork-gatec`). The gates job's own 120-minute limit still bounds the

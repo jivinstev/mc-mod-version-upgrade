@@ -23,7 +23,9 @@ pipeline did:
     release on a tag or a release = true dispatch, where release_args replace args), PORT_GATE_REPO and PORT_GATE_OUT
     (a folder for the script's own evidence -- logs, frames -- that Port CI uploads with the gate logs); it is the Gate
     C row (`Gate C -- fork's own (<script>, <set> set)`). The minimal environment records it as `full only`. A bad
-    file fails the run; no file changes nothing.
+    file fails the run; no file changes nothing. "release_flaky_exit": N (3-125, optional) names the exit code the
+    script gives when every check passed but one only on its own retry: on the release set that exit is a PASS row
+    that starts `WARNING FLAKY` (the release notes quote it), on the full set a FAIL like any other.
 The harness is generated OUTSIDE the author's tree (--work-dir, default a temp dir) and wired in with
 --init-script, exactly as during the port. The summary (markdown) lists what ran and what passed, and is
 what the release notes quote. Standard library only.
@@ -660,8 +662,16 @@ def fork_gatec_row(g, set_, which, rc, secs, log_text, gatec_arg, timeout_s):
             f"(--gatec `{gatec_arg or 'none'}` does not skip it)")
     tail = [ln.strip() for ln in log_text.splitlines() if ln.strip()][-6:]
     last = "; last output: " + " / ".join(tail)[-500:] if tail else "; no output"
+    flaky = g.get("release_flaky_exit")
     if rc == 0:
         detail = f"{how} exited 0 in {took}; {decl}"
+    elif rc is not None and rc == flaky and set_ == "release":
+        detail = (f"WARNING FLAKY: {how} exited {rc} after {took}, its release_flaky_exit: every check passed, at least "
+                  f"one only on its retry; counted as a pass on the release set only{last}; {decl}")
+        return fork_gatec_label(g, set_), True, detail.replace("|", "/")[:1200]
+    elif rc is not None and rc == flaky:
+        detail = (f"{how} exited {rc} after {took}, its release_flaky_exit (a check passed only on its retry): a pass on "
+                  f"the release set only, a failure on the {set_} set{last}; {decl}")
     elif rc is None:
         detail = f"{how} did not finish in {timeout_s / 60:g} min (timeout_minutes) and was stopped{last}; {decl}"
     else:
@@ -708,7 +718,10 @@ def fork_gatec_step(fork, a, ok, pu, repo, work, rows, record, timeout_s=None):
     text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
     if rc != 0:
         print(text[-6000:], flush=True)
-    record(*fork_gatec_row(fork, set_, which, rc, secs, text, a.gatec, limit))
+    row = fork_gatec_row(fork, set_, which, rc, secs, text, a.gatec, limit)
+    if row[1] and rc != 0:                         # a flaky release pass: say so where the run's annotations show
+        print(f"::warning::{row[0]}: {row[2][:300]}", flush=True)
+    record(*row)
 
 
 def harness_base_of(bprops):
@@ -769,6 +782,7 @@ printf '%s\\n' "$*" > "$PORT_GATE_REPO/ran-args.txt"
 pwd > "$PORT_GATE_REPO/ran-in.txt"
 echo "rig film one: ok"
 if [ "$1" = fail ]; then echo "rig film two: failed twice, FLAKY counts as a failure"; exit 1; fi
+if [ "$1" = flaky ]; then echo "rig film two: failed, then passed on its retry"; exit 3; fi
 if [ "$1" = sleep ]; then sleep 60 & echo $! > "$PORT_GATE_REPO/child.pid"; wait; fi
 exit 0
 """
@@ -890,6 +904,24 @@ def fork_gatec_check():
             want("fail: a FAIL row with the last lines", rec == [False] and "| FAIL | `tools/gate/rig.sh fail` (args) exited 1"
                  in rows[0] and "last output: rig film one: ok / rig film two: failed twice, FLAKY counts as a failure"
                  in rows[0], rows)
+            # release_flaky_exit: a PASS with a warning on the release set, a FAIL on the full set; another code fails
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["flaky"], "release_flaky_exit": 3})
+            rows, rec = step(args(gatec_set="release"))
+            want("flaky, release: PASS, the warning first", rec == [True] and "| PASS | WARNING FLAKY: `tools/gate/rig.sh "
+                 "flaky` (args, the file has no release_args) exited 3 after " in rows[0] and "counted as a pass on the "
+                 "release set only; last output: rig film one: ok / rig film two: failed, then passed on its retry" in rows[0],
+                 rows)
+            rows, rec = step(args())
+            want("flaky, full: FAIL", rec == [False] and "| FAIL | `tools/gate/rig.sh flaky` (args) exited 3 after " in rows[0]
+                 and "a pass on the release set only, a failure on the full set" in rows[0], rows)
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["flaky"]})
+            rows, rec = step(args(gatec_set="release"))
+            want("flaky, release, no release_flaky_exit: FAIL", rec == [False] and "| FAIL |" in rows[0]
+                 and "WARNING" not in rows[0], rows)
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["fail"], "release_flaky_exit": 3})
+            rows, rec = step(args(gatec_set="release"))
+            want("release_flaky_exit: another failing code is still a FAIL", rec == [False] and "exited 1" in rows[0]
+                 and "WARNING" not in rows[0], rows)
             # an earlier gate failed: not run
             rows, rec = step(args(), ok_=False)
             want("earlier failure: not run", rec == [] and read("ran-args.txt") is None and rows == [
@@ -975,6 +1007,12 @@ def fork_gatec_check():
                     ("arg too long", dict(good, args=["a" * 201]), "each of args"),
                     ("release_args a string", dict(good, release_args="smoke"), "release_args must be a list"),
                     ("release_arg a $", dict(good, release_args=["$X"]), "each of release_args"),
+                    ("flaky exit 0", dict(good, release_flaky_exit=0), "release_flaky_exit must be an exit code"),
+                    ("flaky exit 1", dict(good, release_flaky_exit=1), "release_flaky_exit must be an exit code"),
+                    ("flaky exit 2", dict(good, release_flaky_exit=2), "release_flaky_exit must be an exit code"),
+                    ("flaky exit 126", dict(good, release_flaky_exit=126), "release_flaky_exit must be an exit code"),
+                    ("flaky exit a string", dict(good, release_flaky_exit="3"), "release_flaky_exit must be an exit code"),
+                    ("flaky exit true", dict(good, release_flaky_exit=True), "release_flaky_exit must be an exit code"),
                     ("timeout 0", dict(good, timeout_minutes=0), "timeout_minutes must be"),
                     ("timeout over the cap", dict(good, timeout_minutes=361), "timeout_minutes must be"),
                     ("timeout a string", dict(good, timeout_minutes="60"), "timeout_minutes must be"),
@@ -985,6 +1023,11 @@ def fork_gatec_check():
                 bad = bad or fails(lambda: pu.fork_gatec(sv), ".port/1.21.3/gate-c.json: ")
                 want(f"refused: {case}", bad is None, bad)
             put("1.21.3", dict(good, timeout_minutes=360))
+            want("release_flaky_exit: read, None when absent", pu.fork_gatec(sv)["release_flaky_exit"] is None and
+                 pu.gate_script(json.dumps(dict(good, release_flaky_exit=125)), "x", sv, ("args", "release_args"),
+                                codes=("release_flaky_exit",))["release_flaky_exit"] == 125, pu.fork_gatec(sv))
+            want("release_flaky_exit: the release gate file refuses it (gate-c.json only)",
+                 fails(lambda: pu.gate_script(json.dumps(dict(good, release_flaky_exit=3)), "x", sv), "unknown key") is None, "")
             want("the cap is allowed, the default is 60", pu.fork_gatec(sv)["timeout_minutes"] == 360 and
                  pu.gate_script(json.dumps(good), "x", sv)["timeout_minutes"] == 60, pu.fork_gatec(sv))
     finally:
