@@ -2137,7 +2137,12 @@ def t_ci_check(st, it, log):
         at = log_size(log)
         sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci-check", "--repo", F["dir"]], log)
         warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
-    stale_head = [ln for ln in warn if "(the head branch)" in ln] if head_pr else []
+    # the head's own lines: "(the head branch)", and -- a head that IS the base version branch (head neoforge-<base>,
+    # #326) -- the version-branch line for that branch, which ci_check prints without the head tag. Either way setup
+    # regenerates it on the work branch and the PR carries it; a fixer committing there could never clear a check that
+    # reads neoforge-<base> before the PR merges (measured: both forks of a set blocked at ci-check after two fixers)
+    own = f"WARNING {F['head']}:" if F["head"] == f"neoforge-{F['base']}" else None
+    stale_head = [ln for ln in warn if "(the head branch)" in ln or (own and own in ln)] if head_pr else []
     warn = [ln for ln in warn if ln not in stale_head]
     if warn:
         raise StepError(f"{len(warn)} workflow warning(s): {warn[0][:300]}")
@@ -7911,6 +7916,26 @@ def self_check():
             note, r_ = t_ci_check(st_pr, {"fork": "o/x"}, log_)
             expect("regenerated at setup" in note and "kit 61" in r_.get("stale_workflow", ""),
                    f"a stale head with a PR this round: recorded for setup to regenerate, never a fixer job: {note} {r_}")
+            # #326: the head IS the base version branch (head neoforge-9.9, base 9.9): ci_check names it as a version
+            # branch, with no head tag; with the head's PR this round it is setup's to regenerate, never a fixer's;
+            # a stale OTHER rung still stops the step
+            vw = "fork-branches: ci-check: WARNING neoforge-9.9: .github/workflows/port-ci-alpha.yml: its workflow pins Port CI kit 61, older than kit 62\n"
+            sh = rec_out(vw)
+            note, r_ = t_ci_check(st_pr, {"fork": "o/x"}, log_)
+            expect("regenerated at setup" in note and "port-ci-alpha.yml" in r_.get("stale_workflow", ""),
+                   f"a head that is the base version branch, stale, with its PR this round: setup regenerates it: {note} {r_}")
+            sh = rec_out(vw + "fork-branches: ci-check: WARNING neoforge-1.21.4: kit 41, older than 56\n")
+            try:
+                t_ci_check(st_pr, {"fork": "o/x"}, log_)
+                expect(False, "a stale rung other than the head passed because the head's own line was excused")
+            except StepError:
+                pass
+            sh = rec_out(vw)
+            try:
+                t_ci_check(_St2(), {"fork": "o/x"}, log_)
+                expect(False, "a stale head-is-base branch with NO PR this round passed (nothing would regenerate it)")
+            except StepError:
+                pass
             G.update(vco=lambda st_, f_, v_: str(gd), commit_paths=lambda d_, p_, m_: None)
             fz_ = rd_ / "round/frozen.json"
             for present in (False, True):
