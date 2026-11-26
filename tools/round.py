@@ -6776,7 +6776,7 @@ def self_check_post_merge(expect):
                 return F
         vendor = ("import pathlib, sys; p = pathlib.Path('third_party/compiler/VERSION'); "
                   "p.parent.mkdir(parents=True, exist_ok=True); p.write_text(sys.argv[1] + chr(10), encoding='utf-8')")
-        pm = [{"run": ["python3", "-c", vendor, "{ref}@{mc}"], "owns": ["third_party/compiler"],
+        pm = [{"run": ["python3", "-c", vendor, "{ref}@{mc}"], "owns": ["third_party/compiler"],  # exec-ok: fixture data (post_merge runs python3 as sys.executable)
                "values": {"1.21.10": {"ref": "1.21.10-ladder"}}}]
         it = {"id": "mod@1.21.10:mergeup", "fork": "o/mod", "version": "1.21.10", "step": "mergeup",
               "extra": {"post_merge": pm}, "result": {}}
@@ -6796,7 +6796,7 @@ def self_check_post_merge(expect):
                and git(d, "rev-parse", "HEAD").stdout.strip() == res["post_merge_commit"]
                and "post-merge ran" in note and not git(d, "status", "--porcelain").stdout.strip(),
                f"#325: an owned path changed: the command re-vendors at the version's own values, one commit: {note} {res} {got!r}")
-        bad = [dict(pm[0], run=["python3", "-c", "pass", "{nope}"])]
+        bad = [dict(pm[0], run=["python3", "-c", "pass", "{nope}"])]  # exec-ok: fixture data (a key/argv in a test), not a program run
         before = git(d, "rev-parse", "HEAD~1").stdout.strip()
         try:
             post_merge(_St(), dict(it, extra={"post_merge": bad}), before, str(log))
