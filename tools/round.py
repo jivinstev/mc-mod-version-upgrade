@@ -2185,24 +2185,33 @@ def push_ci_regen(st, it):
 def sv_ci_check(st, it, log):
     """A single-version fork's workflow check (port-ci.py check, on origin's head): a WARNING never blocks (keep-current
     step 4); it is recorded, and setup regenerates the workflow at the newest kit on the work branch, so the PR carries
-    it. A repository of several mods: each mod's workflow is checked (port_ci_wfs at origin's head)."""
+    it -- except on a head that follows its default branch (follows_default, #332), which takes the default branch's
+    regeneration instead and is checked again after the take (t_upstream). A repository of several mods: each mod's
+    workflow is checked (port_ci_wfs at origin's head)."""
     F = st.fork(it["fork"])
     d = F["dir"]
     git(d, "fetch", "-q", "origin", F["head"], check=True)
-    wfs = port_ci_wfs(d, f"origin/{F['head']}")
-    if not wfs:
+    if not port_ci_wfs(d, f"origin/{F['head']}"):
         return f"no {PORT_CI_WF} on origin/{F['head']}: nothing to check", {}
+    warn = stale_wf(st, it, d, f"origin/{F['head']}", log)
+    if warn:
+        then = ("the take brings the default branch's, checked again after it" if follows_default(st, it)
+                else "setup regenerates the workflow on the work branch")
+        return f"WARNING (never blocks; {then}): {warn[:300]}", {"stale_workflow": warn[:300]}
+    return "workflow current", {}
+
+
+def stale_wf(st, it, d, ref, log):
+    """port-ci.py check on each Port CI workflow at git ref -> its first WARNING line, or None (current, or none)."""
+    F = st.fork(it["fork"])
     at = log_size(log)
-    for name, path in wfs:
+    for name, path in port_ci_wfs(d, ref):
         f_ = st.rdir / "round/work" / (f"ci-check-{F['name']}-{name}.yml" if name else f"ci-check-{F['name']}.yml")
         f_.parent.mkdir(parents=True, exist_ok=True)
-        f_.write_text(wf_text(d, path, f"origin/{F['head']}"), encoding="utf-8")
+        f_.write_text(wf_text(d, path, ref), encoding="utf-8")
         sh(st, it, [sys.executable, TOOLS / "port-ci.py", "check", "--repo", d, "--file", f_], log)
     warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
-    if warn:
-        return (f"WARNING (never blocks; setup regenerates the workflow on the work branch): {warn[0][:300]}",
-                {"stale_workflow": warn[0][:300]})
-    return "workflow current", {}
+    return warn[0] if warn else None
 
 
 PORT_CI_WF = ".github/workflows/port-ci.yml"
@@ -2267,9 +2276,14 @@ def t_setup(st, it, log):
         n += 1
     c = commit_paths(d, ["."], "Dependency updates the plan ticked (keep-current round)") if n else None
     cc = seg_item(st, it, "ci-check")
-    w = regen_workflow(st, it, d, log) if cc and cc["result"].get("stale_workflow") else None
+    stale = bool(cc and cc["result"].get("stale_workflow"))
+    # a head that follows its default branch never gets a regeneration of its own: its patch would match nothing on
+    # the default branch, and the take brings that branch's regenerated file anyway (#332, weekly round 2026-11-26)
+    later = stale and follows_default(st, it)
+    w = regen_workflow(st, it, d, log) if stale and not later else None
     return (f"on {it['extra']['branch']}" + (f"; {n} bump(s), {c[:12]}" if c else "")
-            + (f"; workflow regenerated at the newest kit, {w[:12]}" if w else "")), {}
+            + (f"; workflow regenerated at the newest kit, {w[:12]}" if w else "")
+            + ("; the stale workflow is left to the take (the head follows its default branch)" if later else "")), {}
 
 
 def authors_remote(d, upstream):
@@ -2402,6 +2416,13 @@ def t_upstream(st, it, log):
     wb = branch_of(st, it)
     sh(st, it, [sys.executable, TOOLS / "port-sync.py", "--repo", d, "--port", wb, "--base", F["head"],
                 "--upstream", f"{remote}/{x.get('upstream_branch') or 'main'}", "--commit", uc], log)
+    cc = seg_item(st, it, "ci-check")
+    if cc and (cc.get("result") or {}).get("stale_workflow") and follows_default(st, it):
+        warn = stale_wf(st, it, d, wb, log)       # setup left it to the take (#332): the take must have brought it
+        if warn:
+            raise Blocked(f"{wb}'s workflow is still behind after the take ({warn[:200]}): on a fork whose head follows "
+                          f"its default branch the regeneration lands there first -- regenerate it on "
+                          f"{x.get('upstream_branch') or 'main'} (a PR), then `round.py retry {it.get('id', '<this item>')}`")
     return f"{remote} at {uc[:12]} merged into {wb}", {"merged_head": head(d)}
 
 
@@ -3533,6 +3554,118 @@ def ledger_appends_only(d, base, local):
     return True
 
 
+def follows_default(st, it):
+    """The ref of the default branch this item's head follows -- an OWNED single-version fork's head (tools/fork-kind.py
+    is_owned at origin's head, on a round that takes its own default branch: an `upstream` item), where every change
+    lands on the default branch first and the release line takes it by merge (#332) -- else None. Such a fork may
+    refuse any release-line commit whose patch is not on its default branch, so the round adds none: setup does not
+    regenerate the workflow before the take (the default branch's own regeneration comes with it), and `pr` checks
+    every commit it would push by patch-id first (unmatched_commits, rebuild_without)."""
+    F = st.fork(it["fork"])
+    up = seg_item(st, it, "upstream")
+    if F["kind"] != "single" or is_vb(st, it) or not up:
+        return None
+    if not mod("fk").is_owned(F["dir"], f"origin/{F['head']}"):
+        return None
+    x = up.get("extra") or {}
+    remote = authors_remote(F["dir"], x.get("upstream") or "")
+    return f"{remote}/{x.get('upstream_branch') or 'main'}" if remote else None
+
+
+def unmatched_commits(d, default, base, local):
+    """The non-merge commits of `base..local` whose patch matches no commit of the default branch (git's patch-id, as
+    `rev-list --cherry-mark` computes it) and that are not round records (code_changes: only records changed, the
+    ledger and the README's Ports block among them) -> [sha], oldest first. Merge commits are never judged."""
+    mine = set(git(d, "rev-list", "--no-merges", f"{base}..{local}").stdout.split())
+    out = []
+    for ln in git(d, "rev-list", "--reverse", "--cherry-mark", "--right-only", "--no-merges",
+                  f"{default}...{local}").stdout.splitlines():
+        mark, c = ln[:1], ln[1:].strip()
+        if mark == "+" and c in mine and code_changes(d, f"{c}^", c):
+            out.append(c)
+    return out
+
+
+def rebuild_without(d, base, local, skip, where):
+    """`local` built again from `base` without the commits in `skip`, no history rewritten on any pushed branch: its
+    first-parent history replayed in a scratch worktree at `where` -- each merge made again with the same other
+    parents (a conflict takes the original merge's resolution for the conflicted files), each other commit
+    cherry-picked, each in `skip` left out -- and kept only when the result's tree is `local`'s, i.e. the commits left
+    out changed nothing the branch still holds (#332: a workflow regenerated before a take that brought the same file).
+    -> the new commit, or None (a skipped commit off the first-parent line, a pick that conflicts, a tree that differs)."""
+    chain = git(d, "rev-list", "--first-parent", "--reverse", f"{base}..{local}").stdout.split()
+    if not set(skip) <= set(chain):
+        return None
+    if pathlib.Path(where).exists():
+        git(d, "worktree", "remove", "--force", str(where))
+    git(d, "worktree", "add", "-q", "--detach", str(where), base, check=True)
+    w = str(where)
+    try:
+        for c in chain:
+            if c in skip:
+                continue
+            parents = git(d, "rev-list", "--parents", "-n", "1", c).stdout.split()[1:]
+            msg = git(d, "log", "-1", "--format=%B", c).stdout
+            if len(parents) > 1:
+                r = git(w, "merge", "-q", "--no-ff", "--no-edit", "-m", msg, *parents[1:])
+                if r.returncode:
+                    bad = git(w, "diff", "--name-only", "--diff-filter=U").stdout.split()
+                    if not bad:
+                        return None
+                    git(w, "checkout", c, "--", *bad, check=True)
+                    git(w, "add", "--", *bad, check=True)
+                    if git(w, "commit", "-q", "--no-edit").returncode:
+                        return None
+            else:
+                r = git(w, "cherry-pick", "--allow-empty", "--keep-redundant-commits", c)
+                if r.returncode:
+                    git(w, "cherry-pick", "--abort")
+                    return None
+        new = git(w, "rev-parse", "HEAD").stdout.strip()
+        tree = lambda x: git(d, "rev-parse", f"{x}^{{tree}}").stdout.strip()
+        return new if tree(new) == tree(local) else None
+    finally:
+        git(w, "merge", "--abort")
+        git(d, "worktree", "remove", "--force", w)
+
+
+def default_first(st, it, d, base, local, log):
+    """#332, on a head that follows its default branch (follows_default): every commit `pr` would push matches the
+    default branch by patch, or is a round record. One that does not is left out by rebuilding the branch
+    (rebuild_without), when the branch's tree does not need it; otherwise the round stops here, naming it, rather than
+    on the fork's red check after the PR. -> (local's commit now, the commits left out)."""
+    default = follows_default(st, it)
+    if not default:
+        return None, []
+    git(d, "fetch", "-q", default.split("/", 1)[0], default.split("/", 1)[1])
+    bad = unmatched_commits(d, default, f"origin/{base}", local)
+    if not bad:
+        return None, []
+    subj = [git(d, "log", "-1", "--format=%h %s", c).stdout.strip() for c in bad[:5]]
+    new = rebuild_without(d, f"origin/{base}", local, bad, st.rdir / "round/work" / f"rebuild-{st.fork(it['fork'])['name']}")
+    if not new:
+        raise Blocked(f"{len(bad)} commit(s) on {local} match nothing on {default} by patch ({'; '.join(subj)}), and the "
+                      f"branch's tree needs them: the fork's release line takes only what its default branch has. Land "
+                      f"each on {default.split('/', 1)[1]} first (a PR there, the same patch), then `round.py retry "
+                      f"{it.get('id', '<this item>')}`")
+    if holder(d, local):
+        git(holder(d, local), "reset", "-q", "--keep", new, check=True)
+    else:
+        git(d, "branch", "-f", local, new, check=True)
+    say_to(log)(f"round: pr: {local} rebuilt without {len(bad)} commit(s) its default branch does not have "
+                f"({'; '.join(subj)}); the tree is the one gated")
+    return new, subj
+
+
+def remote_has(d, branch):
+    """Does origin have `branch`? (fetched into origin/<branch> when it does)"""
+    return git(d, "fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}").returncode == 0
+
+
+def is_ancestor(d, a, b):
+    return git(d, "merge-base", "--is-ancestor", a, b).returncode == 0
+
+
 def t_pr(st, it, log):
     """Push the version's branch as its work branch and open its PR -- only what the gates certified: a branch with code
     committed after the gated commit (a fixer, a retry) sends the version back to its gates (and the library's
@@ -3562,10 +3695,21 @@ def t_pr(st, it, log):
             why += f"; {', '.join(below[:4])} came up from the version below: its review is checked again first"
         raise Reset(ids, why)
     ledger_guard(st, it, d, base, local)
+    _new, left = default_first(st, it, d, base, local, log)
     work = f"keep-current/{st.data['date']}-{v}" if is_vb(st, it) else f"keep-current/{st.data['date']}"
     owner = slug.split("/")[0]
     have = gh(f"repos/{slug}/pulls?state=all&head={owner}:{work}&base={base}")
     sha = git(d, "rev-parse", local).stdout.strip()
+    replaced = []
+    if left or follows_default(st, it):
+        # a rebuilt branch is new history: never forced over the pushed work branch -- a fresh name (or, on a resume,
+        # the one already pushed), and the old work branch's open PR closed for the new one (#332)
+        work0, k = work, 2
+        while remote_has(d, work) and not is_ancestor(d, f"origin/{work}", local):
+            work, k = f"{work0}-r{k}", k + 1
+        if work != work0:
+            replaced = [p for p in have if p.get("state") == "open"]
+            have = gh(f"repos/{slug}/pulls?state=all&head={owner}:{work}&base={base}")
     # an open PR from the work branch, or this very commit's PR already merged (a resume after the merge) -- never an
     # older round's merged PR from a work branch of the same name (measured, trial round 2026-10-29: a second round on
     # the same date took the first round's merged #114 as its own)
@@ -3580,7 +3724,18 @@ def t_pr(st, it, log):
         p = gh(f"repos/{slug}/pulls", "POST", {"title": f"keep-current {st.data['date']}: {v}", "head": work,
                                               "base": base, "body": pr_body(st, it)})
         n = p["number"]
-    return f"#{n} ({work} -> {base})", {"pr": n, "sha": sha, "work": work}
+    for p in replaced:
+        gh(f"repos/{slug}/issues/{p['number']}/comments", "POST", {"body": (
+            f"Replaced by #{n}: the same tree, rebuilt without the commit(s) the default branch does not have"
+            + (f" ({'; '.join(left)})" if left else "") + ", so the release line's patch check can pass without a "
+            "force-push.\n\n---\n_Generated by [Claude Code](https://claude.ai/code)_")})
+        gh(f"repos/{slug}/pulls/{p['number']}", "PATCH", {"state": "closed"})
+    res = {"pr": n, "sha": sha, "work": work}
+    if left:
+        res.update(rebuilt=left, replaced=[p["number"] for p in replaced])
+    return (f"#{n} ({work} -> {base})" + (f"; rebuilt without {len(left)} commit(s) the default branch lacks"
+                                         + (f", replacing #{', #'.join(str(p['number']) for p in replaced)}" if replaced else "")
+                                         if left else "")), res
 
 
 def wait_runs(slug, sha, log, event=None, branch=None, since=None, appear=900, limit=6 * 3600, want=1, first=False,
@@ -6286,6 +6441,165 @@ def self_check_repin_several(expect):
             G.update(keep)
 
 
+def self_check_default_first(expect):
+    """#332, a single-version fixture: on an OWNED fork, whose head follows its default branch, setup leaves the stale
+    workflow to the take, and `pr` finds the commit the default branch lacks (a regeneration made before the take
+    that brought the same file), rebuilds the work branch without it to the very tree that was gated, and pushes it
+    under a new name, closing the old PR -- no force-push. A commit the tree still needs blocks before the PR, named.
+    A fork that is not owned is untouched: setup regenerates as before and `pr` checks nothing."""
+    G = globals()
+    keep = {k: G[k] for k in ("gh", "pr_body")}
+    W = ".github/workflows/port-ci.yml"
+
+    class _St:
+        def __init__(self, d, rdir):
+            self.d, self.rdir = d, rdir
+            self.data = {"date": "2026-12-02", "allow": []}
+            self.items = []
+
+        def fork(self, _):
+            return {"dir": str(self.d), "name": "mod", "kind": "single", "head": "neoforge-1.21.8", "base": "1.21.8",
+                    "versions": []}
+
+        def item(self, iid):
+            for x in self.items:
+                if x["id"] == iid:
+                    return x
+            raise KeyError(iid)
+
+    def put(d, path, text):
+        p_ = pathlib.Path(d) / path
+        p_.parent.mkdir(parents=True, exist_ok=True)
+        p_.write_text(text, encoding="utf-8")
+
+    def commit(d, msg):
+        git(d, "add", "-A", check=True)
+        git(d, "commit", "-qm", msg, check=True)
+        return git(d, "rev-parse", "HEAD").stdout.strip()
+
+    def fixture(tmp, owned, fix_on_main=True):
+        bare, d = tmp / "origin.git", tmp / "mod"
+        git(tmp, "init", "-q", "--bare", str(bare), check=True)
+        git(tmp, "init", "-q", "-b", "main", str(d), check=True)
+        git(d, "config", "core.autocrlf", "false")
+        put(d, ".github/port-publish.json", json.dumps({"own_mod": True} if owned else {"permission": "x"}) + "\n")
+        put(d, W, "kit: 1\n")
+        put(d, "Foo.java", "class Foo {}\n")
+        commit(d, "base")
+        git(d, "branch", "neoforge-1.21.8")
+        put(d, W, "kit: 2\n")
+        commit(d, "Port CI workflow at the newest kit")          # the default branch regenerates first
+        put(d, "Feature.java", "class Feature {}\n")
+        take = commit(d, "a feature on main")
+        git(d, "remote", "add", "origin", bare.as_posix())
+        git(d, "push", "-q", "origin", "main", "neoforge-1.21.8", check=True)
+        git(d, "checkout", "-q", "-b", "keep-current/2026-12-02", "origin/neoforge-1.21.8")
+        put(d, W, "kit: 2\n")
+        regen = commit(d, "Port CI workflow at the newest kit (keep-current round)")   # setup's, before the take
+        git(d, "merge", "-q", "--no-ff", "--no-edit", take, check=True)
+        put(d, "Foo.java", "class Foo { int fixed; }\n")
+        fix = commit(d, "fix a test")                             # the gates fixer's
+        if fix_on_main:
+            git(d, "checkout", "-q", "main")
+            git(d, "cherry-pick", fix, check=True)          # its PR on the default branch, the same patch
+            git(d, "push", "-q", "origin", "main", check=True)
+            git(d, "checkout", "-q", "keep-current/2026-12-02")
+        git(d, "push", "-q", "origin", "keep-current/2026-12-02", check=True)   # pushed: no force-push can clean it
+        gated = git(d, "rev-parse", "HEAD").stdout.strip()
+        st = _St(d, tmp / "rd")
+        up = {"upstream_commit": take, "upstream": bare.as_posix(), "upstream_branch": "main"}
+        st.items = [
+            {"id": "mod@1.21.8:ci-check", "fork": "o/mod", "version": "1.21.8", "step": "ci-check",
+             "result": {"stale_workflow": "WARNING kit 1"}},
+            {"id": "mod@1.21.8:upstream", "fork": "o/mod", "version": "1.21.8", "step": "upstream", "extra": up,
+             "result": {}},
+            {"id": "mod@1.21.8:gates", "fork": "o/mod", "version": "1.21.8", "step": "gates",
+             "result": {"gated_head": gated}},
+            {"id": "mod@1.21.8:pr", "fork": "o/mod", "version": "1.21.8", "step": "pr", "result": {}}]
+        return st, d, bare, regen, fix, gated
+
+    calls = []
+
+    def fake_gh(path, method="GET", data=None):
+        calls.append((method, path, data))
+        if method == "POST" and path.endswith("/pulls"):
+            return {"number": 9}
+        if method == "GET" and "head=o:keep-current/2026-12-02&" in path:
+            return [{"number": 5, "state": "open", "head": {"sha": "0" * 40}}]
+        return {} if method != "GET" else []
+    try:
+        G["gh"], G["pr_body"] = fake_gh, lambda *a_: "body"
+        with tempfile.TemporaryDirectory() as td:
+            tmp = pathlib.Path(td)
+            st, d, bare, regen, fix, gated = fixture(tmp, owned=True)
+            it = st.items[-1]
+            log = str(tmp / "log")
+            expect(follows_default(st, it) == "origin/main", f"#332: an owned head follows origin/main: {follows_default(st, it)}")
+            bad = unmatched_commits(d, "origin/main", "origin/neoforge-1.21.8", "keep-current/2026-12-02")
+            expect(bad == [regen], f"#332: only setup's early regeneration matches nothing on main by patch: {bad}")
+            note, res = t_pr(st, it, log)
+            new = git(d, "rev-parse", "keep-current/2026-12-02").stdout.strip()
+            tree = lambda c: git(d, "rev-parse", f"{c}^{{tree}}").stdout.strip()
+            pushed = git(bare, "rev-parse", "keep-current/2026-12-02-r2").stdout.strip()
+            old = git(bare, "rev-parse", "keep-current/2026-12-02").stdout.strip()
+            left = unmatched_commits(d, "origin/main", "origin/neoforge-1.21.8", new)
+            expect(res.get("work") == "keep-current/2026-12-02-r2" and res.get("pr") == 9 and pushed == new
+                   and old == gated and tree(new) == tree(gated) and not left and res.get("replaced") == [5]
+                   and ("PATCH", "repos/o/mod/pulls/5", {"state": "closed"}) in calls,
+                   f"#332: rebuilt to the gated tree without the commit, pushed under a new name, the old PR closed and "
+                   f"the old branch never forced: {note} {res} {left} {calls}")
+            # a resume: the rebuilt branch is already pushed under its new name, and the old PR closed
+            calls.clear()
+            note2, res2 = t_pr(st, it, log)
+            expect(res2.get("work") == "keep-current/2026-12-02-r2" and not res2.get("rebuilt"),
+                   f"#332: a resume pushes to the name already used, rebuilding nothing: {note2} {res2}")
+            # setup leaves the stale workflow to the take on such a fork
+            regen_calls = []
+            G_regen = G["regen_workflow"]
+            G["regen_workflow"] = lambda *a_: regen_calls.append(1) or "c" * 40
+            try:
+                su = {"id": "mod@1.21.8:setup", "fork": "o/mod", "version": "1.21.8", "step": "setup",
+                      "extra": {"bumps": [], "branch": "keep-current/2026-12-02-s"}, "result": {}}
+                n_su, _r = t_setup(st, su, log)
+            finally:
+                G["regen_workflow"] = G_regen
+            expect(not regen_calls and "left to the take" in n_su,
+                   f"#332: setup does not regenerate on a head that follows its default branch: {n_su}")
+        with tempfile.TemporaryDirectory() as td:
+            tmp = pathlib.Path(td)
+            st, d, bare, regen, fix, gated = fixture(tmp, owned=True, fix_on_main=False)
+            try:
+                t_pr(st, st.items[-1], str(tmp / "log"))
+                expect(False, "#332: a fixer commit the default branch lacks reached a PR")
+            except Blocked as e_:
+                expect("fix a test" in str(e_) and "Land each on main first" in str(e_)
+                       and git(bare, "rev-parse", "--verify", "--quiet", "keep-current/2026-12-02-r2").returncode,
+                       f"#332: a commit the tree needs blocks before the PR, named: {e_}")
+        with tempfile.TemporaryDirectory() as td:
+            tmp = pathlib.Path(td)
+            st, d, bare, regen, fix, gated = fixture(tmp, owned=False, fix_on_main=False)
+            it = st.items[-1]
+            calls.clear()
+            G["gh"] = lambda path, method="GET", data=None: (calls.append((method, path)),
+                                                              {"number": 9} if method == "POST" else [])[1]
+            note, res = t_pr(st, it, str(tmp / "log"))
+            expect(follows_default(st, it) is None and res.get("work") == "keep-current/2026-12-02"
+                   and not res.get("rebuilt") and git(bare, "rev-parse", "keep-current/2026-12-02").stdout.strip() == gated,
+                   f"#332: a fork that is not owned is untouched: {note} {res}")
+            regen_calls = []
+            G_regen = G["regen_workflow"]
+            G["regen_workflow"] = lambda *a_: regen_calls.append(1) or "c" * 40
+            try:
+                su = {"id": "mod@1.21.8:setup", "fork": "o/mod", "version": "1.21.8", "step": "setup",
+                      "extra": {"bumps": [], "branch": "keep-current/2026-12-02-s"}, "result": {}}
+                t_setup(st, su, str(tmp / "log"))
+            finally:
+                G["regen_workflow"] = G_regen
+            expect(regen_calls == [1], "#332: a fork that is not owned regenerates at setup as before")
+    finally:
+        G.update(keep)
+
+
 def self_check_bump(expect):
     """An OWNED fork's release bump (weekly-plan.py install --release-bump): the queue puts `bump` between setup and the
     authors' take only when the fork has one; the step needs merge-fork-prs and the fork's automerge; on a local origin
@@ -6492,6 +6806,7 @@ def self_check():
         rc = fn(*a_, out=buf.append)
         return rc, "\n".join(buf)
     self_check_bump(expect)
+    self_check_default_first(expect)
     self_check_multimod(expect)
     self_check_repin_several(expect)
     self_check_mod_records(expect)
