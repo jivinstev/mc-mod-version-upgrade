@@ -2936,6 +2936,34 @@ def release_gated(wf):
     return "release-gate" in needs and "needs.release-gate.result == 'success'" in rel.split("\n    steps:", 1)[0]
 
 
+def render_version_ci(st, it, d, v, log):
+    """Version branch v's Port CI workflows rendered again from its own checkout d (fork-branches.py ci --target v
+    --run, each mod's in a repository of several, at the round's kit) -- what a re-pin does; the caller commits."""
+    fb = mod("fb")
+    if fb.mod_dirs(d):
+        sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--run",
+                    *kit_args(st, it)], log)
+        return
+    modid = fb.parse_props(fb.read_file(pathlib.Path(d) / "gradle.properties")).get("mod_id")
+    if not modid:
+        raise StepError("no mod_id in gradle.properties: run fork-branches.py ci --target <v> --modid ID --run")
+    sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--modid", modid, "--run",
+                *kit_args(st, it)], log)
+
+
+def release_gate_carried(st, it, d, v, log):
+    """#339, the carry-up that brings the hook: a version branch whose merge brought the fork's
+    .github/port-release-gate.json keeps its own workflow through the merge, so it has the file and no release-gate
+    job until it is rendered again. When the round narrows its Gate B, render it now (before the gates: the gated tree
+    has it) and commit it as its own commit. -> the commit, or None (nothing to do)."""
+    if not is_vb(st, it) or not narrowing_args(d, v) or not (pathlib.Path(d) / ".github/port-release-gate.json").is_file():
+        return None
+    if all(release_gated(wf_text(d, path)) for _n, path in (port_ci_wfs(d) or [("", PORT_CI_WF)])):
+        return None
+    render_version_ci(st, it, d, v, log)
+    return commit_paths(d, [".github"], f"Port CI workflow at {v} with the fork's release gate (keep-current round)")
+
+
 def narrowed_guard(st, it, d, v, ref=None):
     """#339: a release must never ship on a narrowed test tier alone. When the round's gates at version v narrow Gate B
     (narrowing_args), every Port CI workflow of the version (at git `ref`, else the checkout) must back its release with
@@ -2963,6 +2991,7 @@ def t_gates(st, it, log):
     F, v = st.fork(it["fork"]), it["version"]
     if is_vb(st, it):
         d = vco(st, it["fork"], v)
+        release_gate_carried(st, it, d, v, log)      # the merge brought the hook: the version's workflow carries it
         narrowed_guard(st, it, d, v)
         pre = commit_records(d, v)
         clean(d)
@@ -6952,6 +6981,51 @@ def self_check_narrowed_guard(expect):
             (d / ".port/1.21.8/gate-gradle-args.txt").write_text("-Pgametests=com.example.SomeTest\n", encoding="utf-8")
             wf.write_text(plain, encoding="utf-8")
             expect(guard() and "-Pgametests=" in guard(), f"#339 ({kind}): a class filter narrows too")
+        # the carry-up that fixes it: the merge brought .github/port-release-gate.json into a version branch whose own
+        # workflow has no release-gate job yet -- the round renders the version's workflow first, so the guard passes
+        d = tmp / "carry"
+        git(tmp, "init", "-q", "-b", "neoforge-1.21.10", str(d), check=True)
+        git(d, "config", "core.autocrlf", "false")
+        (d / ".github/workflows").mkdir(parents=True)
+        (d / ".port/1.21.8").mkdir(parents=True)
+        (d / "gradle.properties").write_text("minecraft_version=1.21.10\nmod_id=examplemod\n", encoding="utf-8")
+        (d / ".port/1.21.8/gate-gradle-args.txt").write_text("-Pshard=ci\n", encoding="utf-8")
+        (d / PORT_CI_WF).write_text(plain, encoding="utf-8")
+        (d / ".github/port-release-gate.json").write_text('{"schema": 1, "script": "ci/gate.py"}\n', encoding="utf-8")
+        git(d, "add", "-A"); git(d, "commit", "-qm", "the carry-up brought the hook", check=True)
+        G = globals()
+        keep = {k: G[k] for k in ("sh",)}  # exec-ok: fixture data (a key/argv in a test), not a program run
+        rendered = []
+
+        def fake_sh(st_, it_, cmd, log_, **k_):     # fork-branches.py ci --run: renders the version's own workflow
+            rendered.append([str(c) for c in cmd])
+            (d / PORT_CI_WF).write_text(gated, encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        class _StV:
+            data = {"date": "2026-12-02", "allow": [], "kit": 93}
+
+            def fork(self, _):
+                return {"name": "mod", "kind": "branches", "base": "1.21.8", "head": "neoforge-1.21.8", "dir": str(d)}
+        itv = {"id": "mod@1.21.10:gates", "fork": "o/mod", "version": "1.21.10"}
+        try:
+            G["sh"] = fake_sh
+            c = release_gate_carried(_StV(), itv, str(d), "1.21.10", str(tmp / "log"))
+            try:
+                narrowed_guard(_StV(), itv, str(d), "1.21.10")
+                passed = True
+            except Blocked:
+                passed = False
+            expect(c and passed and rendered and "--target" in rendered[0] and "1.21.10" in rendered[0]
+                   and "--kit-version" in rendered[0]
+                   and git(d, "show", "--name-only", "--format=", c).stdout.split() == [PORT_CI_WF],
+                   f"#339: the hook carried up re-renders the version's workflow before its gates, and the guard passes: "
+                   f"{c} {rendered}")
+            rendered.clear()
+            expect(release_gate_carried(_StV(), itv, str(d), "1.21.10", str(tmp / "log")) is None and not rendered,
+                   "#339: a workflow that already carries the gate is not rendered again")
+        finally:
+            G.update(keep)
 
 
 def self_check_bump(expect):
