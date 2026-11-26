@@ -3771,6 +3771,17 @@ def t_ci(st, it, log):
     pr = seg_item(st, it, "pr")["result"]
     if pr.get("skipped"):
         return "no PR", {"skipped": True}
+    default = follows_default(st, it)
+    if default:
+        # a PR pushed before the round checked patches (#332, the weekly round of 2026-11-26: pushed, then its release
+        # line's patch check red): back to `pr`, which rebuilds it without the commit(s) -- never waited on, red forever
+        d = st.fork(it["fork"])["dir"]
+        git(d, "fetch", "-q", default.split("/", 1)[0], default.split("/", 1)[1])
+        git(d, "fetch", "-q", "origin", base_of(st, it))
+        bad = unmatched_commits(d, default, f"origin/{base_of(st, it)}", pr["sha"])
+        if bad:
+            raise Reset(seg_ids(st, it, ("pr",)), f"PR #{pr['pr']} carries {len(bad)} commit(s) its default branch "
+                        f"{default} lacks ({', '.join(c[:12] for c in bad[:5])}): pr rebuilds it (#332)")
     ok, text = wait_runs(it["fork"], pr["sha"], log, event="pull_request")
     if not ok:
         raise StepError(f"PR #{pr['pr']} CI: {text}")
@@ -6565,6 +6576,27 @@ def self_check_default_first(expect):
                 G["regen_workflow"] = G_regen
             expect(not regen_calls and "left to the take" in n_su,
                    f"#332: setup does not regenerate on a head that follows its default branch: {n_su}")
+        with tempfile.TemporaryDirectory() as td:
+            # a PR pushed before the check (no rebuild): its ci step sends the round back to pr, which rebuilds it
+            tmp = pathlib.Path(td)
+            st, d, bare, regen, fix, gated = fixture(tmp, owned=True)
+            st.items[-1]["result"] = {"pr": 5, "sha": gated, "work": "keep-current/2026-12-02"}
+            ci = {"id": "mod@1.21.8:ci", "fork": "o/mod", "version": "1.21.8", "step": "ci", "result": {}}
+            st.items.append(ci)
+            waited = []
+            G_w = G["wait_runs"]
+            G["wait_runs"] = lambda *a_, **k_: waited.append(a_) or (False, "release line: patch check red")
+            try:
+                t_ci(st, ci, str(tmp / "log"))
+                expect(False, "#332: ci waited on a PR that carries a commit its default branch lacks")
+            except Reset as e_:
+                expect(e_.ids == ["mod@1.21.8:pr"] and regen[:12] in str(e_) and not waited,
+                       f"#332: ci sends a PR pushed before the check back to pr, waiting on nothing: {e_.ids} {e_}")
+            finally:
+                G["wait_runs"] = G_w
+            note3, res3 = t_pr(st, st.items[-2], str(tmp / "log"))
+            expect(res3.get("work") == "keep-current/2026-12-02-r2" and res3.get("replaced") == [5],
+                   f"#332: pr then rebuilds it as -r2 and closes the old PR: {note3} {res3}")
         with tempfile.TemporaryDirectory() as td:
             tmp = pathlib.Path(td)
             st, d, bare, regen, fix, gated = fixture(tmp, owned=True, fix_on_main=False)
