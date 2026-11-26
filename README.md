@@ -128,7 +128,10 @@ tree. Then:
   on a Port CI run that can publish (a tag, or a `release = true` dispatch without `dep_override`), where
   `release_args` replace `args`, else `full` (`--gatec-set release|full` says it outright). Its exit code is the
   verdict and the Gate C row of `gates.md`: `Gate C -- fork's own (<script>, release set) | PASS`, or `FAIL` with
-  the last output lines. A script that retries a flaky check can give the "passed, one check only on its retry" case
+  the last output lines. In Port CI the script runs in a job of its own, `gate-c`, in parallel with the gates (the
+  author's build, then the script: `ci-gates.py --fork-gatec-only`); the full gates leg records the row as `own job`
+  (`--fork-gatec-elsewhere`), the release needs `gate-c` and attaches its summary as `gates-gate-c.md`, and a
+  workflow without the file is byte for byte as before (`port-ci.py check` warns when the two disagree). A script that retries a flaky check can give the "passed, one check only on its retry" case
   an exit code of its own and name it in `"release_flaky_exit": N` (3 to 125; optional): on the release set that exit
   is a PASS whose row starts `WARNING FLAKY` (so the release notes, which quote `gates.md`, show it) plus a workflow
   warning; on the full set, pushes and pull requests, it is a FAIL like any other non-zero exit. The minimal environment does not run it and records it as `full only`, which the release

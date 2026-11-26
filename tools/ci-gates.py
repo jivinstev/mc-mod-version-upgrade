@@ -26,6 +26,9 @@ pipeline did:
     file fails the run; no file changes nothing. "release_flaky_exit": N (3-125, optional) names the exit code the
     script gives when every check passed but one only on its own retry: on the release set that exit is a PASS row
     that starts `WARNING FLAKY` (the release notes quote it), on the full set a FAIL like any other.
+    In Port CI a fork with a gate-c.json runs that script in a job of its own, in parallel with the gates:
+    --fork-gatec-only runs the author's build and then the fork's Gate C alone (its summary is the release's
+    gates-gate-c.md), and the full gates leg passes --fork-gatec-elsewhere, which records the row as `own job`.
 The harness is generated OUTSIDE the author's tree (--work-dir, default a temp dir) and wired in with
 --init-script, exactly as during the port. The summary (markdown) lists what ran and what passed, and is
 what the release notes quote. Standard library only.
@@ -687,6 +690,16 @@ def fork_gatec_full_only_row(g):
             "the full environment only, whose summary holds its verdict |")
 
 
+FORK_GATEC_OWN_JOB = "own job"
+
+
+def fork_gatec_own_job_row(g):
+    """The full gates leg's row when Port CI runs the fork's Gate C in its own job (--fork-gatec-elsewhere): that
+    job's summary (the release's gates-gate-c.md) holds its verdict."""
+    return (f"| {FORK_GATEC_LABEL} (`{g['script']}`) | {FORK_GATEC_OWN_JOB} | declared in `{g['file']}`: it runs in Port "
+            "CI's gate-c job, in parallel with these gates, whose summary (gates-gate-c.md) holds its verdict |")
+
+
 def fork_gatec_step(fork, a, ok, pu, repo, work, rows, record, timeout_s=None):
     """The fork's own Gate C in a gate run (after Gate B): nothing without a gate-c.json (fork None); on the full
     environment its script, run once with PORT_GATE_MC / PORT_GATE_MODID / PORT_GATE_SET / PORT_GATE_REPO, recorded as
@@ -934,6 +947,10 @@ def fork_gatec_check():
                 "| Gate C -- fork's own (`tools/gate/rig.sh`) | full only | declared in `.port/1.21.4/gate-c.json`: it runs "
                 "on the full environment only, whose summary holds its verdict |"], rows)
             want("--no-fork-gatec: nothing", step(args(no_fork_gatec=True)) == ([], []) and read("ran-args.txt") is None, "")
+            row_ = fork_gatec_own_job_row({"script": "tools/gate/rig.sh", "file": ".port/1.21.4/gate-c.json"})
+            want("--fork-gatec-elsewhere: an `own job` row naming the gate-c job's summary",
+                 f"| {FORK_GATEC_OWN_JOB} |" in row_ and "gates-gate-c.md" in row_ and row_.startswith(f"| {FORK_GATEC_LABEL} ("),
+                 row_)
             # a .py script runs with this interpreter
             put("1.21.4", {"schema": 1, "script": "tools/gate/rig.py", "args": ["a=1", "b"]})
             rows, rec = step(args())
@@ -1248,6 +1265,12 @@ def main():
                          "release on a tag or a release = true dispatch (GITHUB_REF / GITHUB_EVENT_PATH), else full")
     ap.add_argument("--no-fork-gatec", action="store_true",
                     help="do not run the fork's own Gate C (tools/fork-port.py's A/B tier: no real client at all)")
+    ap.add_argument("--fork-gatec-only", action="store_true",
+                    help="the fork's own Gate C alone, on the full environment: the author's build, then its script (Port "
+                         "CI's gate-c job, in parallel with the gates)")
+    ap.add_argument("--fork-gatec-elsewhere", action="store_true",
+                    help="the fork's own Gate C runs in a job of its own (Port CI's gate-c): record it as `own job` here "
+                         "instead of running it")
     ap.add_argument("--summary", default="ci-gates-summary.md"); ap.add_argument("--work-dir")
     ap.add_argument("--skip-author-build", action="store_true")
     ap.add_argument("--env", choices=("full", "minimal"), default="full",
@@ -1322,6 +1345,13 @@ def main():
         except pu.Fail as e:
             record(f"{FORK_GATEC_LABEL} (`{gf.relative_to(pu.port_root(repo)).as_posix()}`)", False,
                    str(e).replace("|", "/")[:600])
+    if a.fork_gatec_only and (a.env != "full" or a.fork_gatec_elsewhere or a.no_fork_gatec):
+        print("[ci-gates] --fork-gatec-only runs on the full environment, with neither --fork-gatec-elsewhere nor "
+              "--no-fork-gatec", flush=True)
+        return 2
+    if a.fork_gatec_only and fork is None and gf is None:
+        record(FORK_GATEC_LABEL, False, "--fork-gatec-only, but the fork declares no .port/<mc>/gate-c.json (nor does a "
+                                        "lower version): regenerate the workflow")
     use_fork = fork is not None and a.env == "full" and not a.no_fork_gatec
     excluded, ex, arts = {}, [], []
     if a.env == "minimal":
@@ -1358,6 +1388,15 @@ def main():
             print("author's build failed:\n" + (m.group(1).strip() if m else log[-3000:]), flush=True)
         record("author's own build (`build" + "".join(f" {j}" for j in jars) + "`)", passed,
                ", ".join(built) or "no jar produced")
+
+    if a.fork_gatec_only:        # Port CI's gate-c job: the fork's own Gate C on what the author's build made, alone
+        fork_gatec_step(fork, a, ok, pu, repo, work, rows, record)
+        md = [summary_head(repo, a.modid, a.mc, bv, "full: the fork's own Gate C"), "",
+              "| check | result | detail |", "|---|---|---|", *rows, "",
+              "Not covered by any automated gate: gameplay by a person."]
+        pathlib.Path(a.summary).write_text("\n".join(md) + "\n", encoding="utf-8")
+        print("\n".join(md))
+        return 0 if ok else 1
 
     if ok:
         try:
@@ -1477,7 +1516,11 @@ def main():
                 record("Data loads -- the server rejected none of the mod's data files", not bad,
                        f"{len(bad)} rejected, e.g. {bad[0]}" if bad else "no rejection logged")
         record(label, r.returncode == 0, detail)
-    fork_gatec_step(fork, a, ok, pu, repo, work, rows, record)
+    if fork is not None and a.env == "full" and a.fork_gatec_elsewhere and not a.no_fork_gatec:
+        rows.append(fork_gatec_own_job_row(fork))
+        print(f"[ci-gates] Gate C: the fork's own ({fork['file']}) runs in its own job (gate-c)", flush=True)
+    else:
+        fork_gatec_step(fork, a, ok, pu, repo, work, rows, record)
     exempt_rows(rows, pu, repo, a.modid)
 
     if a.shipped:

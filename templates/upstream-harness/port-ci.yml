@@ -131,7 +131,7 @@ jobs:
           git rev-parse "HEAD^{tree}" > "$RUNNER_TEMP/built-tree.txt"   # the tree this run built: a from_run release checks it
           git fetch --no-tags origin "{{BASE}}"
           python3 .port-tools/tools/ci-gates.py --repo {{MOD_DIR}} --modid "{{MODID}}" --base "origin/{{BASE}}" \
-            --gatec "{{GATEC}}" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md" --port-ci
+            --gatec "{{GATEC}}" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md" --port-ci{{FORK_GATEC_ELSEWHERE}}
       - name: Gate summary
         if: always()
         run: cat "$RUNNER_TEMP/gates.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
@@ -159,13 +159,13 @@ jobs:
           name: {{JARS}}
           path: |
             {{LIBS}}/*.jar
-            !{{LIBS}}/*-sources.jar{{SHIPPED_JOB}}{{RELEASE_GATE_JOB}}
+            !{{LIBS}}/*-sources.jar{{SHIPPED_JOB}}{{RELEASE_GATE_JOB}}{{GATEC_JOB}}
 
   release:
     # from_run: the gates (and shipped) jobs are skipped and their jars and gate logs come from that earlier run; a
     # skipped job is accepted then only. A run with dep_override is refused below.
     needs: {{RELEASE_NEEDS}}
-    if: ${{ !cancelled() && github.event_name != 'release' && (startsWith(github.ref, 'refs/tags/') || inputs.release || inputs.from_run) && (needs.gates.result == 'success' || (inputs.from_run && needs.gates.result == 'skipped')){{RELEASE_SHIPPED_IF}}{{RELEASE_GATE_IF}} }}
+    if: ${{ !cancelled() && github.event_name != 'release' && (startsWith(github.ref, 'refs/tags/') || inputs.release || inputs.from_run) && (needs.gates.result == 'success' || (inputs.from_run && needs.gates.result == 'skipped')){{RELEASE_SHIPPED_IF}}{{RELEASE_GATE_IF}}{{RELEASE_GATEC_IF}} }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -251,7 +251,7 @@ jobs:
           set -euo pipefail
           want=$(git rev-parse "$GITHUB_SHA^{tree}")
           ls jars/*.jar > /dev/null 2>&1 || { echo "::error::the earlier run left no jars: nothing released"; exit 1; }
-          for e in full minimal; do
+          for e in full minimal{{GATEC_ENVS}}; do
             [ -f "logs/{{LOGS}}$e/gates.md" ] || { echo "::error::the earlier run has no gate summary for $e: nothing released"; exit 1; }
           done
           for d in logs/{{LOGS}}*/; do
@@ -302,7 +302,7 @@ jobs:
           fi
           {
 {{NOTES_INTRO}}            echo
-            for e in full minimal; do
+            for e in full minimal{{GATEC_ENVS}}; do
               cat "logs/{{LOGS}}$e/gates.md" 2>/dev/null || echo "(gate summary for the $e environment missing)"
               echo
             done
