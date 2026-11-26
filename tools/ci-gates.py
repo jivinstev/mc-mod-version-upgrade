@@ -684,10 +684,12 @@ def fork_gatec_row(g, set_, which, rc, secs, log_text, gatec_arg, timeout_s, ver
     last = "; last output: " + " / ".join(tail)[-500:] if tail else "; no output"
     verdict = verdict or fork_gatec_verdict(rc, "")
     if verdict == "FLAKY":
-        ok_ = bool(g.get("flaky_ok"))
-        detail = (f"{how} FLAKY in {took}: it failed, then passed on its own retry; " +
-                  (f"`flaky_ok` in `{g['file']}` counts that as a pass (see the warning row)" if ok_ else
-                   f"a fail, since `{g['file']}` does not set `flaky_ok`{last}") + f"; {decl}")
+        # the owner's rule: a flaky set passes at RELEASE only (the run that can publish); a push or PR run stays strict
+        ok_ = bool(g.get("flaky_ok")) and set_ == "release"
+        why = (f"`flaky_ok` in `{g['file']}` counts that as a pass on the release set (see the warning row)" if ok_ else
+               f"a fail on the {set_} set: `flaky_ok` passes a flaky set at release only{last}" if g.get("flaky_ok") else
+               f"a fail, since `{g['file']}` does not set `flaky_ok`{last}")
+        detail = f"{how} FLAKY in {took}: it failed, then passed on its own retry; {why}; {decl}"
         return fork_gatec_label(g, set_), ok_, detail.replace("|", "/")[:1200]
     if verdict == "PASS":
         detail = f"{how} exited 0 in {took}; {decl}"
@@ -751,7 +753,7 @@ def fork_gatec_step(fork, a, ok, pu, repo, work, rows, record, timeout_s=None):
     if verdict != "PASS":
         print(text[-6000:], flush=True)
     record(*fork_gatec_row(fork, set_, which, rc, secs, text, a.gatec, limit, verdict))
-    if verdict == "FLAKY" and fork.get("flaky_ok"):
+    if verdict == "FLAKY" and fork.get("flaky_ok") and set_ == "release":
         rows.append(fork_gatec_warn_row(fork))
         print(f"[ci-gates] WARNING: the fork's Gate C was flaky; flaky_ok in {fork['file']} lets it pass", flush=True)
 
@@ -941,11 +943,14 @@ def fork_gatec_check():
             want("flaky, strict: FAIL, no warning", rec == [False] and len(rows) == 1 and "FLAKY" in rows[0]
                  and "does not set `flaky_ok`" in rows[0], rows)
             put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["flaky"], "flaky_ok": True})
-            rows, rec = step(args())
-            want("flaky, flaky_ok: PASS and a WARN row", rec == [True] and len(rows) == 2 and "FLAKY" in rows[0]
+            rows, rec = step(args(gatec_set="release"))
+            want("flaky, flaky_ok, release: PASS and a WARN row", rec == [True] and len(rows) == 2 and "FLAKY" in rows[0]
                  and rows[1].startswith(f"| {FORK_GATEC_WARN} | WARN |") and not rows[1].startswith("| Gate C"), rows)
-            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["liar"], "flaky_ok": True})
             rows, rec = step(args())
+            want("flaky, flaky_ok, full set: still FAIL, no warning row (release only)", rec == [False] and len(rows) == 1
+                 and "at release only" in rows[0], rows)
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["liar"], "flaky_ok": True})
+            rows, rec = step(args(gatec_set="release"))
             want("a PASS word with exit 1: FAIL", rec == [False] and len(rows) == 1, rows)
             put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["fail"]})
             want("verdict words", [fork_gatec_verdict(*x) for x in ((0, ""), (1, ""), (None, "FLAKY"), (3, "flaky\n"),

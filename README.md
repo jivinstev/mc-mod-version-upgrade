@@ -124,8 +124,8 @@ tree. Then:
   timeout, with `PORT_GATE_MC`, `PORT_GATE_MODID`, `PORT_GATE_SET`, `PORT_GATE_REPO` and `PORT_GATE_OUT` (a folder for
   the script's own evidence -- per-test logs, frames -- that Port CI uploads with the gate logs). The script may
   write one word to `$PORT_GATE_OUT/verdict`: `PASS` (counted only with exit 0), `FAIL`, or `FLAKY` (it failed, then
-  passed on its own retry). FLAKY is a FAIL unless the file sets `"flaky_ok": true` (default false): then the Gate C
-  row is PASS, says FLAKY, and a separate `Warning -- the fork's Gate C was flaky | WARN` row stands in gates.md and
+  passed on its own retry). FLAKY is a FAIL unless the file sets `"flaky_ok": true` (default false) and the run is the release set
+  (`PORT_GATE_SET=release`; a push or pull request run stays strict): then the Gate C row is PASS, says FLAKY, and a separate `Warning -- the fork's Gate C was flaky | WARN` row stands in gates.md and
   so in the release notes. Without the word, exit 0 is PASS and anything else FAIL; a timeout is always FAIL. `PORT_GATE_SET` is `release`
   on a Port CI run that can publish (a tag, or a `release = true` dispatch without `dep_override`), where
   `release_args` replace `args`, else `full` (`--gatec-set release|full` says it outright). Its exit code is the
