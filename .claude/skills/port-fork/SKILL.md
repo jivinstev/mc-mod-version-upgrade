@@ -197,7 +197,11 @@ it in place of the built-in Gate C phases, even with `--gatec none`, once, with 
 `PORT_GATE_SET` (`release` on a tag or `release = true` run: `release_args`, else `args`); its exit code is the Gate C
 row (`Gate C -- fork's own (...)`), which the release notes, the done list and library-first read like the built-in
 one. `"release_flaky_exit": N` (3-125) lets a script that retries flaky checks release on "passed, one only on its
-retry": that exit is a PASS row starting `WARNING FLAKY` on the release set, a FAIL on the full set. The minimal environment records it as `full only`. A bad file fails the gates; README "The fork's own Gate C".
+retry": that exit is a PASS row starting `WARNING FLAKY` on the release set, a FAIL on the full set. The minimal environment records it as `full only`.
+In Port CI it is a job of its own, `gate-c` (rendered when the file exists: regenerate the workflow after adding or
+removing it; `port-ci.py check` warns when they disagree): the author's build and then the script
+(`ci-gates.py --fork-gatec-only`), started with the gates and run alongside them; the full gates leg records it as
+`own job` (`--fork-gatec-elsewhere`), the release needs `gate-c` and ships its summary as `gates-gate-c.md`. A bad file fails the gates; README "The fork's own Gate C".
 
 **Promote it once they have played it** (`> Promote my fork's release`). Ask who played it and, optionally,
 one line on what they did; never promote on your own or from an unattended run -- promotion is the "a person

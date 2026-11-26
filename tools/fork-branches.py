@@ -1264,11 +1264,12 @@ def accept_ledgered(rows, minor):
     return out
 
 
-# ci-gates.py's rows for the fork's own Gate C (.port/<mc>/gate-c.json, issue #308): PASS on the full environment, and
-# `full only` on the minimal one, which runs no client -- that row stands for a green Gate C only beside the release's
-# full summary whose fork's own Gate C is PASS (release_gate_record's fork_c)
+# ci-gates.py's rows for the fork's own Gate C (.port/<mc>/gate-c.json, issue #308): PASS where it ran (the full
+# environment, or Port CI's gate-c job: gates-gate-c.md), `full only` on the minimal one, which runs no client, and
+# `own job` on a full leg whose workflow runs it in that job -- those two stand for a green Gate C only beside a
+# summary of the same release whose fork's own Gate C is PASS (release_gate_record's fork_c)
 FORK_GATEC_PASS = re.compile(r"^\|\s*Gate C -- fork's own \(.*\|\s*PASS\s*\|")
-FORK_GATEC_FULL_ONLY = re.compile(r"^\|\s*Gate C -- fork's own \(.*\|\s*full only\s*\|")
+FORK_GATEC_FULL_ONLY = re.compile(r"^\|\s*Gate C -- fork's own \(.*\|\s*(?:full only|own job)\s*\|")
 
 
 def gate_text_problems(text, t, what="GATES.md", tag_version=False, fork_c=False):
@@ -7748,6 +7749,22 @@ def _check_release_gate_record(expect):
             expect(any("no green Gate C" in x and "gates-minimal.md" in x for x in why),
                    f"`full only` with no fork's own Gate C PASS beside it is no Gate C: {why}")
             expect(gate_text_problems(own(h, "minimal"), "1.21.5")[1] != [], "a GATES.md with only `full only`: no Gate C")
+            # the fork's own Gate C in Port CI's gate-c job: the full leg says `own job`, gates-gate-c.md holds the PASS
+            own_job = own(h, "full").replace(
+                "| Gate C -- fork's own (`tools/gate/rig.sh`, release set) | PASS | `tools/gate/rig.sh smoke` (release_args) "
+                "exited 0 in 31.0 min |\n", "| Gate C -- fork's own (`tools/gate/rig.sh`) | own job | declared in "
+                "`.port/1.21.5/gate-c.json`: it runs in Port CI's gate-c job |\n")
+            gc_sum = own(h, "full").replace("(full environment)", "(full: the fork's own Gate C environment)")
+            setup([rel(tag, ["gates-full.md", "gates-gate-c.md", "gates-minimal.md"])],
+                  {u("gates-full.md"): own_job, u("gates-gate-c.md"): gc_sum, u("gates-minimal.md"): own(h, "minimal")})
+            why = gates_why()
+            expect(own_job != own(h, "full") and not why,
+                   f"the fork's own Gate C in its own job (`own job` + gates-gate-c.md PASS): a release record: {why}")
+            setup([rel(tag, ["gates-full.md", "gates-minimal.md"])],
+                  {u("gates-full.md"): own_job, u("gates-minimal.md"): own(h, "minimal")})
+            why = gates_why()
+            expect(any("no green Gate C" in x for x in why),
+                   f"`own job` with no gate-c summary beside it is no Gate C: {why}")
             # the API asset URL refused (a signed redirect, a proxy): the download link is read instead
             rel_api = rel(tag, ["gates-full.md", "gates-minimal.md"])
             for a_ in rel_api["assets"]:

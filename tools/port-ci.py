@@ -284,6 +284,10 @@ def check(repo, file=None, kit_version=None, say=print):
             say(f"port-ci: check: cannot read the newest Port CI kit ({e}); pass --kit-version N")
     gf = repo / RELEASE_GATE_FILE
     why = stale_workflow(wf, newest, gf.read_text(encoding="utf-8", errors="replace") if gf.is_file() else "")
+    try:
+        why += gatec_stale(wf, fork_gatec_at(repo, props(repo).get("minecraft_version")))
+    except SystemExit as e:
+        why.append(f"its .port/<mc>/gate-c.json: {e}")
     branch = git(repo, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip() or "the port branch"
     hand = hand_gradle_args(wf, repo, props(repo).get("minecraft_version"))
     if hand:
@@ -742,6 +746,121 @@ def release_gate_values(values, gate=None):
                 RELEASE_NEEDS="[" + needs.strip("[]") + ", release-gate]")
 
 
+# The fork's own Gate C (.port/<mc>/gate-c.json, tools/port_gates.py fork_gatec) in a job of its own: it starts with
+# the gates and runs alongside them, the release needs it to succeed (or be skipped by from_run, whose earlier run's
+# gate-c summary it then takes, like the gates').
+RELEASE_GATEC_IF = " && (needs.gate-c.result == 'success' || (inputs.from_run && needs.gate-c.result == 'skipped'))"
+
+
+def gatec_values(values, g=None):
+    """GATEC_JOB / FORK_GATEC_ELSEWHERE / RELEASE_GATEC_IF / GATEC_ENVS, and the release's needs: empty and unchanged
+    without a fork's own Gate C (byte for byte the old workflow); with one (g: port_gates.fork_gatec's dict), the
+    `gate-c` job -- the author's build and then the fork's script (ci-gates.py --fork-gatec-only), on the runs the gates
+    run on, its own summary uploaded as the `gate-c` gate log (the release's gates-gate-c.md) -- the full gates leg
+    recording it as `own job` (--fork-gatec-elsewhere), and the release needing it. After mod_values."""
+    if not g:
+        return dict(values, GATEC_JOB="", FORK_GATEC_ELSEWHERE="", RELEASE_GATEC_IF="", GATEC_ENVS="", GATEC_JAR_CHECK="")
+    v = values
+    timeout = min(360, int(g.get("timeout_minutes") or 60) + 60)
+    job = f"""
+
+  gate-c:
+    # The fork's own Gate C ({g["file"]}, read when this workflow was generated: regenerate it after
+    # adding or removing that file), in a job of its own: it starts with the gates and runs alongside them, and the
+    # release needs it. The author's build, then the fork's script -- once, under its timeout, with its release_args on a
+    # run that can release (release_flaky_exit as declared) -- by ci-gates.py --fork-gatec-only.
+    if: ${{{{ github.event_name != 'release' && !inputs.promote && !inputs.publish && !inputs.publish_setup && !inputs.from_run }}}}
+    runs-on: ubuntu-24.04
+    timeout-minutes: {timeout}
+    permissions:
+      contents: read
+      actions: read               # dep_override: a candidate jar in another repository's run artifact
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Port CI kit v{v["KIT_VERSION"]} (pinned by sha256)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" \\
+            "https://github.com/{v["MIGRATOR_REPO"]}/releases/download/port-ci-kit-v{v["KIT_VERSION"]}/port-ci-kit-v{v["KIT_VERSION"]}.tar.gz"
+          echo "{v["KIT_SHA256"]}  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -
+          mkdir -p .port-tools && tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C .port-tools
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "{v["JAVA"]}"
+      - name: Software OpenGL for the client gate
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
+{v["PRE_BUILD"]}{v["DEP_OVERRIDE_STEP"]}
+      - name: Build and the fork's own Gate C
+        run: |
+          git rev-parse "HEAD^{{tree}}" > "$RUNNER_TEMP/built-tree.txt"
+          git fetch --no-tags origin "{v["BASE"]}"
+          python3 .port-tools/tools/ci-gates.py --repo {v["MOD_DIR"]} --modid "{v["MODID"]}" --base "origin/{v["BASE"]}" \\
+            --gatec "{v["GATEC"]}" --env full --fork-gatec-only --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md" --port-ci
+      - name: Gate summary
+        if: always()
+        run: cat "$RUNNER_TEMP/gates.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - name: The jars Gate C tested (the release compares them with the jars it ships)
+        if: always()
+        run: |
+          for j in {v["LIBS"]}/*.jar; do
+            case "$j" in *-sources.jar) continue ;; esac
+            if [ -f "$j" ]; then echo "$(sha256sum "$j" | cut -d' ' -f1)  $(basename "$j")"; fi
+          done > "$RUNNER_TEMP/gate-c-jars.sha256"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: {v["LOGS"]}gate-c
+          path: |
+            ${{{{ runner.temp }}}}/port-ci/*.log
+            ${{{{ runner.temp }}}}/port-ci/gate-c-out/
+            ${{{{ runner.temp }}}}/gates.md
+            ${{{{ runner.temp }}}}/built-tree.txt
+            ${{{{ runner.temp }}}}/gate-c-jars.sha256
+          if-no-files-found: ignore"""
+    check = f"""
+      - name: Gate C tested the bytes this releases (the gate-c job's jars against the gates leg's)
+        run: |
+          set -eu
+          f="logs/{v["LOGS"]}gate-c/gate-c-jars.sha256"
+          [ -f "$f" ] || {{ echo "::error::the gate-c job recorded no jar digests ($f): nothing released"; exit 1; }}
+          bad=0
+          for j in jars/*.jar; do
+            n=$(basename "$j"); have=$(sha256sum "$j" | cut -d' ' -f1)
+            tested=$(awk -v n="$n" '$2 == n {{print $1}}' "$f")
+            if [ "$tested" != "$have" ]; then
+              echo "::error::$n: the release jar is sha256 $have, the jar the fork's own Gate C tested is sha256 ${{tested:-(none of that name)}}: the build is not reproducible, so Gate C did not test the bytes that ship; nothing released"
+              bad=1
+            fi
+          done
+          [ "$bad" -eq 0 ]
+          echo "Gate C tested the bytes that ship: every jar's sha256 matches the gate-c job's" >> "$GITHUB_STEP_SUMMARY\""""
+    return dict(values, GATEC_JOB=job, FORK_GATEC_ELSEWHERE=" --fork-gatec-elsewhere", RELEASE_GATEC_IF=RELEASE_GATEC_IF,
+                GATEC_ENVS=" gate-c", GATEC_JAR_CHECK=check, RELEASE_NEEDS="[" + values["RELEASE_NEEDS"].strip("[]") + ", gate-c]")
+
+
+def gatec_stale(wf, g):
+    """Why the workflow and the fork's own Gate C disagree: a gate-c.json (g) and no gate-c job, or a gate-c job and no
+    file -- [] when they agree. A re-render reads the file again."""
+    has = "\n  gate-c:\n" in wf
+    if g and not has:
+        return [f"the fork has {g['file']} but its workflow has no gate-c job (its own Gate C would run inside the gates)"]
+    if has and not g:
+        return ["its workflow has a gate-c job but the fork has no .port/<mc>/gate-c.json"]
+    return []
+
+
+def fork_gatec_at(proj, mc):
+    """The fork's own Gate C at Minecraft mc (port_gates.fork_gatec: .port/<mc>/gate-c.json, else the nearest lower
+    version's), or None; a bad file stops the render, as ci-gates.py would stop the run."""
+    pg = _load_tool("port_gates_pc", "port_gates.py")
+    try:
+        return pg.fork_gatec(proj, mc)
+    except pg.Fail as e:
+        sys.exit(f"port-ci: {e}")
+
+
 def release_gate_stale(wf, text):
     """Why the workflow does not run the release gate the fork's .github/port-release-gate.json (its text: "" when the
     fork has none) describes -- [] when it does. A re-render reads the file again, so the regenerate command fixes it."""
@@ -1096,7 +1215,8 @@ GOLDEN_CASES = (("single-nodeps", False), ("single-deps", True))
 FIX_DEP = "o/lib@lib-1.0-mc1.21.1/lib-1.0_mr.jar=com.example.lib:lib:1.0"
 
 
-def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False, owned=False, mod=None, gate=None):
+def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False, owned=False, mod=None, gate=None,
+            gatec=None):
     """The workflow for fixed, invented values (no network: every sha256 is fake). The two option-free cases are
     recorded in tools/golden/port-ci-<case>.yml, captured from port-ci.py BEFORE --variant-jar/--dep-jar-variant
     existed: an option a fork does not use must not change one byte of its workflow."""
@@ -1111,6 +1231,7 @@ def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False, o
     values = release_gate_values(values, gate)      # gate: release_gate()'s dict, None for none
     values = records_values(kind_values(values, owned), version_branch)
     values = mod_values(values, *(mod or ()))       # mod: (mod_dir, name, also) for one mod of several
+    values = gatec_values(values, gatec)            # gatec: port_gates.fork_gatec()'s dict, None for none
     return mod_push(render(TEMPLATE.read_text(encoding="utf-8"), values), values)
 
 
@@ -2434,6 +2555,110 @@ def release_gate_check():
     return ok
 
 
+GATEC_FIX = {"schema": 1, "script": "tools/gate/rig.sh", "args": ["all"], "release_args": ["release"],
+             "timeout_minutes": 90, "release_flaky_exit": 3, "file": ".port/1.21.1/gate-c.json"}
+
+
+def gatec_check():
+    """The fork's own Gate C in a job of its own: (a) no gate-c.json, the golden byte for byte (covered by the goldens
+    and release_gate_check); (b) with one, a `gate-c` job that needs nothing and runs on the gates' runs, the author's
+    build then --fork-gatec-only, its summary uploaded as the gate-c gate log; the full gates leg passing
+    --fork-gatec-elsewhere; the release needing gates and gate-c (and the release gate, the shipped job) and
+    requiring gate-c; the from_run check and the notes reading gate-c's summary; nothing else changed; (c) the needs
+    graph, read off the workflow; (d) check() names a workflow and a file that disagree."""
+    ok = True
+    def job(w_, j):                 # a job's body: up to the next top-level job, blank lines inside it included
+        rest = (("\n" + w_.split("\njobs:\n", 1)[1]).split(f"\n  {j}:\n", 1) + [""])[1]
+        m_ = re.search(r"\n\n?  [a-z][a-z0-9-]*:\n", rest)
+        return rest[:m_.start()] if m_ else rest
+    cond = lambda j: (j.split("\n    if: ", 1) + ["${{ false }}"])[1].split("\n", 1)[0]
+
+    def needs_graph(w_):
+        out = {}
+        jobs_ = w_.split("\njobs:\n", 1)[1]
+        heads = list(re.finditer(r"(?m)^  ([a-z][a-z0-9-]*):\n", jobs_))
+        for i_, m_ in enumerate(heads):
+            blk = jobs_[m_.end():heads[i_ + 1].start() if i_ + 1 < len(heads) else len(jobs_)]
+            n_ = re.search(r"(?m)^    needs: (\[[^\]]*\]|\S+)$", blk)
+            out[m_.group(1)] = [x.strip() for x in (n_.group(1).strip("[]").split(",") if n_ else []) if x.strip()]
+        return out
+    plain, wf = fixture(False), fixture(False, gatec=GATEC_FIX)
+    gc, rel, g = job(wf, "gate-c"), job(wf, "release"), job(wf, "gates")
+    ok &= want("gatec: no file, nothing of it", "\n  gate-c:\n" not in plain and "fork-gatec" not in plain, "absent",
+               "present")
+    ok &= want("gatec: the job runs on the gates' runs", cond(gc) == cond(g), cond(g), cond(gc))
+    ok &= want("gatec: the job builds and runs the fork's Gate C alone",
+               "--env full --fork-gatec-only" in gc and "--port-ci" in gc and "timeout-minutes: 150" in gc
+               and "name: gate-logs-gate-c" in gc and "built-tree.txt" in gc and "xvfb" in gc
+               and "contents: write" not in gc and "${{ inputs." not in "".join(run_blocks(gc)), "the job", gc[:1200])
+    ok &= want("gatec: the full gates leg records it as its own job",
+               wf.count("--port-ci --fork-gatec-elsewhere") == 1 and "--fork-gatec-elsewhere" not in gc, "one flag", "")
+    ok &= want("gatec: the release needs and requires it", "\n    needs: [gates, gate-c]\n" in rel
+               and RELEASE_GATEC_IF in cond(rel), "needs + if", rel[:600])
+    ok &= want("gatec: from_run and the notes read its summary", wf.count("for e in full minimal gate-c; do") == 2,
+               "two loops", wf.count("for e in full minimal gate-c; do"))
+    ok &= want("gatec: nothing else changed", wf.replace("\n\n  gate-c:\n" + gc, "").replace(" --fork-gatec-elsewhere", "")
+               .replace("[gates, gate-c]", "gates").replace(RELEASE_GATEC_IF, "").replace(" gate-c; do", "; do")
+               .replace(re.search(r"\n      - name: Gate C tested the bytes.*?(?=\n      - name: Publish pre-release)", wf,
+                                  re.S).group(0), "") == plain,
+               "the plain workflow", "a diff")
+    both = fixture(True, gate=GATE_FIX, gatec=GATEC_FIX, variant_jars=["*_mr.jar"])
+    for tag_, w_, rel_needs in (("gate-c", wf, {"gates", "gate-c"}),
+                                ("gate-c, release gate, shipped", both, {"gates", "shipped", "release-gate", "gate-c"})):
+        gr = needs_graph(w_)
+        ok &= want(f"gatec: needs graph ({tag_}): gate-c in parallel, the release after all",
+                   gr.get("gate-c") == [] and set(gr.get("release", [])) == rel_needs
+                   and (gr.get("release-gate", []) == [] if "release-gate" in gr else True), sorted(rel_needs), gr)
+    rif = cond(job(both, "release"))
+    for gates_r in ("success", "failure"):
+        for c_r in ("success", "failure", "skipped"):
+            for from_run in (False, True):
+                ctx = {"github.event_name": "workflow_dispatch", "inputs.release": True, "cancelled": False,
+                       "inputs.from_run": "1" if from_run else "", "needs.gates.result": "skipped" if from_run else gates_r,
+                       "needs.shipped.result": "skipped" if from_run else "success",
+                       "needs.release-gate.result": "success", "needs.gate-c.result": "skipped" if from_run else c_r}
+                want_ = from_run or (gates_r == "success" and c_r == "success")
+                ok &= want(f"gatec: release when gates {gates_r}, gate-c {c_r}{', from_run' if from_run else ''}",
+                           _gh_if(rif, ctx) == want_, want_, _gh_if(rif, ctx))
+    # the release checks Gate C tested the bytes that ship: run the step itself on a match and on a mismatch
+    blk = [b for b in run_blocks(job(wf, "release")) if "gate-c-jars.sha256" in b]
+    ok &= want("gatec: the release compares the jars' sha256", len(blk) == 1 and "${{" not in blk[0], "one step", len(blk))
+    import shutil, subprocess, tempfile, hashlib
+    sh_ = shutil.which("bash") if os.name != "nt" else _load_tool("gitbash_pc", "gitbash.py").BASH
+    if not blk or not sh_ or not shutil.which("sha256sum"):
+        print("port-ci self-check: the jar sha256 step not run here (no bash or sha256sum on this machine)")
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            t_ = pathlib.Path(td)
+            (t_ / "jars").mkdir()
+            (t_ / "logs/gate-logs-gate-c").mkdir(parents=True)
+            (t_ / "jars/examplemod-1.0.jar").write_bytes(b"released")
+            dig = lambda b: hashlib.sha256(b).hexdigest()
+            script = "\n".join(ln[10:] if ln.startswith(" " * 10) else ln for ln in blk[0].splitlines())
+            env_ = dict(os.environ, GITHUB_STEP_SUMMARY=str(t_ / "summary.md"))
+            run_ = lambda: subprocess.run([sh_, "-c", script], cwd=str(t_), capture_output=True, text=True,
+                                          encoding="utf-8", env=env_)
+            (t_ / "logs/gate-logs-gate-c/gate-c-jars.sha256").write_text(
+                f"{dig(b'released')}  examplemod-1.0.jar\n", encoding="utf-8")
+            r_ = run_()
+            ok &= want("gatec: sha256 step, the same bytes: released", r_.returncode == 0, 0, r_.stdout + r_.stderr)
+            (t_ / "logs/gate-logs-gate-c/gate-c-jars.sha256").write_text(
+                f"{dig(b'rebuilt')}  examplemod-1.0.jar\n", encoding="utf-8")
+            r_ = run_()
+            ok &= want("gatec: sha256 step, a mismatch: nothing released, both hashes named",
+                       r_.returncode != 0 and dig(b"released") in r_.stdout and dig(b"rebuilt") in r_.stdout
+                       and "examplemod-1.0.jar" in r_.stdout, "exit 1 naming both", r_.stdout + r_.stderr)
+            (t_ / "logs/gate-logs-gate-c/gate-c-jars.sha256").unlink()
+            r_ = run_()
+            ok &= want("gatec: sha256 step, no digests: nothing released", r_.returncode != 0
+                       and "recorded no jar digests" in r_.stdout, "exit 1", r_.stdout + r_.stderr)
+    ok &= want("gatec: a workflow and a file that disagree are stale", bool(gatec_stale(plain, GATEC_FIX))
+               and bool(gatec_stale(wf, None)) and not gatec_stale(wf, GATEC_FIX) and not gatec_stale(plain, None),
+               "stale both ways", "")
+    print(f"port-ci self-check: the fork's Gate C job: {'OK' if ok else 'FAIL'}")
+    return ok
+
+
 def run_blocks(text):
     """The body of every `run: |` script in a workflow fragment: inputs reach a script only through env, so none of
     these may contain `${{ }}`."""
@@ -2455,7 +2680,7 @@ def self_check():
     v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", t))}
     v["PRE_BUILD"] = pre_build(["owner/lib@neoforge-1.21.1"])
     v["BRANCH"], v["BASE"] = "neoforge-1.21.1", "master"
-    v = mod_values(records_values(release_gate_values(variant_values(v))))
+    v = gatec_values(mod_values(records_values(release_gate_values(variant_values(v)))))
     plain = render(t, v)
     out = plain
     ok = "${{ github.sha }}" in out and "{{" not in out.replace("${{", "")    # GitHub's own ${{ }} survive
@@ -2661,6 +2886,7 @@ def self_check():
     ok &= default_branch_check()
     ok &= multimod_check()
     ok &= release_gate_check()
+    ok &= gatec_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -2767,6 +2993,7 @@ def main():
     owned = fk.is_owned(repo, config=fk.publish_config(name)) if name else fk.is_owned(repo)
     values = records_values(kind_values(values, owned), is_version_branch(repo, mc))
     values = mod_values(values, mod_dir, name, also)
+    values = gatec_values(values, fork_gatec_at(proj, mc))      # .port/<mc>/gate-c.json: the fork's own Gate C job
     out = mod_push(render(TEMPLATE.read_text(encoding="utf-8"), values), values)
     if a.print:
         print(out); return 0

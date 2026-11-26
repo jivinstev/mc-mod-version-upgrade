@@ -805,8 +805,8 @@ def release_gatec(F, rel):
     """(bad rows, read, problem or None) of the release's gate summary assets: none, or one not downloadable, is a
     problem. Each summary needs at least one Gate C row PASS; a `skipped` row is accepted only on a library (ci-gates
     skips a library's spawn-type phases). The fork's own Gate C (ci-gates.py, .port/<mc>/gate-c.json) is the full
-    summary's `Gate C -- fork's own` row; the minimal summary's `full only` row counts as its PASS only when a summary
-    of the same release has that row PASS."""
+    summary's `Gate C -- fork's own` row (or Port CI's gate-c job's, gates-gate-c.md); the minimal summary's `full only`
+    row, and a full one's `own job` row, count as its PASS only when a summary of the same release has that row PASS."""
     bad, read, names, texts = [], 0, [], []
     for a in sorted(rel.get("assets") or [], key=lambda a: a.get("name") or ""):
         if not re.fullmatch(r"gates-[\w-]+\.md", a.get("name") or ""):
@@ -824,7 +824,7 @@ def release_gatec(F, rel):
         rows = passed = 0
         for c in cells(text):
             rows += 1
-            if fork_c and c[0].startswith("Gate C -- fork's own") and c[1] == "full only":
+            if fork_c and c[0].startswith("Gate C -- fork's own") and c[1] in ("full only", "own job"):
                 passed += 1
                 continue
             passed += c[1] == "PASS"
@@ -1527,6 +1527,18 @@ def self_check(cases_arg=None):
             sums.update({"gates-full.md": full_, "gates-minimal.md": min_})
             bad_, read_, prob_ = release_gatec(type("F", (), {"library": False})(), rel_)
             expect((not bad_ and read_ == 2 and prob_ is None) == ok_, f"release_gatec: {case}: {bad_} {prob_}")
+        # the fork's own Gate C in Port CI's gate-c job: the full leg's `own job` row stands beside gates-gate-c.md's PASS
+        own_job = "| Gate C -- fork's own (`tools/gate/rig.sh`) | own job | runs in Port CI's gate-c job |\n"
+        rel3 = {"assets": [{"name": n, "url": f"https://api.github.com/repos/o/r/releases/assets/1/{n}"}
+                           for n in ("gates-full.md", "gates-gate-c.md", "gates-minimal.md")]}
+        for case, gc_, ok_ in (("own job + gate-c PASS", own_full.format("PASS"), True),
+                               ("own job + gate-c FAIL", own_full.format("FAIL"), False)):
+            sums.update({"gates-full.md": own_job, "gates-gate-c.md": gc_, "gates-minimal.md": own_min})
+            bad_, read_, prob_ = release_gatec(type("F", (), {"library": False})(), rel3)
+            expect((not bad_ and read_ == 3 and prob_ is None) == ok_, f"release_gatec: {case}: {bad_} {prob_}")
+        sums.update({"gates-full.md": own_job, "gates-minimal.md": own_min})
+        bad_, _r, prob_ = release_gatec(type("F", (), {"library": False})(), rel_)
+        expect(bad_, f"release_gatec: `own job` with no gate-c summary beside it is no Gate C: {bad_} {prob_}")
         RAW = None
         fx = Fixture(tmp / "base")
         API, RAW = fx.api, fx.raw
