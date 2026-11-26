@@ -166,7 +166,7 @@ _MODS = {}
 def mod(key):
     files = {"fb": "fork-branches.py", "ki": "known-issues.py", "pc": "port-ci.py", "lc": "checkout-lock.py",
              "fk": "fork-kind.py", "ld": "layer-deps.py", "rp": "round-preflight.py", "cg": "ci-gates.py",
-             "wp": "weekly-plan.py"}
+             "wp": "weekly-plan.py", "fp": "fork-port.py"}
     if key not in _MODS:
         sys.dont_write_bytecode = True
         _MODS[key] = load(f"round_{key}", files[key])
@@ -2730,8 +2730,11 @@ def sv_gate_cmds(d, upstream_commit=None, base_ref=None, gatec=None):
         if name and repo == d:
             raise StepError(f"{path} names no --mod-dir: which folder does this mod build from?")
         for env in ("full", "minimal"):
+            # --gate-args: the fork's .port/<mc>/gate-gradle-args.txt (its Port CI subset), as fork-port.py's gate runs
+            # pass it (#331) -- a head's gates never go through fork-port, so without it a head ran the whole suite into
+            # Gate B's time budget (weekly round 2026-11-26)
             out.append([sys.executable, TOOLS / "ci-gates.py", "--repo", repo, "--modid", modid, *base, "--gatec", g_,
-                        "--env", env, "--summary",
+                        "--gate-args", "--env", env, "--summary",
                         pathlib.Path(d) / "build" / (f"round-gates-{name}-{env}.md" if name else f"round-gates-{env}.md")])
     return out
 
@@ -2831,6 +2834,12 @@ def gate_sh(st, it, cmd, log, **kw):
         return sh(st, it, cmd, log, **kw)
     except StepError as e:
         said = log_since(log, at)
+        # a ci-gates.py run straight from here (a head's gates, sv_gate_cmds): its red rows judged the way fork-port.py
+        # judges the same rows (ENVIRONMENTAL: every one red for the machine)
+        red = [re.sub(r"^\[ci-gates\] ", "", ln).strip() for ln in said.splitlines()
+               if ln.startswith("[ci-gates]") and re.search(r": FAIL\b", ln)]
+        if ENV_STOP not in said and red and all(mod("fp").ENVIRONMENTAL.search(ln) for ln in red):
+            said += f"\n{ENV_STOP}: {'; '.join(ln[:160] for ln in red[:2])}\n"
         if ENV_STOP in said:
             line = next((ln.strip() for ln in said.splitlines() if ENV_STOP in ln), ENV_STOP)
             raise Blocked(f"the gate run stopped for the machine, not the code: {line[:400]} -- no fixer job; re-run it "
@@ -2913,13 +2922,13 @@ def t_gates(st, it, log):
     if ci_record(d):                # the PR's CI is the gate of record (both kinds): build and Gate A/B here
         pins()                      # no lock here, as for the build itself: every dependent gate has its own mavenLocal
         for cmd in sv_gate_cmds(d, up, gatec=""):
-            sh(st, it, cmd, log)
+            gate_sh(st, it, cmd, log)
         return "ci-gates build and Gate A/B green (full and minimal); Gate C is the PR's CI (the gate of record)", {
             "gated_head": gated, "gated_at": at, "head_after": head(d), "ci_record": True}
     with full_gate_lock(it["id"], say_to(log)) as lk:
         pins()
         for cmd in sv_gate_cmds(d, up):
-            sh(st, it, cmd, log, hold=lk)
+            gate_sh(st, it, cmd, log, hold=lk)
     c = None
     if single:                 # #161 U5 (C2): the full run is the version's GATES.md, as on a version branch
         # a repository of several mods (one Port CI workflow each): each mod's full run is .port/<v>/<name>/GATES.md
@@ -6271,13 +6280,15 @@ def self_check_multimod(expect):
                        ("alpha", "examplealpha", "minimal", "round-gates-alpha-minimal.md", "launch,spawn"),
                        ("zeta", "examplezeta", "full", "round-gates-zeta-full.md", "launch,spawn"),
                        ("zeta", "examplezeta", "minimal", "round-gates-zeta-minimal.md", "launch,spawn")]
-               and [c[c.index("--gatec") + 1] for c in sv_gate_cmds(d, gatec="")] == [""] * 4,
-               f"several mods: each mod's gates on its own folder, its own summaries: {got}")
+               and [c[c.index("--gatec") + 1] for c in sv_gate_cmds(d, gatec="")] == [""] * 4
+               and all("--gate-args" in c for c in cmds + sv_gate_cmds(d, gatec="")),
+               f"several mods: each mod's gates on its own folder, its own summaries, the fork's gate subset: {got}")
         (one / PORT_CI_WF).write_text(full + '          python3 .port-tools/tools/ci-gates.py --repo . --modid "examplemod" '
                                       '--base "origin/main" \\\n            --gatec "launch" --env "x"\n', encoding="utf-8")
         c1 = sv_gate_cmds(one)
         expect(len(c1) == 2 and c1[0][c1[0].index("--repo") + 1] == one and c1[0][c1[0].index("--modid") + 1] == "examplemod"
-               and pathlib.Path(c1[1][c1[1].index("--summary") + 1]).name == "round-gates-minimal.md",
+               and pathlib.Path(c1[1][c1[1].index("--summary") + 1]).name == "round-gates-minimal.md"
+               and all("--gate-args" in c for c in c1),
                f"one mod: the pair as before, on the checkout: {c1}")
         # the release: each mod's workflow dispatched once, each mod's newest tag found by its prefix
         sp = tmp / "STATE.json"
@@ -6873,6 +6884,33 @@ def self_check():
                    f"an environmental gate stop blocks with its reason, no fixer: {e_}")
         except StepError:
             expect(False, "an environmental gate stop went to the fixer (StepError)")
+        def cig_sh(st_, it_, cmd, log, **k_):         # a head's gates: ci-gates.py itself, no fork-port verdict line
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write("[ci-gates] Gate B -- headless server: FAIL -- stopped by the gate loop at the 1500 s budget\n"
+                         "[ci-gates] Gate A -- unit tests: PASS\n")
+            raise StepError("ci-gates exit 1")
+        sh = cig_sh
+        try:
+            gate_sh(None, {"id": "x"}, ["ci-gates"], glog)
+            expect(False, "a head's environmental Gate B stop passed")
+        except Blocked as e_:
+            expect("1500 s budget" in str(e_) and "gate-gradle-args.txt" in str(e_),
+                   f"a head's ci-gates run stopped at the budget blocks, no fixer: {e_}")
+        except StepError:
+            expect(False, "a head's ci-gates budget stop went to the fixer (StepError)")
+        def cig_code_sh(st_, it_, cmd, log, **k_):    # one row red for the code: the fixer's, as before
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write("[ci-gates] Gate B -- headless server: FAIL -- stopped by the gate loop at the 1500 s budget\n"
+                         "[ci-gates] Gate A -- unit tests: FAIL -- 2 tests failed\n")
+            raise StepError("ci-gates exit 1")
+        sh = cig_code_sh
+        try:
+            gate_sh(None, {"id": "x"}, ["ci-gates"], glog)
+            expect(False, "a head's red ci-gates run passed")
+        except Blocked:
+            expect(False, "a head's code failure was blocked as environmental")
+        except StepError:
+            pass
         sh = code_sh
         try:
             gate_sh(None, {"id": "x"}, ["fork-port"], glog)
