@@ -3555,15 +3555,17 @@ def ledger_appends_only(d, base, local):
 
 
 def follows_default(st, it):
-    """The ref of the default branch this item's head follows -- an OWNED single-version fork's head (tools/fork-kind.py
-    is_owned at origin's head, on a round that takes its own default branch: an `upstream` item), where every change
-    lands on the default branch first and the release line takes it by merge (#332) -- else None. Such a fork may
-    refuse any release-line commit whose patch is not on its default branch, so the round adds none: setup does not
-    regenerate the workflow before the take (the default branch's own regeneration comes with it), and `pr` checks
-    every commit it would push by patch-id first (unmatched_commits, rebuild_without)."""
+    """The ref of the default branch this item's head follows -- the head of an OWNED fork, of either kind
+    (tools/fork-kind.py is_owned at origin's head), on a round that takes its own default branch (an `upstream` item on
+    a single-version fork, an `authors` item on a version-branch fork's head, which has no `upstream` item), where every
+    change lands on the default branch first and the release line takes it by merge (#332) -- else None; a version
+    branch above the head never. Such a fork may refuse any release-line commit whose patch is not on its default
+    branch, so the round adds none: setup does not regenerate the workflow before the take (the default branch's own
+    regeneration comes with it), and `pr` checks every commit it would push by patch-id first (unmatched_commits,
+    rebuild_without)."""
     F = st.fork(it["fork"])
-    up = seg_item(st, it, "upstream")
-    if F["kind"] != "single" or is_vb(st, it) or not up:
+    up = seg_item(st, it, "upstream") or seg_item(st, it, "authors")
+    if is_vb(st, it) or not up:
         return None
     if not mod("fk").is_owned(F["dir"], f"origin/{F['head']}"):
         return None
@@ -3637,6 +3639,15 @@ def default_first(st, it, d, base, local, log):
     default = follows_default(st, it)
     if not default:
         return None, []
+    cc = seg_item(st, it, "ci-check")
+    if cc and (cc.get("result") or {}).get("stale_workflow") and not seg_item(st, it, "upstream"):
+        # a version-branch fork's head: no `upstream` step re-checked the workflow after the take (t_upstream does on a
+        # single-version fork), so it is checked here, before anything is pushed
+        warn = stale_wf(st, it, d, local, log)
+        if warn:
+            raise Blocked(f"{local}'s workflow is still behind after the take ({warn[:200]}): on a fork whose head "
+                          f"follows its default branch the regeneration lands there first -- regenerate it on "
+                          f"{default.split('/', 1)[1]} (a PR), then `round.py retry {it.get('id', '<this item>')}`")
     git(d, "fetch", "-q", default.split("/", 1)[0], default.split("/", 1)[1])
     bad = unmatched_commits(d, default, f"origin/{base}", local)
     if not bad:
@@ -6463,14 +6474,14 @@ def self_check_default_first(expect):
     W = ".github/workflows/port-ci.yml"
 
     class _St:
-        def __init__(self, d, rdir):
-            self.d, self.rdir = d, rdir
+        def __init__(self, d, rdir, kind="single"):
+            self.d, self.rdir, self.kind = d, rdir, kind
             self.data = {"date": "2026-12-02", "allow": []}
             self.items = []
 
         def fork(self, _):
-            return {"dir": str(self.d), "name": "mod", "kind": "single", "head": "neoforge-1.21.8", "base": "1.21.8",
-                    "versions": []}
+            return {"dir": str(self.d), "name": "mod", "kind": self.kind, "head": "neoforge-1.21.8", "base": "1.21.8",
+                    "versions": ["1.21.8", "1.21.10"] if self.kind == "branches" else []}
 
         def item(self, iid):
             for x in self.items:
@@ -6488,7 +6499,7 @@ def self_check_default_first(expect):
         git(d, "commit", "-qm", msg, check=True)
         return git(d, "rev-parse", "HEAD").stdout.strip()
 
-    def fixture(tmp, owned, fix_on_main=True):
+    def fixture(tmp, owned, fix_on_main=True, kind="single"):
         bare, d = tmp / "origin.git", tmp / "mod"
         git(tmp, "init", "-q", "--bare", str(bare), check=True)
         git(tmp, "init", "-q", "-b", "main", str(d), check=True)
@@ -6517,12 +6528,13 @@ def self_check_default_first(expect):
             git(d, "checkout", "-q", "keep-current/2026-12-02")
         git(d, "push", "-q", "origin", "keep-current/2026-12-02", check=True)   # pushed: no force-push can clean it
         gated = git(d, "rev-parse", "HEAD").stdout.strip()
-        st = _St(d, tmp / "rd")
+        st = _St(d, tmp / "rd", kind)
         up = {"upstream_commit": take, "upstream": bare.as_posix(), "upstream_branch": "main"}
+        take_step = "upstream" if kind == "single" else "authors"      # a version-branch head has no `upstream` item
         st.items = [
             {"id": "mod@1.21.8:ci-check", "fork": "o/mod", "version": "1.21.8", "step": "ci-check",
              "result": {"stale_workflow": "WARNING kit 1"}},
-            {"id": "mod@1.21.8:upstream", "fork": "o/mod", "version": "1.21.8", "step": "upstream", "extra": up,
+            {"id": f"mod@1.21.8:{take_step}", "fork": "o/mod", "version": "1.21.8", "step": take_step, "extra": up,
              "result": {}},
             {"id": "mod@1.21.8:gates", "fork": "o/mod", "version": "1.21.8", "step": "gates",
              "result": {"gated_head": gated}},
@@ -6607,6 +6619,44 @@ def self_check_default_first(expect):
                 expect("fix a test" in str(e_) and "Land each on main first" in str(e_)
                        and git(bare, "rev-parse", "--verify", "--quiet", "keep-current/2026-12-02-r2").returncode,
                        f"#332: a commit the tree needs blocks before the PR, named: {e_}")
+        with tempfile.TemporaryDirectory() as td:
+            # an owned VERSION-BRANCH fork's head (an `authors` item, no `upstream`): it follows its default branch too;
+            # a PR pushed before the check goes back to pr from ci and is rebuilt as -r2; a rung above the head never
+            tmp = pathlib.Path(td)
+            st, d, bare, regen, fix, gated = fixture(tmp, owned=True, kind="branches")
+            expect(follows_default(st, st.items[-1]) == "origin/main",
+                   f"#332: an owned version-branch fork's head follows origin/main: {follows_default(st, st.items[-1])}")
+            rung = {"id": "mod@1.21.10:pr", "fork": "o/mod", "version": "1.21.10", "step": "pr", "result": {}}
+            st.items.append({"id": "mod@1.21.10:authors", "fork": "o/mod", "version": "1.21.10", "step": "authors",
+                             "extra": dict(st.items[1]["extra"]), "result": {}})
+            expect(follows_default(st, rung) is None, "#332: a version branch above the head follows nothing")
+            st.items[-2]["result"] = {"pr": 5, "sha": gated, "work": "keep-current/2026-12-02"}
+            ci = {"id": "mod@1.21.8:ci", "fork": "o/mod", "version": "1.21.8", "step": "ci", "result": {}}
+            st.items.append(ci)
+            G_w, G_s = G["wait_runs"], G["stale_wf"]
+            checked = []
+            G["wait_runs"] = lambda *a_, **k_: (False, "release line: patch check red")
+            G["stale_wf"] = lambda *a_: checked.append(a_[3]) or None
+            try:
+                try:
+                    t_ci(st, ci, str(tmp / "log"))
+                    expect(False, "#332: ci waited on a version-branch head's PR carrying a commit main lacks")
+                except Reset as e_:
+                    expect(e_.ids == ["mod@1.21.8:pr"], f"#332: a version-branch head's ci resets pr: {e_.ids}")
+                pr_it = next(x for x in st.items if x["id"] == "mod@1.21.8:pr")
+                n4, r4 = t_pr(st, pr_it, str(tmp / "log"))
+                expect(r4.get("work") == "keep-current/2026-12-02-r2" and r4.get("replaced") == [5]
+                       and checked == ["keep-current/2026-12-02"],
+                       f"#332: a version-branch head is rebuilt as -r2, its workflow checked after the take: {n4} {r4} "
+                       f"{checked}")
+                G["stale_wf"] = lambda *a_: "WARNING kit 1 behind"
+                try:
+                    t_pr(st, pr_it, str(tmp / "log"))
+                    expect(False, "#332: a version-branch head still stale after the take was pushed")
+                except Blocked as e_:
+                    expect("still behind after the take" in str(e_), f"#332: a stale head blocks before the push: {e_}")
+            finally:
+                G["wait_runs"], G["stale_wf"] = G_w, G_s
         with tempfile.TemporaryDirectory() as td:
             tmp = pathlib.Path(td)
             st, d, bare, regen, fix, gated = fixture(tmp, owned=False, fix_on_main=False)
