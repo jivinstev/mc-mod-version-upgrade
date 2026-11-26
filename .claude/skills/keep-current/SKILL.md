@@ -589,7 +589,7 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   checks every commit it would push against the default branch by patch-id (round records aside). A commit that
   matches nothing there is left out by rebuilding the work branch from the head, when the gated tree does not need it,
   and the rebuilt branch is pushed as `keep-current/<date>-r2` with the old PR closed, never force-pushed; when the tree
-  needs it, `pr` blocks and names it, to land on the default branch first; a PR pushed before that check is sent back to `pr` by its `ci` step, #332), `setup` (the work branch
+  needs it, `pr` blocks and names it, to land on the default branch first; a PR pushed before that check is sent back to `pr` by its `ci` step, #332; the head of an owned version-branch fork is treated the same, its workflow checked after the take at `pr`, and its version branches never), `setup` (the work branch
   `keep-current/<date>` from origin's head, the ticked `dep_bumps`), `upstream` (the authors' merge, mechanical:
   `port-sync.py --port keep-current/<date> --base <head> --upstream <the remote fetching the plan's upstream>/<branch>
   --commit <upstream_commit>`; a conflict stops it red and becomes its fixer's job -- resolve, commit the merge -- after
