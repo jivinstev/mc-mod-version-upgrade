@@ -277,7 +277,7 @@ jobs:
               line = (line[:m.start()] + "at `" + sha + "`" + line[m.end():]
                       + " -- tested as " + m.group(1).split(" ")[0] + " (" + event + " run " + run + "), the same tree")
               f.write_bytes(line.encode("utf-8") + cr + nl + rest)
-          PY
+          PY{{GATEC_JAR_CHECK}}
       - name: Publish pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

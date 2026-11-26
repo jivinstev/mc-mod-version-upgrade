@@ -130,7 +130,8 @@ tree. Then:
   verdict and the Gate C row of `gates.md`: `Gate C -- fork's own (<script>, release set) | PASS`, or `FAIL` with
   the last output lines. In Port CI the script runs in a job of its own, `gate-c`, in parallel with the gates (the
   author's build, then the script: `ci-gates.py --fork-gatec-only`); the full gates leg records the row as `own job`
-  (`--fork-gatec-elsewhere`), the release needs `gate-c` and attaches its summary as `gates-gate-c.md`, and a
+  (`--fork-gatec-elsewhere`), the release needs `gate-c` and attaches its summary as `gates-gate-c.md`; it releases only when every jar it ships has
+  the sha256 of the jar Gate C tested (a build that is not reproducible fails it, naming both hashes); and a
   workflow without the file is byte for byte as before (`port-ci.py check` warns when the two disagree). A script that retries a flaky check can give the "passed, one check only on its retry" case
   an exit code of its own and name it in `"release_flaky_exit": N` (3 to 125; optional): on the release set that exit
   is a PASS whose row starts `WARNING FLAKY` (so the release notes, which quote `gates.md`, show it) plus a workflow

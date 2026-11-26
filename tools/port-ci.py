@@ -759,7 +759,7 @@ def gatec_values(values, g=None):
     run on, its own summary uploaded as the `gate-c` gate log (the release's gates-gate-c.md) -- the full gates leg
     recording it as `own job` (--fork-gatec-elsewhere), and the release needing it. After mod_values."""
     if not g:
-        return dict(values, GATEC_JOB="", FORK_GATEC_ELSEWHERE="", RELEASE_GATEC_IF="", GATEC_ENVS="")
+        return dict(values, GATEC_JOB="", FORK_GATEC_ELSEWHERE="", RELEASE_GATEC_IF="", GATEC_ENVS="", GATEC_JAR_CHECK="")
     v = values
     timeout = min(360, int(g.get("timeout_minutes") or 60) + 60)
     job = f"""
@@ -801,6 +801,13 @@ def gatec_values(values, g=None):
       - name: Gate summary
         if: always()
         run: cat "$RUNNER_TEMP/gates.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - name: The jars Gate C tested (the release compares them with the jars it ships)
+        if: always()
+        run: |
+          for j in {v["LIBS"]}/*.jar; do
+            case "$j" in *-sources.jar) continue ;; esac
+            if [ -f "$j" ]; then echo "$(sha256sum "$j" | cut -d' ' -f1)  $(basename "$j")"; fi
+          done > "$RUNNER_TEMP/gate-c-jars.sha256"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -810,9 +817,27 @@ def gatec_values(values, g=None):
             ${{{{ runner.temp }}}}/port-ci/gate-c-out/
             ${{{{ runner.temp }}}}/gates.md
             ${{{{ runner.temp }}}}/built-tree.txt
+            ${{{{ runner.temp }}}}/gate-c-jars.sha256
           if-no-files-found: ignore"""
+    check = f"""
+      - name: Gate C tested the bytes this releases (the gate-c job's jars against the gates leg's)
+        run: |
+          set -eu
+          f="logs/{v["LOGS"]}gate-c/gate-c-jars.sha256"
+          [ -f "$f" ] || {{ echo "::error::the gate-c job recorded no jar digests ($f): nothing released"; exit 1; }}
+          bad=0
+          for j in jars/*.jar; do
+            n=$(basename "$j"); have=$(sha256sum "$j" | cut -d' ' -f1)
+            tested=$(awk -v n="$n" '$2 == n {{print $1}}' "$f")
+            if [ "$tested" != "$have" ]; then
+              echo "::error::$n: the release jar is sha256 $have, the jar the fork's own Gate C tested is sha256 ${{tested:-(none of that name)}}: the build is not reproducible, so Gate C did not test the bytes that ship; nothing released"
+              bad=1
+            fi
+          done
+          [ "$bad" -eq 0 ]
+          echo "Gate C tested the bytes that ship: every jar's sha256 matches the gate-c job's" >> "$GITHUB_STEP_SUMMARY\""""
     return dict(values, GATEC_JOB=job, FORK_GATEC_ELSEWHERE=" --fork-gatec-elsewhere", RELEASE_GATEC_IF=RELEASE_GATEC_IF,
-                GATEC_ENVS=" gate-c", RELEASE_NEEDS="[" + values["RELEASE_NEEDS"].strip("[]") + ", gate-c]")
+                GATEC_ENVS=" gate-c", GATEC_JAR_CHECK=check, RELEASE_NEEDS="[" + values["RELEASE_NEEDS"].strip("[]") + ", gate-c]")
 
 
 def gatec_stale(wf, g):
@@ -2573,7 +2598,9 @@ def gatec_check():
     ok &= want("gatec: from_run and the notes read its summary", wf.count("for e in full minimal gate-c; do") == 2,
                "two loops", wf.count("for e in full minimal gate-c; do"))
     ok &= want("gatec: nothing else changed", wf.replace("\n\n  gate-c:\n" + gc, "").replace(" --fork-gatec-elsewhere", "")
-               .replace("[gates, gate-c]", "gates").replace(RELEASE_GATEC_IF, "").replace(" gate-c; do", "; do") == plain,
+               .replace("[gates, gate-c]", "gates").replace(RELEASE_GATEC_IF, "").replace(" gate-c; do", "; do")
+               .replace(re.search(r"\n      - name: Gate C tested the bytes.*?(?=\n      - name: Publish pre-release)", wf,
+                                  re.S).group(0), "") == plain,
                "the plain workflow", "a diff")
     both = fixture(True, gate=GATE_FIX, gatec=GATEC_FIX, variant_jars=["*_mr.jar"])
     for tag_, w_, rel_needs in (("gate-c", wf, {"gates", "gate-c"}),
@@ -2593,6 +2620,38 @@ def gatec_check():
                 want_ = from_run or (gates_r == "success" and c_r == "success")
                 ok &= want(f"gatec: release when gates {gates_r}, gate-c {c_r}{', from_run' if from_run else ''}",
                            _gh_if(rif, ctx) == want_, want_, _gh_if(rif, ctx))
+    # the release checks Gate C tested the bytes that ship: run the step itself on a match and on a mismatch
+    blk = [b for b in run_blocks(job(wf, "release")) if "gate-c-jars.sha256" in b]
+    ok &= want("gatec: the release compares the jars' sha256", len(blk) == 1 and "${{" not in blk[0], "one step", len(blk))
+    import shutil, subprocess, tempfile, hashlib
+    sh_ = shutil.which("bash") if os.name != "nt" else _load_tool("gitbash_pc", "gitbash.py").BASH
+    if not blk or not sh_ or not shutil.which("sha256sum"):
+        print("port-ci self-check: the jar sha256 step not run here (no bash or sha256sum on this machine)")
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            t_ = pathlib.Path(td)
+            (t_ / "jars").mkdir()
+            (t_ / "logs/gate-logs-gate-c").mkdir(parents=True)
+            (t_ / "jars/examplemod-1.0.jar").write_bytes(b"released")
+            dig = lambda b: hashlib.sha256(b).hexdigest()
+            script = "\n".join(ln[10:] if ln.startswith(" " * 10) else ln for ln in blk[0].splitlines())
+            env_ = dict(os.environ, GITHUB_STEP_SUMMARY=str(t_ / "summary.md"))
+            run_ = lambda: subprocess.run([sh_, "-c", script], cwd=str(t_), capture_output=True, text=True,
+                                          encoding="utf-8", env=env_)
+            (t_ / "logs/gate-logs-gate-c/gate-c-jars.sha256").write_text(
+                f"{dig(b'released')}  examplemod-1.0.jar\n", encoding="utf-8")
+            r_ = run_()
+            ok &= want("gatec: sha256 step, the same bytes: released", r_.returncode == 0, 0, r_.stdout + r_.stderr)
+            (t_ / "logs/gate-logs-gate-c/gate-c-jars.sha256").write_text(
+                f"{dig(b'rebuilt')}  examplemod-1.0.jar\n", encoding="utf-8")
+            r_ = run_()
+            ok &= want("gatec: sha256 step, a mismatch: nothing released, both hashes named",
+                       r_.returncode != 0 and dig(b"released") in r_.stdout and dig(b"rebuilt") in r_.stdout
+                       and "examplemod-1.0.jar" in r_.stdout, "exit 1 naming both", r_.stdout + r_.stderr)
+            (t_ / "logs/gate-logs-gate-c/gate-c-jars.sha256").unlink()
+            r_ = run_()
+            ok &= want("gatec: sha256 step, no digests: nothing released", r_.returncode != 0
+                       and "recorded no jar digests" in r_.stdout, "exit 1", r_.stdout + r_.stderr)
     ok &= want("gatec: a workflow and a file that disagree are stale", bool(gatec_stale(plain, GATEC_FIX))
                and bool(gatec_stale(wf, None)) and not gatec_stale(wf, GATEC_FIX) and not gatec_stale(plain, None),
                "stale both ways", "")
