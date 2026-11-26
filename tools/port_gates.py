@@ -283,7 +283,7 @@ GATE_SCRIPT_TIMEOUT = (1, 360, 60)                 # minutes: least, most, defau
 GATE_SCRIPT_SHAPE = '{"schema": 1, "script": "<path>.py|.sh", "args": ["..."], "timeout_minutes": N}'
 
 
-def gate_script(text, name, repo=None, lists=("args",), shape=GATE_SCRIPT_SHAPE):
+def gate_script(text, name, repo=None, lists=("args",), shape=GATE_SCRIPT_SHAPE, flags=()):
     """A fork's own gate declaration (`text`, the JSON of the file `name`), validated: {script, timeout_minutes, and
     each of `lists`} -- `args` defaults to [], any other list (gate-c.json's release_args) to None when absent. A bad
     file raises Fail naming `name` and what is wrong; it never falls back to a default. `repo` None: the script's
@@ -296,7 +296,7 @@ def gate_script(text, name, repo=None, lists=("args",), shape=GATE_SCRIPT_SHAPE)
         raise bad(f"not JSON ({e})")
     if not isinstance(cfg, dict):
         raise bad("not a JSON object")
-    keys = {"schema", "script", "timeout_minutes", *lists}
+    keys = {"schema", "script", "timeout_minutes", *lists, *flags}
     if set(cfg) - keys:
         raise bad("unknown key(s) " + ", ".join(sorted(set(cfg) - keys)))
     if cfg.get("schema") != 1 or isinstance(cfg.get("schema"), bool):
@@ -326,13 +326,18 @@ def gate_script(text, name, repo=None, lists=("args",), shape=GATE_SCRIPT_SHAPE)
     if not isinstance(t, int) or isinstance(t, bool) or not lo <= t <= hi:
         raise bad(f"timeout_minutes must be a whole number of minutes from {lo} to {hi}, got {t!r}")
     out["timeout_minutes"] = t
+    for k in flags:                     # an optional true/false switch (gate-c.json's flaky_ok), false when absent
+        v = cfg.get(k, False)
+        if not isinstance(v, bool):
+            raise bad(f"{k} must be true or false, got {v!r}")
+        out[k] = v
     return out
 
 
 # The fork's own Gate C (issue #308): .port/<mc>/gate-c.json, else the nearest lower version's (port_file).
 FORK_GATEC = "gate-c.json"
 FORK_GATEC_SHAPE = ('{"schema": 1, "script": "<path>.py|.sh", "args": ["..."], "release_args": ["..."], '
-                    '"timeout_minutes": N}')
+                    '"timeout_minutes": N, "flaky_ok": false}')
 
 
 def fork_gatec_file(repo, mc=None):
@@ -349,7 +354,7 @@ def fork_gatec(repo, mc=None):
     root = port_root(pathlib.Path(repo))
     rel = f.relative_to(root).as_posix()
     g = gate_script(f.read_text(encoding="utf-8", errors="replace"), rel, root, ("args", "release_args"),
-                    FORK_GATEC_SHAPE)
+                    FORK_GATEC_SHAPE, flags=("flaky_ok",))
     return dict(g, file=rel)
 
 

@@ -650,9 +650,31 @@ def run_fork_gatec(argv, cwd, env, log, timeout_s):
     return rc, time.monotonic() - t0
 
 
-def fork_gatec_row(g, set_, which, rc, secs, log_text, gatec_arg, timeout_s):
+FORK_GATEC_VERDICTS = ("PASS", "FLAKY", "FAIL")
+FORK_GATEC_WARN = "Warning -- the fork's Gate C was flaky"
+
+
+def fork_gatec_verdict(rc, verdict_text):
+    """PASS, FLAKY or FAIL of the fork's Gate C run: the word the script wrote to $PORT_GATE_OUT/verdict when it wrote
+    one -- FLAKY (failed, then passed on its own retry) whatever its exit code; PASS only with exit 0 (a script claiming
+    a pass it exited non-zero on has failed) -- else its exit code: 0 PASS, anything else FAIL. A timeout (rc None) and
+    an unreadable word are FAIL."""
+    if rc is None:
+        return "FAIL"
+    word = (verdict_text or "").strip().upper()
+    if word == "FLAKY":
+        return "FLAKY"
+    if word in ("PASS", "FAIL"):
+        return "PASS" if word == "PASS" and rc == 0 else "FAIL"
+    if word:
+        return "FAIL"
+    return "PASS" if rc == 0 else "FAIL"
+
+
+def fork_gatec_row(g, set_, which, rc, secs, log_text, gatec_arg, timeout_s, verdict=None):
     """(label, passed, detail) of the fork's Gate C run: the row names the script, the set and the arguments, says it is
-    the fork's declared gate of record run whatever --gatec says, and on a failure quotes the last output lines."""
+    the fork's declared gate of record run whatever --gatec says, and on a failure quotes the last output lines.
+    verdict: fork_gatec_verdict's word (default from rc). FLAKY passes only with the file's flaky_ok, and says so."""
     took = f"{secs:.0f} s" if secs < 120 else f"{secs / 60:.1f} min"
     cmd = " ".join([g["script"], *g[which]])
     how = f"`{cmd}` ({which}" + (", the file has no release_args" if set_ == "release" and which == "args" else "") + ")"
@@ -660,13 +682,29 @@ def fork_gatec_row(g, set_, which, rc, secs, log_text, gatec_arg, timeout_s):
             f"(--gatec `{gatec_arg or 'none'}` does not skip it)")
     tail = [ln.strip() for ln in log_text.splitlines() if ln.strip()][-6:]
     last = "; last output: " + " / ".join(tail)[-500:] if tail else "; no output"
-    if rc == 0:
+    verdict = verdict or fork_gatec_verdict(rc, "")
+    if verdict == "FLAKY":
+        ok_ = bool(g.get("flaky_ok"))
+        detail = (f"{how} FLAKY in {took}: it failed, then passed on its own retry; " +
+                  (f"`flaky_ok` in `{g['file']}` counts that as a pass (see the warning row)" if ok_ else
+                   f"a fail, since `{g['file']}` does not set `flaky_ok`{last}") + f"; {decl}")
+        return fork_gatec_label(g, set_), ok_, detail.replace("|", "/")[:1200]
+    if verdict == "PASS":
         detail = f"{how} exited 0 in {took}; {decl}"
     elif rc is None:
         detail = f"{how} did not finish in {timeout_s / 60:g} min (timeout_minutes) and was stopped{last}; {decl}"
+    elif rc == 0:
+        detail = f"{how} exited 0 in {took} but wrote verdict FAIL{last}; {decl}"
     else:
         detail = f"{how} exited {rc} after {took}{last}; {decl}"
-    return fork_gatec_label(g, set_), rc == 0, detail.replace("|", "/")[:1200]
+    return fork_gatec_label(g, set_), verdict == "PASS", detail.replace("|", "/")[:1200]
+
+
+def fork_gatec_warn_row(g):
+    """The visible warning a flaky pass leaves in gates.md (and so in the release notes): not a Gate C row, so no reader
+    counts it either way; WARN, not FAIL."""
+    return (f"| {FORK_GATEC_WARN} | WARN | `{g['script']}` failed once and passed on its retry; `flaky_ok` in "
+            f"`{g['file']}` lets that through -- look at the evidence (gate-c-out/) before promoting |")
 
 
 def fork_gatec_full_only_row(g):
@@ -704,11 +742,18 @@ def fork_gatec_step(fork, a, ok, pu, repo, work, rows, record, timeout_s=None):
     log = pathlib.Path(work) / "gate-c-fork.log"
     print(f"[ci-gates] Gate C: the fork's own ({fork['file']}, {set_} set): {' '.join(argv[1:])} "
           f"(timeout {limit / 60:g} min)", flush=True)
+    vf = out / "verdict"
+    if vf.exists():
+        vf.unlink()                                     # a word left by an earlier run never speaks for this one
     rc, secs = run_fork_gatec(argv, root, genv, log, limit)
     text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
-    if rc != 0:
+    verdict = fork_gatec_verdict(rc, vf.read_text(encoding="utf-8", errors="replace")[:64] if vf.is_file() else "")
+    if verdict != "PASS":
         print(text[-6000:], flush=True)
-    record(*fork_gatec_row(fork, set_, which, rc, secs, text, a.gatec, limit))
+    record(*fork_gatec_row(fork, set_, which, rc, secs, text, a.gatec, limit, verdict))
+    if verdict == "FLAKY" and fork.get("flaky_ok"):
+        rows.append(fork_gatec_warn_row(fork))
+        print(f"[ci-gates] WARNING: the fork's Gate C was flaky; flaky_ok in {fork['file']} lets it pass", flush=True)
 
 
 def harness_base_of(bprops):
@@ -769,6 +814,8 @@ printf '%s\\n' "$*" > "$PORT_GATE_REPO/ran-args.txt"
 pwd > "$PORT_GATE_REPO/ran-in.txt"
 echo "rig film one: ok"
 if [ "$1" = fail ]; then echo "rig film two: failed twice, FLAKY counts as a failure"; exit 1; fi
+if [ "$1" = flaky ]; then echo "rig film two: failed, then passed on retry"; echo FLAKY > "$PORT_GATE_OUT/verdict"; exit 3; fi
+if [ "$1" = liar ]; then echo PASS > "$PORT_GATE_OUT/verdict"; exit 1; fi
 if [ "$1" = sleep ]; then sleep 60 & echo $! > "$PORT_GATE_REPO/child.pid"; wait; fi
 exit 0
 """
@@ -887,6 +934,23 @@ def fork_gatec_check():
             want("fail: a FAIL row with the last lines", rec == [False] and "| FAIL | `tools/gate/rig.sh fail` (args) exited 1"
                  in rows[0] and "last output: rig film one: ok / rig film two: failed twice, FLAKY counts as a failure"
                  in rows[0], rows)
+            # FLAKY (#flaky_ok): the script's $PORT_GATE_OUT/verdict word; strict by default (a FAIL row, no warning);
+            # with flaky_ok a PASS row plus a WARN row that is not a Gate C row; a PASS word never beats a non-zero exit
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["flaky"]})
+            rows, rec = step(args())
+            want("flaky, strict: FAIL, no warning", rec == [False] and len(rows) == 1 and "FLAKY" in rows[0]
+                 and "does not set `flaky_ok`" in rows[0], rows)
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["flaky"], "flaky_ok": True})
+            rows, rec = step(args())
+            want("flaky, flaky_ok: PASS and a WARN row", rec == [True] and len(rows) == 2 and "FLAKY" in rows[0]
+                 and rows[1].startswith(f"| {FORK_GATEC_WARN} | WARN |") and not rows[1].startswith("| Gate C"), rows)
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["liar"], "flaky_ok": True})
+            rows, rec = step(args())
+            want("a PASS word with exit 1: FAIL", rec == [False] and len(rows) == 1, rows)
+            put("1.21.4", {"schema": 1, "script": "tools/gate/rig.sh", "args": ["fail"]})
+            want("verdict words", [fork_gatec_verdict(*x) for x in ((0, ""), (1, ""), (None, "FLAKY"), (3, "flaky\n"),
+                                                                    (0, "FAIL"), (1, "PASS"), (0, "PASS"), (0, "maybe"))]
+                 == ["PASS", "FAIL", "FAIL", "FLAKY", "FAIL", "FAIL", "PASS", "FAIL"], "")
             # an earlier gate failed: not run
             rows, rec = step(args(), ok_=False)
             want("earlier failure: not run", rec == [] and read("ran-args.txt") is None and rows == [
@@ -976,6 +1040,8 @@ def fork_gatec_check():
                     ("timeout over the cap", dict(good, timeout_minutes=361), "timeout_minutes must be"),
                     ("timeout a string", dict(good, timeout_minutes="60"), "timeout_minutes must be"),
                     ("timeout a float", dict(good, timeout_minutes=1.5), "timeout_minutes must be"),
+                    ("flaky_ok a string", dict(good, flaky_ok="yes"), "flaky_ok must be true or false"),
+                    ("flaky_ok a number", dict(good, flaky_ok=1), "flaky_ok must be true or false"),
                     ("timeout true", dict(good, timeout_minutes=True), "timeout_minutes must be")):
                 put("1.21.3", cfg)
                 bad = fails(lambda: pu.fork_gatec(sv), says)
