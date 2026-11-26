@@ -583,7 +583,13 @@ it small, so the orchestration is a tool, which replaces the four rules above:
 - **A single-version fork on the driver is its head alone** (principle 2: nothing of the ladder -- the lowest check,
   sync-shared, the cascade, the freeze, `library-record` -- is built or read for it), in the single-version round's
   order: `ci-check` (`port-ci.py check` on origin's head: a WARNING never blocks; `setup` then regenerates the workflow
-  on the work branch at the newest kit, its own options read back, so the PR carries it), `setup` (the work branch
+  on the work branch at the newest kit, its own options read back, so the PR carries it -- except on an OWNED fork,
+  whose head follows its default branch: there the take brings the default branch's regenerated workflow, `upstream`
+  checks it again on the merged tree and blocks, naming the default branch, if it is still behind; and `pr` first
+  checks every commit it would push against the default branch by patch-id (round records aside). A commit that
+  matches nothing there is left out by rebuilding the work branch from the head, when the gated tree does not need it,
+  and the rebuilt branch is pushed as `keep-current/<date>-r2` with the old PR closed, never force-pushed; when the tree
+  needs it, `pr` blocks and names it, to land on the default branch first, #332), `setup` (the work branch
   `keep-current/<date>` from origin's head, the ticked `dep_bumps`), `upstream` (the authors' merge, mechanical:
   `port-sync.py --port keep-current/<date> --base <head> --upstream <the remote fetching the plan's upstream>/<branch>
   --commit <upstream_commit>`; a conflict stops it red and becomes its fixer's job -- resolve, commit the merge -- after
