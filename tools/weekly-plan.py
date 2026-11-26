@@ -9,7 +9,7 @@ Wednesday. Both are made only by the keep-current skill's setup, which runs `ins
                                          [--ledger-issues REPO=N[,N]] [--depends-on REPO=REPO[,REPO]]
                                          [--replace-task NAME ...] [--trailer "K: V" ...]
                                          [--migrator-repo OWNER/REPO] [--migrator-sha SHA] [--default-branch-too]
-                                         [--release-bump [OWNER/REPO=]FILE:KEY ...] [--after-repin REPO="CMD" ...]
+                                         [--release-bump [OWNER/REPO=]FILE:KEY ...] [--after-repin REPO="CMD" ...] [--post-merge REPO=JSON ...]
                                          [--keep-existing] [--no-commit] [--print]
     python3 tools/weekly-plan.py round-task (--repo DIR | --config FILE) [--existing NAME ...] [--migrator-repo O/R]
     python3 tools/weekly-plan.py fetch    --config FILE --repo DIR --work DIR      # the workflow's steps, in order
@@ -45,6 +45,17 @@ from its pins (e.g. ["python3", "scripts/write-pins.py", "--write"]) land in the
 re-pin, naming the command. CMD is split as a shell would (shlex) and run without a shell. It is the repository's own
 code run in its own checkout: the same trust as its Gradle build, which the round runs anyway. Stored per fork as
 `after_repin` (a list of argv lists); a re-run that does not re-pass it warns, or keeps it with --keep-existing.
+
+--post-merge REPO=JSON (repeatable, run in the order given; a fork with version branches, #325): a command of the
+fork's own the round runs in a version branch's checkout at its merge-up (and a resync), before the version's gates,
+when (a) that merge changed a path the command owns, or (b) the upstream ref its source record names has moved past
+the commit the record holds; what it writes is the version's own commit, named in its PR. JSON is {"run": "CMD" or
+[argv], "owns": [path or glob, ...], "values": {"<mc>": {"key": "value"}}, "source": {"file": "<record>",
+"repo_key": "<key>", "commit_key": "<key>", "ref": "<ref, templated>"}}: `{mc}` and each `{key}` in the command and
+the ref are that version's (e.g. a vendored per-version compiler re-vendored from its upstream's per-version branch:
+run your vendoring script with `--ref {ref}`, owns ["third_party/compiler"], values {"1.21.10": {"ref":
+"1.21.10-ladder"}}). The record is JSON or `key = value` lines. A single-version fork has no merge-ups, so it never
+runs there. Stored per fork as `post_merge`; a re-run that does not re-pass it warns, or keeps it with --keep-existing.
 
 `.github/weekly-plan.json` on the first fork's head branch is the fork set's ONLY source for the round: per fork its
 head, role (library / dependent), the authors' upstream URL and branch, `depends_on` (a dependent: the library unless
@@ -575,6 +586,7 @@ def install(a, say=print, repo_info=None):
     resolve_upstreams(forks, info, {forks[0]["repo"]} if _first_is_own(repo, forks[0]["repo"], info) else set())
     rbump = release_bumps_of(a, repo, forks)
     arepin = after_repins_of(a, forks)
+    pmerge = post_merges_of(a, forks)
     owner_login = forks[0]["repo"].split("/")[0]
     otype = a.owner_type
     old, warns = None, []
@@ -637,7 +649,19 @@ def install(a, say=print, repo_info=None):
             again = " ".join(f"--after-repin {of['repo']}={shlex.quote(shlex.join(c))}" for c in old_ar)
             print(f"weekly-plan: warning: the existing {CONFIG} has after_repin commands for {of['repo']}, which this "
                   f"run drops: re-pass {again}, or rerun with --keep-existing", file=sys.stderr)
+    for of in ((old or {}).get("forks") or []) if isinstance(old, dict) else []:
+        old_pm = of.get("post_merge")
+        if not old_pm or of.get("repo") in pmerge or of.get("repo") not in {f["repo"] for f in forks}:
+            continue
+        if a.keep_existing:
+            pmerge[of["repo"]] = old_pm
+        else:
+            again = " ".join(f"--post-merge {of['repo']}={shlex.quote(json.dumps(c, sort_keys=True))}" for c in old_pm)
+            print(f"weekly-plan: warning: the existing {CONFIG} has post_merge commands for {of['repo']}, which this "
+                  f"run drops: re-pass {again}, or rerun with --keep-existing", file=sys.stderr)
     for f in cfg["forks"]:
+        if f["repo"] in pmerge:
+            f["post_merge"] = pmerge[f["repo"]]
         if f["repo"] in rbump:
             f["release_bump"] = rbump[f["repo"]]
         if f["repo"] in arepin:
@@ -735,6 +759,51 @@ def release_bumps_of(a, repo, forks):
             raise Fail(f"--release-bump: {f['repo']} {rb['file']} given twice")
         have.append(rb)
     return {k: v[0] if len(v) == 1 else sorted(v, key=lambda b: b["file"]) for k, v in by.items()}
+
+
+def post_merges_of(a, forks):
+    """install --post-merge REPO=JSON (#325; repeatable, run in the order given) -> {repo: [{"run": argv, "owns":
+    [paths], "values": {mc: {key: value}}}, ...]}, each checked: a command (a string is split as a shell would, never
+    run through one), at least one owned path, values a map of version -> {key: string}."""
+    names = {f["repo"].lower(): f["repo"] for f in forks}
+    out = {}
+    for spec in getattr(a, "post_merge", None) or []:
+        who, eq, js = spec.partition("=")
+        repo = names.get(who.strip().lower())
+        if not eq or not repo:
+            raise Fail(f"--post-merge {spec!r}: REPO=JSON with REPO one of the forks ({', '.join(names.values())})")
+        try:
+            pm = json.loads(js)
+        except ValueError as e:
+            raise Fail(f"--post-merge {spec!r}: not JSON ({e})")
+        if not isinstance(pm, dict) or set(pm) - {"run", "owns", "values", "source"}:
+            raise Fail(f"--post-merge {spec!r}: an object with run, owns and (optional) values and source")
+        run = pm.get("run")
+        try:
+            argv = shlex.split(run) if isinstance(run, str) else run
+        except ValueError as e:
+            raise Fail(f"--post-merge {spec!r}: {e}")
+        if not argv or not isinstance(argv, list) or not all(isinstance(x, str) and x for x in argv):
+            raise Fail(f"--post-merge {spec!r}: `run` is a command (a string, or a list of strings)")
+        own = pm.get("owns")
+        if not own or not isinstance(own, list) or not all(isinstance(x, str) and x.strip("/") for x in own):
+            raise Fail(f"--post-merge {spec!r}: `owns` lists the paths the command re-writes (it runs only when a merge "
+                       "changes one)")
+        vals = pm.get("values") or {}
+        if not isinstance(vals, dict) or not all(
+                isinstance(m, str) and isinstance(kv, dict) and all(isinstance(k, str) and isinstance(x, str)
+                                                                    for k, x in kv.items()) for m, kv in vals.items()):
+            raise Fail(f"--post-merge {spec!r}: `values` maps a version to {{key: string}}")
+        src = pm.get("source")
+        keys = ("file", "repo_key", "commit_key", "ref")
+        if src is not None and (not isinstance(src, dict) or set(src) != set(keys)
+                                or not all(isinstance(src[k], str) and src[k] for k in keys)):
+            raise Fail(f"--post-merge {spec!r}: `source` is {{\"file\": the source record, \"repo_key\" and "
+                       "\"commit_key\": its keys for the upstream URL and the vendored commit, \"ref\": the upstream ref "
+                       "(templated, e.g. port-{mc})}")
+        out.setdefault(repo, []).append({"run": argv, "owns": own, **({"values": vals} if vals else {}),
+                                         **({"source": src} if src else {})})
+    return out
 
 
 def after_repins_of(a, forks):
@@ -1019,6 +1088,10 @@ def step_cascade(work):
         if f["untaken"]:
             print(f"weekly-plan: {f['repo']}: the head carries {len(f['untaken'])} commit(s) of the authors' that a version "
                   f"branch has not taken")
+        f["vendored"] = vendored_moves(fb, f, vs)
+        if f["vendored"]:
+            print(f"weekly-plan: {f['repo']}: a vendored component moved upstream at "
+                  + ", ".join(x["version"] for x in f["vendored"]))
         f["shared"] = shared_summary(fb, f["clone"], vs)
         sh = f["shared"]
         print(f"weekly-plan: {f['repo']}: " + (f"the shared-library check failed: {sh['error']}" if sh.get("error") else
@@ -1026,6 +1099,28 @@ def step_cascade(work):
               f"{len(sh['adopt'])} adopt candidate(s), {len(sh['ahead'])} file(s) marked ahead of it"))
     save_input(work, inp)
     return 0
+
+
+def vendored_moves(fb, f, versions):
+    """#325: each version branch whose vendored component's upstream moved past the commit its source record holds (the
+    fork's post_merge entries with a `source`; fork-branches.py source_moved) -> [{"version", "why"}]: information for
+    the plan -- the round re-vendors it at that version's merge-up, nothing to decide. [] for a fork without one."""
+    out = []
+    for pm in f.get("post_merge") or []:
+        if not pm.get("source"):
+            continue
+        for v in versions:
+            ref = next((r for r in (f"refs/remotes/origin/neoforge-{v}", f"refs/heads/neoforge-{v}")
+                        if git(f["clone"], "rev-parse", "--verify", "--quiet", r).returncode == 0), None)
+            if not ref:
+                continue
+            try:
+                moved, why = fb.source_moved(f["clone"], ref, pm["source"], fb.post_merge_fill(pm, v))
+            except ValueError as e:
+                moved, why = False, str(e)
+            if moved:
+                out.append({"version": v, "why": why})
+    return out
 
 
 def shared_summary(fb, clone, versions):
@@ -1800,6 +1895,32 @@ def self_check():
         for spec in ("o/other=x", "o/lib=", "x", 'o/lib=echo "open'):
             rc, o = inst("--plan-owner", "someone", "--after-repin", spec, argv=argv2, info=par)
             expect(rc == 2 and "--after-repin" in o, f"--after-repin {spec!r} refused: {rc} {o}")
+        # --post-merge (#325): checked, stored per fork in order, dropped with a warning or kept with --keep-existing
+        pm = ['o/lib={"run": "python3 tools/vendor.py --ref {ref}", "owns": ["third_party/compiler"], '
+              '"values": {"1.21.10": {"ref": "1.21.10-ladder"}}}']
+        rc, o = inst("--plan-owner", "someone", "--post-merge", pm[0], argv=argv2, info=par)
+        c8 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
+        expect(rc == 0 and c8["forks"][0]["post_merge"] == [{"run": ["python3", "tools/vendor.py", "--ref", "{ref}"],  # exec-ok: fixture data (a key/argv in a test), not a program run
+                                                             "owns": ["third_party/compiler"],
+                                                             "values": {"1.21.10": {"ref": "1.21.10-ladder"}}}],
+               f"--post-merge: stored per fork, the command split: {rc} {o} {c8['forks'][0]}")
+        rc, o = inst("--plan-owner", "someone", argv=argv2, info=par)
+        expect(rc == 0 and "post_merge" not in json.loads((fork / CONFIG).read_text(encoding="utf-8"))["forks"][0]
+               and "re-pass --post-merge o/lib=" in o, f"--post-merge: a re-run without it warns: {o}")
+        inst("--plan-owner", "someone", "--post-merge", pm[0], argv=argv2, info=par)
+        rc, o = inst("--plan-owner", "someone", "--keep-existing", argv=argv2, info=par)
+        expect(rc == 0 and json.loads((fork / CONFIG).read_text(encoding="utf-8"))["forks"][0].get("post_merge")
+               == c8["forks"][0]["post_merge"], f"--post-merge: --keep-existing keeps it: {o}")
+        src_ = {"file": "third_party/c.SOURCE", "repo_key": "repo", "commit_key": "commit", "ref": "port-{mc}"}
+        rc, o = inst("--plan-owner", "someone", "--post-merge",
+                     "o/lib=" + json.dumps({"run": "x", "owns": ["a"], "source": src_}), argv=argv2, info=par)
+        expect(rc == 0 and json.loads((fork / CONFIG).read_text(encoding="utf-8"))["forks"][0]["post_merge"][0]["source"]
+               == src_, f"--post-merge: a source record stored: {rc} {o}")
+        for spec in ('o/lib={"run": "x"}', 'o/lib={"owns": ["a"]}', "o/lib=notjson",
+                     'o/lib={"run": "x", "owns": ["a"], "source": {"file": "f"}}', 'o/other={"run": "x", "owns": ["a"]}',
+                     'o/lib={"run": "x", "owns": ["a"], "values": {"1.21.10": "v"}}', 'o/lib={"run": "x", "owns": ["a"], "x": 1}'):
+            rc, o = inst("--plan-owner", "someone", "--post-merge", spec, argv=argv2, info=par)
+            expect(rc == 2 and "--post-merge" in o, f"--post-merge {spec!r} refused: {rc} {o}")
         inst("--plan-owner", "someone", argv=argv2, info=par)
         expect(c3["migrator_sha"] == "a" * 40, f"install records the pinned migrator_sha in the config: {c3}")
         # a re-run drops what it is not given (the default, unchanged) but warns for each; --keep-existing keeps it.
@@ -2128,6 +2249,26 @@ def self_check():
         expect(f9["new_count"] == 1 and not f9["authors_merged"] and f9["merge_conflicts"] == [] and f9.get("merge_error")
                and "Could not preview merging" in dec9 and "untracked" in dec9 and "needs an agent" not in dec9,
                f"fail soft: a trial merge that fails with no conflict is said so, with git's reason: {f9} {dec9}")
+        # #325: a vendored component whose upstream moved is information on the plan, at the versions it moved at
+        vu = d / "vendor-up"
+        gq(d, "init", "-q", "-b", "port-1.21.10", str(vu))
+        (vu / "c.txt").write_text("1\n", encoding="utf-8"); gq(vu, "add", "-A"); gq(vu, "commit", "-qm", "one")
+        v_one = git(vu, "rev-parse", "HEAD").stdout.strip()
+        (vu / "c.txt").write_text("2\n", encoding="utf-8"); gq(vu, "commit", "-qam", "two")
+        gq(sv3, "checkout", "-q", "-b", "neoforge-1.21.10")
+        (sv3 / "c.SOURCE").write_text(f"repo = {vu.as_posix()}\ncommit = {v_one}\n", encoding="utf-8")
+        gq(sv3, "add", "c.SOURCE"); gq(sv3, "commit", "-qm", "record")
+        gq(sv3, "checkout", "-q", "neoforge-1.21.1")
+        fv = {"clone": str(sv3), "post_merge": [{"run": ["x"], "owns": ["third_party"], "source": {
+            "file": "c.SOURCE", "repo_key": "repo", "commit_key": "commit", "ref": "port-{mc}"}}]}
+        vm = vendored_moves(fb_mod(), fv, ["1.21.10", "1.21.11"])
+        inp_v = json.loads(json.dumps(inp9)); inp_v["forks"][0]["vendored"] = vm
+        body_v = k.render_plan(inp_v)["body"]
+        expect([x["version"] for x in vm] == ["1.21.10"] and "moved" in vm[0]["why"]
+               and "### Vendored component moved (information)" in body_v and "`neoforge-1.21.10`" in body_v
+               and "### Vendored component moved" not in k.render_plan(inp9)["body"]
+               and vendored_moves(fb_mod(), dict(fv, post_merge=[]), ["1.21.10"]) == [],
+               f"#325: a moved vendored source is plan information at its version; none without it: {vm}")
         # previous / open against a fake GitHub: carry-forward from an unclosed plan, then supersede it
         issues, calls = {}, []
 
@@ -2251,6 +2392,10 @@ def build_parser():
                    help="a command the round runs in REPO's checkout after each re-pin of it (head and version), before "
                         "that re-pin's commit (shlex-split; repeatable, run in order): the repository's own derived pin "
                         "files land in the same commit")
+    p.add_argument("--post-merge", action="append", metavar="REPO=JSON",
+                   help='a command the round runs in a version branch\'s checkout after each merge into it, when the '
+                        'merge changed a path it owns: {"run": CMD, "owns": [PATH...], "values": {MC: {KEY: VAL}}} '
+                        '({mc} and {KEY} are templated; repeatable, run in order; #325)')
     p.add_argument("--default-branch-too", action="store_true",
                    help="also commit the workflow to the default branch when that is not the head branch")
     p.add_argument("--keep-existing", action="store_true",

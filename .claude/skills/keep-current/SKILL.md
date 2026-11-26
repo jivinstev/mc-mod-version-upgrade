@@ -974,7 +974,7 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
            [--allow push-version-branches --allow pre-release --allow merge-fork-prs] \
            [--ledger-issues <owner/dep>=12,15] [--depends-on <owner/dep>=<owner/lib>] \
            [--replace-task "<old task name>"] \
-           [--release-bump [<owner/repo>=]<file>:<key> ...] [--after-repin <owner/repo>="<command>" ...] \
+           [--release-bump [<owner/repo>=]<file>:<key> ...] [--after-repin <owner/repo>="<command>" ...] [--post-merge <owner/repo>=<json> ...] \
            [--default-branch-too] [--keep-existing] [--trailer "<Key>: <value>" ...]
 
    One `--fork` per fork, the library first (a fork alone: one). A `--fork` without `=URL#BRANCH` takes the authors'
@@ -1010,6 +1010,17 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    SEVERAL MODS repeats the flag, one per mod's version file (`alpha/gradle.properties:mod_version`): a mod's version
    moves only when the take changes its folder or a shared path (one in no mod folder), every bump of the round is one
    PR (`Versions alpha 1.2.4, zeta 0.3.1: ...`), and the plan has a line per mod.
+   **A fork with version branches that vendors a per-version component** (a compiler or generator kept as a source tree,
+   built once per Minecraft version upstream) names the command that re-vendors it: `--post-merge <owner/repo>='{"run":
+   "<the fork's vendoring command> --ref {ref}", "owns": ["third_party/compiler"], "values": {"1.21.10": {"ref":
+   "1.21.10-ladder"}}, "source": {"file": "third_party/compiler.SOURCE", "repo_key": "repo", "commit_key": "commit",
+   "ref": "{ref}"}}'` (repeatable, run in order; stored as the fork's `post_merge`; #325). The round runs it in a
+   version branch's checkout at its merge-up (and a resync), before the version's gates and review, when (a) that merge
+   changed a path it `owns`, or (b) the upstream ref the `source` record names has moved past the commit the record
+   holds (the component's own changes, which no merge brings), with `{mc}` and the version's `values` filled in. What
+   it writes is that version's own commit; the step's note names it and why it ran, so the version's PR does. Without
+   it the head's copy merges into every version unchanged. A single-version fork has no merge-ups, so it never runs
+   there; a hand-run `fork-branches.py cascade` does not run it (the round's step does).
    **A fork that derives files from its pins** (a pin table its build reads, generated from its workflows or
    branch.properties) names the command that regenerates them: `--after-repin <owner/repo>="python3 scripts/write-pins.py
    --write"` (repeatable, run in order; split like a shell, run without one; stored as the fork's `after_repin`). The
