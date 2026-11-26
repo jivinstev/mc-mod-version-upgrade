@@ -1130,6 +1130,11 @@ def cmd_init(a):
             "frozen": str(pathlib.Path(a.frozen).resolve()), "date": date, "allow": cfg.get("allow", []), "config": cfg,
             "plan": {"repo": frozen.get("repo"), "issue": frozen.get("issue"), "owner": owner_login(frozen)},
             "forks": forks, "items": items}
+    kit = newest_kit_now()
+    if kit:
+        data["kit"] = kit       # #337: the round's one Port CI kit, every workflow rendered and checked against it
+    else:
+        print("round: WARNING: the newest Port CI kit could not be read: no kit pinned; each fork's head kit is used")
     if hand:
         data["hand_repins"] = hand            # only such a set has the key: every other set's state is as before
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -1686,7 +1691,7 @@ def job_task(st, it):
                 f"--session-cwd {st.rdir}` (the phase marks are in round/marks.tsv), with the authors' change size per "
                 "version and the mechanical-merge share (step 6).",
                 "Add the `### Lessons for the migrator` table (step 6; a `| none | | | |` row when there is none).",
-                *harvest_lines(st), *hand_repin_lines(st), *disproved_lines(st), *filing_lines(st),
+                *harvest_lines(st), *hand_repin_lines(st), *kit_lines(st), *disproved_lines(st), *filing_lines(st),
                 "Close the issue (state completed) only when every item in status is ok, skipped or a blocked item "
                 "that waits on the owner and is named in the comment; a round that stopped leaves it open (step 5).",
                 *trial_lines(st),
@@ -2121,7 +2126,7 @@ def t_ci_check(st, it, log):
     if F["kind"] == "single":
         return sv_ci_check(st, it, log)
     at = log_size(log)
-    r = sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci-check", "--repo", F["dir"]], log)
+    r = sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci-check", "--repo", F["dir"], *kit_args(st, it)], log)
     warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
     # the head with a PR this round: setup regenerates its workflow on the work branch and the PR carries it, as on a
     # single-version fork (a fixer's commit on the local head branch never reaches that PR -- measured, trial round
@@ -2133,9 +2138,10 @@ def t_ci_check(st, it, log):
         # (fork-branches.py ci --head --run moves only the kit) and push_ci_regen pushes it below. A fixer job cannot:
         # jobs never push, and the check reads the head branch, not the work branch the fixer committed on (measured,
         # weekly round 2026-11-18: two fixers regenerated it on keep-current/<date> and the warning never cleared)
-        sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", F["dir"], "--head", "--run"], log)
+        sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", F["dir"], "--head", "--run",
+                    *kit_args(st, it)], log)
         at = log_size(log)
-        sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci-check", "--repo", F["dir"]], log)
+        sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci-check", "--repo", F["dir"], *kit_args(st, it)], log)
         warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
     # the head's own lines: "(the head branch)", and -- a head that IS the base version branch (head neoforge-<base>,
     # #326) -- the version-branch line for that branch, which ci_check prints without the head tag. Either way setup
@@ -2209,7 +2215,7 @@ def stale_wf(st, it, d, ref, log):
         f_ = st.rdir / "round/work" / (f"ci-check-{F['name']}-{name}.yml" if name else f"ci-check-{F['name']}.yml")
         f_.parent.mkdir(parents=True, exist_ok=True)
         f_.write_text(wf_text(d, path, ref), encoding="utf-8")
-        sh(st, it, [sys.executable, TOOLS / "port-ci.py", "check", "--repo", d, "--file", f_], log)
+        sh(st, it, [sys.executable, TOOLS / "port-ci.py", "check", "--repo", d, *kit_args(st, it), "--file", f_], log)
     warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
     return warn[0] if warn else None
 
@@ -2230,6 +2236,53 @@ def wf_text(d, path, ref=None):
     return mod("fk").workflow_text(d, path, ref)
 
 
+KIT_NEWEST = None      # () -> the newest published Port CI kit (the self-check's stand-in replaces it)
+
+
+def newest_kit_now():
+    """The newest published Port CI kit, or None when it cannot be read (offline, the API refused)."""
+    try:
+        return int(KIT_NEWEST()) if KIT_NEWEST else int(mod("pc").newest_kit([], say=lambda *_: None))
+    except (Exception, SystemExit):     # noqa: BLE001 -- unknown: the caller compares nothing on it
+        return None
+
+
+def round_kit(st, it):
+    """The Port CI kit this round renders and compares every workflow against (#337): pinned at `init` (the newest
+    published then, STATE.json `kit`), moved only by `retry ... --kit N` or a new init. A kit tagged during the round is
+    the next round's: it never makes a workflow stale mid-run (the close names it). A state with no pin recorded (a
+    round initialised before the pin) takes the kit the head already carries at origin, the highest its workflows
+    pin. None: neither is known, and the tools compare against the newest published, as before."""
+    if st.data.get("kit"):
+        return int(st.data["kit"])
+    F = st.fork(it["fork"])
+    if not F.get("head") or not F.get("dir"):
+        return None
+    ref = f"origin/{F['head']}"
+    try:
+        kits = [int(k) for _n, path in port_ci_wfs(F["dir"], ref)
+                for k in re.findall(r"port-ci-kit-v(\d+)", wf_text(F["dir"], path, ref))]
+    except (OSError, StepError, ValueError):
+        return None
+    return max(kits) if kits else None
+
+
+def kit_args(st, it):
+    k = round_kit(st, it)
+    return ["--kit-version", str(k)] if k else []
+
+
+def kit_lines(st):
+    """The close job's line for a Port CI kit published after the round pinned its own (#337); nothing otherwise."""
+    pin = st.data.get("kit")
+    newest = newest_kit_now() if pin else None
+    if not pin or not newest or newest <= int(pin):
+        return []
+    return [f"Say in the closing comment (one line, a warning, not a failure): Port CI kit {newest} was published during "
+            f"the round; the round rendered and checked every workflow at kit {pin}, its pin from init (#337), so kit "
+            f"{newest} reaches the forks in the next round."]
+
+
 def regen_workflow(st, it, d, log):
     """The work branch's Port CI workflow rendered again at the newest kit, every other option read back (port-ci.py
     check's regenerate command, run here), committed alone. A repository of several mods (port_ci_wfs): each mod's
@@ -2246,7 +2299,8 @@ def regen_workflow(st, it, d, log):
         # the head's own name, never the checked-out work branch: port-ci.py falls back to that on a checkout with no
         # .port/<mc>/ (a version-branch head) -- measured, trial round 2026-10-29: the triggers, the manifest refresh
         # and the release jobs named keep-current/<date>, caught by the head's review
-        sh(st, it, [sys.executable, TOOLS / "port-ci.py", "--repo", d, *args, "--branch", st.fork(it["fork"])["head"]], log)
+        sh(st, it, [sys.executable, TOOLS / "port-ci.py", "--repo", d, *args, *kit_args(st, it), "--branch",
+                    st.fork(it["fork"])["head"]], log)
     return commit_paths(d, [p_ for _n, p_ in wfs], "Port CI workflow at the newest kit (keep-current round)")
 
 
@@ -2686,13 +2740,14 @@ def t_repin(st, it, log):
                 say_to(log)(f"round: repin: {v}'s workflows are not its own: {stale[0][:300]}; ci --run renders them")
             if fb.mod_dirs(d):
                 # a version branch of several mods: ci renders each mod's workflow, each mod's id from its own folder
-                sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--run"], log)
+                sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--run",
+                            *kit_args(st, it)], log)
             else:
                 modid = fb.parse_props(fb.read_file(pathlib.Path(d) / "gradle.properties")).get("mod_id")
                 if not modid:
                     raise StepError("no mod_id in gradle.properties: run fork-branches.py ci --target <v> --modid ID --run")
                 sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--modid",
-                            modid, "--run"], log)
+                            modid, "--run", *kit_args(st, it)], log)
         after_repin(st, it, d, log)     # the fork's own derived pin files, from the version's workflows, in the commit
     except (StepError, OSError):
         if head(d) != pre:
@@ -5106,7 +5161,11 @@ def cmd_retry(a, out=print):
         it.pop("fixing", None)
         if a.allow:
             it["allow_once"] = True
-    out(f"round: {a.id} pending again")
+        if getattr(a, "kit", None):
+            # #337: the owner moves the round's kit pin (a fix the round needs shipped in a newer kit): every check and
+            # regeneration from here on is against it
+            st.data["kit"] = int(a.kit)
+    out(f"round: {a.id} pending again" + (f"; the round's Port CI kit is now {a.kit}" if getattr(a, "kit", None) else ""))
     return 0
 
 
@@ -6403,7 +6462,7 @@ def self_check_repin_several(expect):
 
         class _St:
             rdir, path = tmp, tmp / "STATE.json"
-            data = {"date": "2026-12-02", "allow": [], "plan": {"repo": "o/multi", "issue": 1}}
+            data = {"date": "2026-12-02", "allow": [], "plan": {"repo": "o/multi", "issue": 1}, "kit": 86}
 
             def fork(self, s_):
                 return F if s_ == "o/multi" else {"name": s_.split("/")[1], "dir": str(tmp)}
@@ -6438,11 +6497,11 @@ def self_check_repin_several(expect):
             arg = lambda c_, k: c_[c_.index(k) + 1] if k in c_ else None
             expect(len(cmds) == 2 and [arg(c_, "--mod-dir") for c_ in cmds] == ["alpha", "zeta"]
                    and all(arg(c_, "--also-path") == "shared" and c_[-2:] == ["--branch", "neoforge-1.21.1"]
-                           and "--kit-version" not in c_ for c_ in cmds)
+                           and arg(c_, "--kit-version") == "86" for c_ in cmds)
                    and [arg(c_, "--modid") for c_ in cmds] == ["examplealpha", "examplezeta"]
                    and c and sorted(git(d, "show", "--name-only", "--format=", c).stdout.split())
                    == [".github/workflows/port-ci-alpha.yml", ".github/workflows/port-ci-zeta.yml"],
-                   f"regen_workflow: each mod's workflow from its own options, the kit to the newest, one commit: {cmds} {c}")
+                   f"regen_workflow: each mod's workflow from its own options, the kit to the round's pin, one commit: {cmds} {c}")
             # the ci-check fixer's hint (#305): a repository of several mods is told `ci --all` with no --modid; a one-mod
             # fork keeps --modid ID
             hint_ = ci_check_hint(F)
@@ -6693,6 +6752,87 @@ def self_check_default_first(expect):
         G.update(keep)
 
 
+def self_check_kit_pin(expect):
+    """#337, a single-version fixture: the round's Port CI kit is pinned at init. A kit tagged mid-run makes no
+    workflow stale (ci-check, setup's regeneration and the pr check all compare and render at the pin) and is named in
+    the close instead; `retry --kit N` moves the pin; a state with no pin takes the kit the head already carries."""
+    G = globals()
+    keep = {k: G[k] for k in ("sh", "KIT_NEWEST")}
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td)
+        bare, d = tmp / "o.git", tmp / "mod"
+        git(tmp, "init", "-q", "--bare", str(bare), check=True)
+        git(tmp, "init", "-q", "-b", "neoforge-1.21.8", str(d), check=True)
+        git(d, "config", "core.autocrlf", "false")
+        (d / ".github/workflows").mkdir(parents=True)
+        (d / PORT_CI_WF).write_text("      - run: curl -L .../port-ci-kit-v92.tar.gz\n", encoding="utf-8")
+        git(d, "add", "-A"); git(d, "commit", "-qm", "kit 92", check=True)
+        git(d, "remote", "add", "origin", bare.as_posix()); git(d, "push", "-q", "origin", "neoforge-1.21.8", check=True)
+        F = {"dir": str(d), "head": "neoforge-1.21.8", "name": "mod", "kind": "single", "base": "1.21.8", "versions": []}
+
+        class _St:
+            rdir = tmp
+
+            def __init__(self, kit=None):
+                self.data = {"date": "2026-12-02", "allow": []}
+                if kit:
+                    self.data["kit"] = kit
+                self.items = []
+
+            def fork(self, _):
+                return F
+
+            def item(self, iid):
+                raise KeyError(iid)
+        log = tmp / "log"
+        cmds = []
+
+        def fake_sh(st_, it_, cmd, log_, **k_):     # port-ci.py check as it judges the kit: stale below --kit-version
+            c_ = [str(x) for x in cmd]
+            cmds.append(c_)
+            if "port-ci.py" in c_[1] and "check" in c_:
+                want = int(c_[c_.index("--kit-version") + 1]) if "--kit-version" in c_ else 93   # newest published
+                with open(log_, "a", encoding="utf-8") as fh:
+                    fh.write("port-ci: check: WARNING neoforge-1.21.8: its workflow pins Port CI kit 92, older than kit "
+                             f"{want}\n" if want > 92 else "port-ci: check: neoforge-1.21.8: its workflow is current\n")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        it = {"id": "mod@1.21.8:ci-check", "fork": "o/mod", "version": "1.21.8", "step": "ci-check", "result": {}}
+        try:
+            G["sh"], G["KIT_NEWEST"] = fake_sh, (lambda: 93)        # kit 93 was tagged after the round's init
+            note, res = sv_ci_check(_St(kit=92), it, log)
+            expect(not res.get("stale_workflow") and "--kit-version" in cmds[-1]
+                   and cmds[-1][cmds[-1].index("--kit-version") + 1] == "92",
+                   f"#337: a kit tagged mid-run makes nothing stale: the check compares at the round's pin: {note} {cmds}")
+            note2, res2 = sv_ci_check(_St(), it, log)
+            expect(not res2.get("stale_workflow") and cmds[-1][cmds[-1].index("--kit-version") + 1] == "92",
+                   f"#337: a state with no pin takes the kit the head already carries: {note2} {cmds[-1]}")
+            st = _St(kit=92)
+            expect(kit_lines(st) and "kit 93" in kit_lines(st)[0] and "kit 92" in kit_lines(st)[0]
+                   and kit_lines(_St(kit=93)) == [],
+                   f"#337: the close names a kit tagged during the round, and only then: {kit_lines(st)}")
+            # retry --kit moves the pin: from then on the check is against it
+            sp = tmp / "STATE.json"
+            sp.write_text(json.dumps({"kit": 92, "config": {}, "items": [
+                {"id": "mod@1.21.8:pr", "fork": "o/mod", "version": "1.21.8", "step": "pr", "kind": "tool",
+                 "status": "blocked", "result": {}}]}), encoding="utf-8")
+            said = []
+            rc = cmd_retry(argparse.Namespace(state=str(sp), id="mod@1.21.8:pr", why=None, allow=False, kit=93),
+                           out=said.append)
+            moved = json.loads(sp.read_text(encoding="utf-8"))
+            expect(rc == 0 and moved["kit"] == 93 and moved["items"][0]["status"] == "pending" and "kit is now 93" in said[0],
+                   f"#337: retry --kit moves the round's pin: {rc} {moved.get('kit')} {said}")
+            note3, res3 = sv_ci_check(_St(kit=moved["kit"]), it, log)
+            expect(res3.get("stale_workflow") and "kit 93" in note3, f"#337: at the moved pin, kit 92 is stale: {note3}")
+            sp.write_text(json.dumps({"kit": 92, "config": {}, "items": [
+                {"id": "mod@1.21.8:pr", "fork": "o/mod", "version": "1.21.8", "step": "pr", "kind": "tool",
+                 "status": "blocked", "result": {}}]}), encoding="utf-8")
+            cmd_retry(argparse.Namespace(state=str(sp), id="mod@1.21.8:pr", why=None, allow=False, kit=None),
+                      out=lambda *_: None)
+            expect(json.loads(sp.read_text(encoding="utf-8"))["kit"] == 92, "#337: a plain retry keeps the pin")
+        finally:
+            G.update(keep)
+
+
 def self_check_bump(expect):
     """An OWNED fork's release bump (weekly-plan.py install --release-bump): the queue puts `bump` between setup and the
     authors' take only when the fork has one; the step needs merge-fork-prs and the fork's automerge; on a local origin
@@ -6849,8 +6989,9 @@ def self_check():
                                                "GIT_COMMITTER_EMAIL")}
     os.environ.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "t",
                        "GIT_COMMITTER_EMAIL": "t@example.com"})
-    global gh, sh, PIN_JAR
+    global gh, sh, PIN_JAR, KIT_NEWEST
     real_gh, real_sh = gh, sh
+    KIT_NEWEST = lambda: None   # never the network: a test that needs a published kit sets its own
     saved = dict(TOOL_IMPL)
     pinned_jars = []           # a head job's workflow pins (head_pins): recorded, never downloaded
     PIN_JAR = lambda ga, ver, val: (pinned_jars.append((ga, ver, val)), (True, f"{ga}:{ver} (stand-in)"))[1]
@@ -6927,6 +7068,7 @@ def self_check():
         return rc, "\n".join(buf)
     self_check_bump(expect)
     self_check_default_first(expect)
+    self_check_kit_pin(expect)
     self_check_multimod(expect)
     self_check_repin_several(expect)
     self_check_mod_records(expect)
@@ -9353,6 +9495,7 @@ def main(argv=None):
         if name == "retry":
             s.add_argument("--why", help="what changed (recorded)")
             s.add_argument("--allow", action="store_true", help="the owner allowed this one step on the plan issue")
+            s.add_argument("--kit", type=int, help="move the round's Port CI kit pin to this kit (#337)")
         if name == "record":
             s.add_argument("--status", choices=["ok", "blocked", "failed"]); s.add_argument("--summary")
         if name == "status":

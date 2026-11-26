@@ -462,7 +462,11 @@ it small, so the orchestration is a tool, which replaces the four rules above:
 - **`round.py init --frozen round/frozen.json --fork <owner/repo>=<clone> ...`** (after step 1's freeze; every fork, the
   library first) builds `round/STATE.json`: per fork and version, in ladder order, the steps below as typed items with
   their dependencies -- the library before its dependents, each version after the one below it cascaded (pipelined), the head
-  before the versions. `--through <owner/repo>=<version>` (repeatable; `=none` leaves that fork out) makes a trial round
+  before the versions. It also pins the round's Port CI kit (STATE.json `kit`: the newest published at init; #337):
+  every `ci-check`, setup regeneration, re-pin render and `pr` workflow check runs against that kit, so a kit tagged
+  during the round never makes a workflow stale mid-run -- the close names it, for the next round. Only
+  `round.py retry <id> --kit N` or a new init moves the pin; a state with none recorded uses the kit each head
+  already carries. `--through <owner/repo>=<version>` (repeatable; `=none` leaves that fork out) makes a trial round
   whose ladder stops at that version; the weekly round never passes it. A version gets items only when it has work this round -- the head cascade of the authors' code the
   plan takes, a selected fix at or below it, a library release of this round to re-pin to, a ticked dependency bump
   at it, or this repository's shared library moved past it (below) -- so a plan that selects nothing, on forks already
