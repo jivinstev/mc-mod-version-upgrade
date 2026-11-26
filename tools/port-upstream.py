@@ -1098,7 +1098,7 @@ def self_check():
         # provenance: a licence file edited, an author copyright line removed
         (r / "LICENSE.txt").write_text(mit, encoding="utf-8")
         (r / "src/main/java").mkdir(parents=True)
-        (r / "src/main/java/A.java").write_text("// Copyright 2026 Someone\nclass A {}\n", encoding="utf-8")
+        (r / "src/main/java/A.java").write_text("// Copyright 2026 Someone\nclass A {}\n", encoding="utf-8")  # licence-scan: allow a planted notice the provenance self-test removes
         for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
                     ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base"]):
             subprocess.run(cmd, cwd=r, check=True)

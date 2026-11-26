@@ -8192,8 +8192,8 @@ def self_check():
             # an ISO-8859-1 gradle.properties (a Latin-1 comment byte) on the port branch: add-target keeps the byte
             lw = r / "build/latin"
             git(r, "worktree", "add", "-q", "-b", "latin-port", str(lw), "neoforge-1.21.1", check=True)
-            gpl = lw / "gradle.properties"
-            gpl.write_bytes(b"# caf\xe9\n" + gpl.read_bytes())
+            gprops = lw / "gradle.properties"
+            gprops.write_bytes(b"# caf\xe9\n" + gprops.read_bytes())
             git(lw, "commit", "-qam", "latin-1 comment", check=True)
             try:
                 rc, out = _quiet(add_target, r, "1.21.10", parent="port", port_branch="latin-port", allow_undone_parent=True)
@@ -8216,8 +8216,8 @@ def self_check():
             # the libraries above that line -- the lower ones' rows would rewrite code that is already right
             lw = r / "build/late"
             git(r, "worktree", "add", "-q", "-b", "late-port", str(lw), "neoforge-1.21.1", check=True)
-            gpl = lw / "gradle.properties"
-            gpl.write_text(re.sub(r"(?m)^minecraft_version=.*$", "minecraft_version=1.21.8", gpl.read_text(encoding="utf-8")),
+            gprops = lw / "gradle.properties"
+            gprops.write_text(re.sub(r"(?m)^minecraft_version=.*$", "minecraft_version=1.21.8", gprops.read_text(encoding="utf-8")),
                            encoding="utf-8")
             git(lw, "commit", "-qam", "the port branch builds 1.21.8", check=True)
             rc, out = _quiet(add_target, r, "1.21.10", parent="port", port_branch="late-port")

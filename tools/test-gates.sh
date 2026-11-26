@@ -107,7 +107,7 @@ vcase 1 "a vendored file LOSES its SPDX header" \
 vcase 1 "a vendored file names the WRONG copyright holder" \
   'import pathlib;p=pathlib.Path("templates/neoforge-mod/tools/watch-gatec.sh");import re;p.write_text(re.sub(r"(SPDX-FileCopyrightText: \d{4}) .*", r"\1 Someone Else", p.read_text(), count=1))'
 vcase 1 "a new scaffold file lands without regenerating the manifest" \
-  'import pathlib;pathlib.Path("templates/neoforge-mod/tools/new-tool.sh").write_text("# SPDX-License-Identifier: MIT\nx\n")'
+  'import pathlib;pathlib.Path("templates/neoforge-mod/tools/new-tool.sh").write_text("# SPDX-License-Identifier: MIT\nx\n")'  # licence-scan: allow a planted header for the manifest self-test
 
 echo "6. the catalogue fidelity gate"
 fcase() {  # fcase <wanted-exit> <label> <python-mutation> -- over a tiny planted catalogue
@@ -346,6 +346,26 @@ xcase 0 'BASH from tools/gitbash.py'          'subprocess.run([BASH, "gradlew", 
 xcase 0 'sys.executable'                      'subprocess.run([sys.executable, "tools/x.py"])'
 xcase 0 'a program that resolves everywhere'  'subprocess.run(["git", "status"])'
 xcase 0 'a marked exception'                  'print(["python3", "x.py"])   # exec-ok: printed for a person'
+
+echo "14. licence-scan: third-party text under a licence off the allow-list (issue #322; tools/licence-rules.json)"
+( python3 "$ROOT/tools/licence-scan.py" --tree >/dev/null 2>&1 )
+[ $? = 0 ] && { echo "  PASS  the real tree and its register (THIRD_PARTY.md) are clean"; pass=$((pass+1)); } \
+           || { echo "  FAIL  the real tree fails its own licence scan: python3 tools/licence-scan.py --tree"; fail=$((fail+1)); }
+lcase() {  # lcase <wanted-exit> <label> <file content> -- one file in a scratch git repository, scanned by path
+   plant; git init -q "$T"; printf '%s\n' "$3" > "$T/x.c"
+   ( python3 "$ROOT/tools/licence-scan.py" --rules "$ROOT/tools/licence-rules.json" --repo "$T" x.c >/dev/null 2>&1 )
+   local got=$?
+   if [ "$got" = "$1" ]; then echo "  PASS  $2 (exit $got)"; pass=$((pass+1))
+   else echo "  FAIL  $2 — wanted exit $1, got $got"; fail=$((fail+1)); fi
+}
+lw="Lesser"; si="SPDX-License-""Identifier"   # glued at run time, so this file is not itself a finding
+lcase 1 "a copyleft header"                 "/* Licensed under the GNU $lw General Public License */"
+lcase 1 "an off-list SPDX id"                 "// $si: LG""PL-2.1-only"
+lcase 0 "an allowed SPDX id"                  "// $si: Apache-2.0"
+lcase 0 "a line that only names a licence, marked with a reason" "// not the GNU $lw General Public License  // licence-scan$(printf ':') allow names a licence we turned down"
+( python3 "$ROOT/tools/test-licence-scan.py" >/dev/null 2>&1 )
+[ $? = 0 ] && { echo "  PASS  test-licence-scan.py: every rule, both ways through, the register, the bundled checks and the hooks"; pass=$((pass+1)); } \
+           || { echo "  FAIL  tools/test-licence-scan.py (run it for the detail)"; fail=$((fail+1)); }
 
 echo
 echo "gates self-test: $pass passed, $fail failed"

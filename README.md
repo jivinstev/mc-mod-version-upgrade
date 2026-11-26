@@ -612,6 +612,15 @@ template Java (`--staged`; a commit with none returns at once), and the pre-push
 Where no sources are found it warns that it did not run, and refuses only with `MMVU_SIMILARITY_STRICT=1`. CI does
 not run it -- the licences of those sources keep them out of CI -- only its `--self-check`, on invented code.
 
+The IP gate also checks licences: `python3 tools/licence-scan.py` refuses what a change adds under a licence this
+repository does not take -- licence wording or an SPDX id off the allow-list in `tools/licence-rules.json` (MIT,
+BSD-2/3, Apache-2.0, MPL-2.0, ISC, Zlib, Unlicense, CC0, and CC BY 4.0 for assets only), "All rights reserved" in a
+header, a source known to be copyleft cited the way ported code names its origin, a Stack Exchange answer, and a
+copyright that is not ours in a file with no row in `THIRD_PARTY.md`, the register of every third-party file kept here. A line that only names a licence carries
+`licence-scan: allow <reason>`. The pre-commit hook runs it on the staged lines (`--staged`), the pre-push hook on the
+lines the pushed commits add (`--range`), and CI on the whole tree and register (`--tree`, on Linux and Windows) and on
+a pull request's added lines. The scanner, its rules and its tests are MPL-2.0 (THIRD_PARTY.md).
+
 ## Measured ports
 
 Every port here was run from this repository alone:

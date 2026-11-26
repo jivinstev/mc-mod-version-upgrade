@@ -49,6 +49,26 @@ jobs:
             python3 tools/check-no-ip.py
           fi
 
+  licence:
+    name: no third-party text under a licence we cannot take
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the whole tree, and on a PR the lines its commits ADD (a line added then removed within the PR was still
+          # pushed): the range needs the base branch's history
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # tools/licence-scan.py against tools/licence-rules.json's allow-list, and THIRD_PARTY.md (the register) against
+      # the tree. 2 (could not run) fails the job like a finding.
+      - name: licence-scan --tree
+        run: python3 tools/licence-scan.py --tree
+      - name: licence-scan, the lines this PR adds
+        if: github.event_name == 'pull_request'
+        run: python3 tools/licence-scan.py --range -- "origin/${{ github.base_ref }}..HEAD"
+
   gates-self-test:
     name: the gates themselves still work
     runs-on: ubuntu-latest
