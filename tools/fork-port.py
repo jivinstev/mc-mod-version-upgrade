@@ -975,11 +975,21 @@ def detect_upstream(repo):
     """The authors' branch the port follows, as `<remote>/<branch>`: the one branch of the clone's `upstream` remote
     whose tip HEAD carries (the branch keep-current / port-sync.py merge into the port). Not the remote's HEAD: that is
     the authors' default branch, often not the one the port is based on, and freezing it would stop every run (19).
-    None when no branch, or more than one, qualifies: the caller then names it with --upstream."""
+    None when no branch, or more than one, qualifies: the caller then names it with --upstream.
+    The mod author's own repository (`"own_mod": true` committed in .github/port-publish.json, tools/fork-kind.py
+    is_owned) with no `upstream` remote follows its own default branch: origin/HEAD's branch (keep-current's upstream
+    for an owned fork), whether or not HEAD carries its tip -- the freeze records the merge-base, and a round that
+    leaves the newer commits for next week lets them through (untaken_ok)."""
     rc, out = _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/remotes/upstream/")
     refs = [x for x in out.splitlines() if x and x != "upstream" and not x.endswith("/HEAD")] if rc == 0 else []
     carried = [r for r in refs if _git(repo, "merge-base", "--is-ancestor", r, "HEAD")[0] == 0]
-    return carried[0] if len(carried) == 1 else None
+    if len(carried) == 1:
+        return carried[0]
+    if not refs and load("fork_kind", "fork-kind.py").is_owned(repo):
+        rc, head = _git(repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+        if rc == 0 and head.strip().startswith("origin/"):
+            return head.strip()
+    return None
 
 
 # a fetch must never wait for a password: no terminal prompt, no askpass helper, and a short timeout
@@ -4117,6 +4127,24 @@ def self_check_freeze():
             vbp = fork / ".port/1.21.3/branch.properties"
             w(vbp, "minecraft_version=1.21.3\n"); gf("add", "-A"); gf("commit", "-qm", "version branch")
             expect(detect_upstream(fork) == "upstream/port-base", f"the branch the port carries, not upstream/HEAD: {detect_upstream(fork)}")
+            # the mod author's own repository (own_mod), no `upstream` remote: its own default branch, origin/HEAD's
+            # (weekly round of 2026-11-26: every version branch's freeze stopped with exit 2 for want of it)
+            own, own_up = pathlib.Path(d) / "own", pathlib.Path(d) / "own-origin"
+            go = git_repo(own_up); w(own_up / "A.java", "a\n"); go("add", "-A"); go("commit", "-qm", "main 1")
+            subprocess.run(["git", "clone", "-q", str(own_up), str(own)], check=True, capture_output=True)
+            gw = lambda *x: subprocess.run(["git", "-C", str(own), *x], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+            gw("config", "user.email", "a@b"); gw("config", "user.name", "a")
+            gw("checkout", "-q", "-b", "neoforge-1.21.3")
+            w(own / ".port/1.21.3/branch.properties", "minecraft_version=1.21.3\n"); gw("add", "-A"); gw("commit", "-qm", "vb")
+            expect(detect_upstream(own) is None, "no publish config: not owned, nothing detected")
+            w(own / ".github/port-publish.json", '{"own_mod": true}\n'); gw("add", "-A"); gw("commit", "-qm", "owned")
+            dflt = gw("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+            expect(dflt.startswith("origin/") and detect_upstream(own) == dflt,
+                   f"own_mod, no upstream remote: its own default branch ({dflt}): {detect_upstream(own)}")
+            w(own_up / "B.java", "b\n"); go("add", "-A"); go("commit", "-qm", "main 2 (newer)"); gw("fetch", "-q", "origin")
+            expect(detect_upstream(own) == dflt, "own_mod: the default branch even when HEAD lacks its newer commits")
+            gw("remote", "add", "upstream", str(up)); gw("fetch", "-q", "upstream")
+            expect(detect_upstream(own) != dflt, "own_mod with an `upstream` remote: the remote's rule, not the fallback")
             rec, why = freeze_upstream(fork, "upstream/main", (), False, vbp)
             expect(rec is None and "keep-current" in (why or ""), f"freeze refuses a branch HEAD lacks commits of: {rec} {why}")
             expect("upstream_commit" not in read_props(vbp), "nothing recorded")
