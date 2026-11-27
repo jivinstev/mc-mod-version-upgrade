@@ -123,6 +123,33 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # The Gradle cache (tools/port-ci.py, gradle_cache_steps): a public repository's cache is readable by any fork's
+      # pull request ("forks of a repository can create pull requests on the base branch and access caches on the base
+      # branch", GitHub's docs, Dependency caching), so there nothing derived from Minecraft is kept; see the prune below.
+      - name: Gradle cache (restore)
+        id: gradle-cache
+        uses: actions/cache/restore@v4
+        with:
+          key: port-gradle-${{ runner.os }}-${{ hashFiles('settings.gradle', 'build.gradle', 'gradle.properties', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: port-gradle-${{ runner.os }}-
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+      - name: Gradle cache, Minecraft-derived files (restore; private repository only)
+        id: gradle-cache-mc
+        if: ${{ github.event.repository.private }}
+        uses: actions/cache/restore@v4
+        with:
+          key: mc-port-gradle-${{ runner.os }}-${{ hashFiles('settings.gradle', 'build.gradle', 'gradle.properties', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: mc-port-gradle-${{ runner.os }}-
+          path: |
+            ~/.gradle/caches/neoformruntime
+            ~/.gradle/caches/minecraft*
+            ~/.gradle/caches/jars-*
+            ~/.gradle/caches/transforms-*
+            ~/.gradle/caches/*/transforms
+      - name: Gradle cache (artifacts before the build)
+        run: echo "PORT_CACHE_BEFORE=$(find ~/.gradle/caches/modules-2/files-2.1 -type f 2>/dev/null | wc -l)" >> "$GITHUB_ENV"
       - name: Software OpenGL for the client gate
         run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
 
@@ -193,6 +220,43 @@ jobs:
           git fetch --no-tags origin "master"
           python3 .port-tools/tools/ci-gates.py --repo . --modid "examplemod" --base "origin/master" \
             --gatec "launch,spawn" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md" --port-ci
+      - name: Gradle cache record (hit, partial or miss; artifacts downloaded)
+        if: always()
+        env:
+          HIT: ${{ steps.gradle-cache.outputs.cache-hit }}
+          MATCHED: ${{ steps.gradle-cache.outputs.cache-matched-key }}
+          KEY: port-gradle-${{ runner.os }}-${{ hashFiles('settings.gradle', 'build.gradle', 'gradle.properties', 'gradle/wrapper/gradle-wrapper.properties') }}
+          PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          after=$(find ~/.gradle/caches/modules-2/files-2.1 -type f 2>/dev/null | wc -l)
+          n=$(( after - ${PORT_CACHE_BEFORE:-0} )); [ "$n" -lt 0 ] && n=0
+          if [ "$HIT" = "true" ]; then o=hit; elif [ -n "$MATCHED" ]; then o=partial; else o=miss; fi
+          echo "cache: $o, $n artifacts downloaded" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$RUNNER_TEMP/port-ci"
+          printf '{"job": "%s", "outcome": "%s", "downloaded": %s, "key": "%s", "matched_key": "%s", "private": %s}\n' \
+            "$GITHUB_JOB" "$o" "$n" "$KEY" "$MATCHED" "${PRIVATE:-false}" > "$RUNNER_TEMP/port-ci/cache-record.json"
+      - name: Gradle cache, leave out what is derived from Minecraft (public repository)
+        if: ${{ always() && !github.event.repository.private }}
+        run: rm -rf ~/.gradle/caches/modules-2/files-2.1/com.mojang ~/.gradle/caches/modules-2/files-2.1/net.minecraft ~/.gradle/caches/modules-2/files-2.1/net.neoforged/neoform* ~/.gradle/caches/modules-2/files-2.1/net.neoforged/neoforge*
+      - name: Gradle cache (save)
+        if: ${{ always() && steps.gradle-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          key: port-gradle-${{ runner.os }}-${{ hashFiles('settings.gradle', 'build.gradle', 'gradle.properties', 'gradle/wrapper/gradle-wrapper.properties') }}
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+      - name: Gradle cache, Minecraft-derived files (save; private repository only)
+        if: ${{ always() && github.event.repository.private && steps.gradle-cache-mc.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          key: mc-port-gradle-${{ runner.os }}-${{ hashFiles('settings.gradle', 'build.gradle', 'gradle.properties', 'gradle/wrapper/gradle-wrapper.properties') }}
+          path: |
+            ~/.gradle/caches/neoformruntime
+            ~/.gradle/caches/minecraft*
+            ~/.gradle/caches/jars-*
+            ~/.gradle/caches/transforms-*
+            ~/.gradle/caches/*/transforms
       - name: Gate summary
         if: always()
         run: cat "$RUNNER_TEMP/gates.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
@@ -203,6 +267,7 @@ jobs:
           path: |
             ${{ runner.temp }}/port-ci/*.log
             ${{ runner.temp }}/port-ci/*.jsonl
+            ${{ runner.temp }}/port-ci/cache-record.json
             ${{ runner.temp }}/port-ci/gate-c-out/
             ${{ runner.temp }}/gates.md
             ${{ runner.temp }}/built-tree.txt

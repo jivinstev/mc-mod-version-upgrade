@@ -48,6 +48,13 @@ tree. Then:
   small, pinned "Port CI kit" from this repository's releases, not this whole repository. A fork with more versions
   has one branch per version, and each gets the same workflow at its own version, with every gate and its own release
   (`fork-branches.py ci`).
+- **A Gradle cache** in every job that runs Gradle (gates, shipped jars, the fork's own Gate C): `~/.gradle`'s
+  downloaded modules and the wrapper, keyed on `settings.gradle`, `build.gradle`, `gradle.properties` and the wrapper's
+  properties, so a warm run downloads nothing. A public repository's cache can be read by any fork's pull request, so
+  there nothing derived from Minecraft is kept (Mojang's and NeoForge's Minecraft artifacts are deleted before the
+  save; the decompile and transformed jars are never cached); a private repository caches those too, in a second
+  cache. Each job writes `cache: <hit|partial|miss>, <N> artifacts downloaded` to its summary and
+  `cache-record.json` to its logs.
 - **One jar per platform** (opt-in): for a mod whose build ships several jars, `port-ci.py --variant-jar GLOB` (one
   per platform) adds a `shipped jars` job that builds once and boots each jar in a real NeoForge server, checking
   the mod's own logs against `.port/<mc>/shipped-expect-<variant>.txt` (`cf` for `*_cf.jar`), else

@@ -612,7 +612,8 @@ def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_o
         if len(set(variant_jars)) != len(variant_jars):
             raise SystemExit("--variant-jar: the same glob given twice")
         deps = " ".join(_m2_jar(*DEP_JAR.fullmatch(d).groups()[3:]) for d in dep_specs if DEP_JAR.fullmatch(d))
-        sv = dict(v, VARIANT_JARS=" ".join(variant_jars), SHIPPED_DEPS=deps)
+        pre, post = gradle_cache_steps()             # the shipped job builds the repository root
+        sv = dict(v, VARIANT_JARS=" ".join(variant_jars), SHIPPED_DEPS=deps, GRADLE_CACHE=pre, GRADLE_CACHE_SAVE=post)
         v.update(SHIPPED_JOB="\n\n" + render(SHIPPED_TEMPLATE.read_text(encoding="utf-8"), sv).rstrip("\n"),
                  RELEASE_NEEDS="[gates, shipped]", RELEASE_SHIPPED_IF=RELEASE_SHIPPED_IF)
     return v
@@ -788,7 +789,7 @@ def gatec_values(values, g=None):
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "{v["JAVA"]}"
+          java-version: "{v["JAVA"]}"{v["GRADLE_CACHE"]}
       - name: Software OpenGL for the client gate
         run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
 {v["PRE_BUILD"]}{v["DEP_OVERRIDE_STEP"]}
@@ -797,7 +798,7 @@ def gatec_values(values, g=None):
           git rev-parse "HEAD^{{tree}}" > "$RUNNER_TEMP/built-tree.txt"
           git fetch --no-tags origin "{v["BASE"]}"
           python3 .port-tools/tools/ci-gates.py --repo {v["MOD_DIR"]} --modid "{v["MODID"]}" --base "origin/{v["BASE"]}" \\
-            --gatec "{v["GATEC"]}" --env full --fork-gatec-only --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md" --port-ci
+            --gatec "{v["GATEC"]}" --env full --fork-gatec-only --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md" --port-ci{v["GRADLE_CACHE_SAVE"]}
       - name: Gate summary
         if: always()
         run: cat "$RUNNER_TEMP/gates.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
@@ -814,6 +815,7 @@ def gatec_values(values, g=None):
           name: {v["LOGS"]}gate-c
           path: |
             ${{{{ runner.temp }}}}/port-ci/*.log
+            ${{{{ runner.temp }}}}/port-ci/cache-record.json
             ${{{{ runner.temp }}}}/port-ci/gate-c-out/
             ${{{{ runner.temp }}}}/gates.md
             ${{{{ runner.temp }}}}/built-tree.txt
@@ -909,14 +911,105 @@ def rel_path(repo, path, what):
     return p
 
 
+# The Gradle cache of every job that runs Gradle (gates, shipped, gate-c): ~/.gradle/caches/modules-2 and the wrapper,
+# keyed on the files that decide what Gradle downloads, so a warm run fetches nothing from Maven Central, the plugin
+# portal or maven.neoforged.net (a repository with no public mirror). GitHub restores the current branch's cache, else
+# the default branch's (and a pull request's base branch's).
+#
+# A PUBLIC repository's cache is readable by anyone: GitHub's docs (Dependency caching, "Restrictions for accessing a
+# cache") say "forks of a repository can create pull requests on the base branch and access caches on the base branch".
+# So there, nothing derived from Minecraft is cached -- Mojang's files must not be redistributed: the cache keeps the
+# plugins and open-source libraries, and the Minecraft-derived files are deleted from modules-2 before it is saved
+# (deleting, not `!` patterns, so what is left out never depends on glob semantics). A PRIVATE repository also caches
+# those, in a second cache of its own. Each run records whether its cache was a hit, a partial (a restore key) or a
+# miss, and how many artifacts Gradle downloaded: the cold-miss rate is what would justify a repository proxy.
+GRADLE_CACHE_FILES = ("settings.gradle", "build.gradle", "gradle.properties")
+WRAPPER_PROPS = "gradle/wrapper/gradle-wrapper.properties"
+MC_DERIVED_MODULES = ("com.mojang", "net.minecraft", "net.neoforged/neoform*", "net.neoforged/neoforge*")
+MC_DERIVED_CACHES = ("neoformruntime", "minecraft*", "jars-*", "transforms-*", "*/transforms")
+
+
+def gradle_cache_steps(mod_dir=".", name=""):
+    """(GRADLE_CACHE, GRADLE_CACHE_SAVE): the steps a Gradle job runs before its build (restore, and the count of
+    artifacts already there) and after it, whatever its outcome (the record, the public prune, the saves)."""
+    files = [f"{mod_dir}/{f}" for f in GRADLE_CACHE_FILES] if mod_dir not in (".", "") else []
+    files += [*GRADLE_CACHE_FILES, WRAPPER_PROPS]
+    hashed = ", ".join(f"'{f}'" for f in files)
+    prefix = f"port-gradle-{name + '-' if name else ''}${{{{ runner.os }}}}-"
+    key = f"{prefix}${{{{ hashFiles({hashed}) }}}}"
+    mods = "~/.gradle/caches/modules-2/files-2.1"
+    mc_caches = "\n".join(f"            ~/.gradle/caches/{c}" for c in MC_DERIVED_CACHES)
+    prune = " ".join(f"{mods}/{m}" for m in MC_DERIVED_MODULES)
+    pre = f"""
+      # The Gradle cache (tools/port-ci.py, gradle_cache_steps): a public repository's cache is readable by any fork's
+      # pull request ("forks of a repository can create pull requests on the base branch and access caches on the base
+      # branch", GitHub's docs, Dependency caching), so there nothing derived from Minecraft is kept; see the prune below.
+      - name: Gradle cache (restore)
+        id: gradle-cache
+        uses: actions/cache/restore@v4
+        with:
+          key: {key}
+          restore-keys: {prefix}
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+      - name: Gradle cache, Minecraft-derived files (restore; private repository only)
+        id: gradle-cache-mc
+        if: ${{{{ github.event.repository.private }}}}
+        uses: actions/cache/restore@v4
+        with:
+          key: mc-{key}
+          restore-keys: mc-{prefix}
+          path: |
+{mc_caches}
+      - name: Gradle cache (artifacts before the build)
+        run: echo "PORT_CACHE_BEFORE=$(find {mods} -type f 2>/dev/null | wc -l)" >> "$GITHUB_ENV\""""
+    post = f"""
+      - name: Gradle cache record (hit, partial or miss; artifacts downloaded)
+        if: always()
+        env:
+          HIT: ${{{{ steps.gradle-cache.outputs.cache-hit }}}}
+          MATCHED: ${{{{ steps.gradle-cache.outputs.cache-matched-key }}}}
+          KEY: {key}
+          PRIVATE: ${{{{ github.event.repository.private }}}}
+        run: |
+          after=$(find {mods} -type f 2>/dev/null | wc -l)
+          n=$(( after - ${{PORT_CACHE_BEFORE:-0}} )); [ "$n" -lt 0 ] && n=0
+          if [ "$HIT" = "true" ]; then o=hit; elif [ -n "$MATCHED" ]; then o=partial; else o=miss; fi
+          echo "cache: $o, $n artifacts downloaded" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$RUNNER_TEMP/port-ci"
+          printf '{{"job": "%s", "outcome": "%s", "downloaded": %s, "key": "%s", "matched_key": "%s", "private": %s}}\\n' \\
+            "$GITHUB_JOB" "$o" "$n" "$KEY" "$MATCHED" "${{PRIVATE:-false}}" > "$RUNNER_TEMP/port-ci/cache-record.json"
+      - name: Gradle cache, leave out what is derived from Minecraft (public repository)
+        if: ${{{{ always() && !github.event.repository.private }}}}
+        run: rm -rf {prune}
+      - name: Gradle cache (save)
+        if: ${{{{ always() && steps.gradle-cache.outputs.cache-hit != 'true' }}}}
+        uses: actions/cache/save@v4
+        with:
+          key: {key}
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+      - name: Gradle cache, Minecraft-derived files (save; private repository only)
+        if: ${{{{ always() && github.event.repository.private && steps.gradle-cache-mc.outputs.cache-hit != 'true' }}}}
+        uses: actions/cache/save@v4
+        with:
+          key: mc-{key}
+          path: |
+{mc_caches}"""
+    return pre, post
+
+
 def mod_values(values, mod_dir=None, name=None, also=()):
     """`also`: the push path patterns of the folders and files the mod builds from (--also-path: `shared/**` for a
     folder, the path itself for a file). The placeholders that make the workflow one mod's of several (--mod-dir): its name, push paths, tag series,
     build folder, artifacts, promote check and publish config. With no mod_dir every one is the single-mod text."""
     if not mod_dir:
+        pre, post = gradle_cache_steps()
         return dict(values, MOD_TITLE="", TAG_GLOB="", MOD_DIR=".", LOGS="gate-logs-", JARS="jars", LIBS="build/libs",
                     MOD_PROPS="gradle.properties", TAG_NAME=values["MODID"], PROMOTE_TAG_CHECK="", PUBLISH_IF="",
-                    PUBLISH_MOD="", MOD_PUSH="")
+                    PUBLISH_MOD="", MOD_PUSH="", GRADLE_CACHE=pre, GRADLE_CACHE_SAVE=post)
     paths = [f"{mod_dir}/**", *also, mod_workflow(name)]
     push = ("    # one mod of several: a push runs this mod's workflow only when it touches the mod's folder, a folder it\n"
             "    # builds from or this workflow (GitHub evaluates path filters on branch pushes only, so a release tag still runs)\n"
@@ -928,7 +1021,9 @@ def mod_values(values, mod_dir=None, name=None, also=()):
              f'          esac\n')
     # a mod's releases are `<name>-<digit>...`: never by prefix alone, so a mod `a` never takes mod `a-b`'s tags
     mine = " || ".join(f"startsWith(github.event.release.tag_name, '{name}-{n}')" for n in range(10))
-    return dict(values, MOD_TITLE=f" {name}", TAG_GLOB=f"{name}-[0-9]", MOD_DIR=mod_dir, LOGS=f"gate-logs-{name}-",
+    pre, post = gradle_cache_steps(mod_dir, name)
+    return dict(values, GRADLE_CACHE=pre, GRADLE_CACHE_SAVE=post,
+                MOD_TITLE=f" {name}", TAG_GLOB=f"{name}-[0-9]", MOD_DIR=mod_dir, LOGS=f"gate-logs-{name}-",
                 JARS=f"jars-{name}", LIBS=f"{mod_dir}/build/libs", MOD_PROPS=f"{mod_dir}/gradle.properties",
                 TAG_NAME=name, PROMOTE_TAG_CHECK=check,
                 PUBLISH_IF=f" && (github.event_name != 'release' || {mine})",
@@ -1301,7 +1396,8 @@ def multimod_check():
     import difflib
     changed = [l for l in difflib.unified_diff(single.splitlines(), wf.splitlines(), lineterm="", n=0)
                if l[:1] in "+-" and not l.startswith(("+++", "---"))]
-    ok &= want("mod: lines changed from the single-mod workflow", len(changed) == 56, 56, len(changed))
+    # 56, and 14 more from the Gradle cache: the key hashes the mod folder's files and names the mod (gradle_cache_steps)
+    ok &= want("mod: lines changed from the single-mod workflow", len(changed) == 70, 70, len(changed))
     ok &= has("mod: a player's install runs for its own releases only",
               "(needs.promote.result == 'success' || github.event_name == 'release') && (github.event_name != 'release' "
               "|| startsWith(github.event.release.tag_name, 'alpha-0')")
@@ -1610,7 +1706,7 @@ def variant_check():
     ok &= "shipped-gate.py" in job and "--deps" in job and "log_tails" in job and "::error::shipped jar" in job
     ok &= "!inputs.promote" in job.split("steps:", 1)[0] and "github.event_name != 'release'" in job.split("steps:", 1)[0]
     ok &= "a" * 64 + "  " in job and "b" * 64 + "  " in job          # dependency and kit sha256-checked here too
-    ok &= "${{" not in job.split("run: |\n          python3", 1)[1].split("\n      - name: Shipped-jar summary", 1)[0]
+    ok &= "${{" not in job.split("run: |\n          python3", 1)[1].split("\n          PY\n", 1)[0]
     ok &= s.replace(s[s.index("\n\n  shipped:\n"):s.index("\n\n  release:\n")], "").replace(
         "needs: [gates, shipped]", "needs: gates").replace(
         RELEASE_SHIPPED_IF, "") == base        # nothing else moved
@@ -1946,6 +2042,8 @@ def _without_reuse(wf):
     later player-install job, appended after it, taken off the end)."""
     if "\n\n  player-install:\n" in wf:
         wf = wf[:wf.index("\n\n  player-install:\n") + 1]
+    pre, post = gradle_cache_steps()                # a later change: the Gradle cache of every Gradle job
+    wf = wf.replace(pre, "").replace(post, "").replace("            ${{ runner.temp }}/port-ci/cache-record.json\n", "")
     w = _cut(wf, "#\n# Every pre-release carries", "name: Port CI (")
     w = _cut(w, "      from_run:\n", "\npermissions:")
     w = w.replace(" && !inputs.from_run }}", " }}").replace(DEP_OVERRIDE_STEP, "")
@@ -2559,6 +2657,108 @@ GATEC_FIX = {"schema": 1, "script": "tools/gate/rig.sh", "args": ["all"], "relea
              "timeout_minutes": 90, "release_flaky_exit": 3, "file": ".port/1.21.1/gate-c.json"}
 
 
+def gradle_cache_check():
+    """The Gradle cache (gradle_cache_steps) in every job that runs Gradle -- gates, shipped, gate-c -- on a
+    single-version fixture, a version-branch fixture and one mod of several: (a) a public repository saves nothing
+    Minecraft-derived (each such module deleted before the save; the Minecraft-derived caches only in the private
+    cache); (b) the second cache is gated on github.event.repository.private, restore and save; (c) the key hashes
+    settings.gradle, build.gradle, gradle.properties and the wrapper's properties (the mod folder's too, for one mod of
+    several); (d) every Gradle job records its outcome (hit, partial, miss; artifacts downloaded), its JSON uploaded."""
+    ok = True
+    def job(w_, j):
+        rest = (("\n" + w_.split("\njobs:\n", 1)[1]).split(f"\n  {j}:\n", 1) + [""])[1]
+        m_ = re.search(r"\n\n?  [a-z][a-z0-9-]*:\n", rest)
+        return rest[:m_.start()] if m_ else rest
+    def steps(j_):              # step name -> its text
+        out = {}
+        for blk in re.split(r"\n(?=      - )", j_)[1:]:
+            m_ = re.match(r"      - (?:name: (.*)|uses: (.*))", blk)
+            out[(m_.group(1) or m_.group(2)).strip()] = blk
+        return out
+    cases = (("single-version", fixture(True, gatec=GATEC_FIX, variant_jars=["*_mr.jar"]), ("gates", "shipped", "gate-c"), "."),
+             ("version branch", fixture(True, version_branch=True), ("gates",), "."),
+             ("one mod of several", fixture(False, mod=("alpha", "alpha", ())), ("gates",), "alpha"))
+    for case, wf, jobs, mod_dir in cases:
+        for j in jobs:
+            st = steps(job(wf, j))
+            names = list(st)
+            say = lambda what, good, got=None: want(f"gradle cache [{case}, {j}]: {what}", good, "yes", got)
+            rest_ = st.get("Gradle cache (restore)", "")
+            save = st.get("Gradle cache (save)", "")
+            prune = st.get("Gradle cache, leave out what is derived from Minecraft (public repository)", "")
+            mc_r = st.get("Gradle cache, Minecraft-derived files (restore; private repository only)", "")
+            mc_s = st.get("Gradle cache, Minecraft-derived files (save; private repository only)", "")
+            rec = st.get("Gradle cache record (hit, partial or miss; artifacts downloaded)", "")
+            ok &= say("every step there", all((rest_, save, prune, mc_r, mc_s, rec)), names)
+            if not all((rest_, save, prune, mc_r, mc_s, rec)):
+                continue
+            build = next((i for i, n in enumerate(names) if n.startswith(("Build and", "Author's build"))), -1)
+            order = [names.index(n) for n in ("Gradle cache (restore)", "Gradle cache record (hit, partial or miss; artifacts downloaded)",
+                     "Gradle cache, leave out what is derived from Minecraft (public repository)", "Gradle cache (save)")]
+            ok &= say("restore before the build, record, prune and save after it, in that order",
+                      order[0] < build < order[1] < order[2] < order[3], (order, build))
+            # (a) public: what is saved holds nothing Minecraft-derived
+            ok &= say("public prune runs only on a public repository, whatever the outcome",
+                      "if: ${{ always() && !github.event.repository.private }}" in prune, prune)
+            for m_ in MC_DERIVED_MODULES:
+                ok &= say(f"public prune deletes {m_}", f"~/.gradle/caches/modules-2/files-2.1/{m_}" in prune, prune)
+            for c in MC_DERIVED_CACHES:
+                ok &= say(f"{c} never in the main cache", f"caches/{c}" not in rest_ + save, rest_ + save)
+                ok &= say(f"{c} in the private cache", f"~/.gradle/caches/{c}" in mc_r and f"~/.gradle/caches/{c}" in mc_s)
+            ok &= say("the plugins stay cached (modules-2 kept, net.neoforged.gradle not pruned)",
+                      "~/.gradle/caches/modules-2\n" in save and "net.neoforged.gradle" not in prune and "net.neoforged/*" not in prune)
+            # (b) the Minecraft-derived cache: private repositories only, restore and save
+            ok &= say("private cache restore gated", "if: ${{ github.event.repository.private }}" in mc_r, mc_r)
+            ok &= say("private cache save gated", "github.event.repository.private &&" in mc_s and "!github" not in mc_s, mc_s)
+            ok &= say("private cache has its own key", "key: mc-port-gradle-" in mc_r and "key: mc-port-gradle-" in mc_s)
+            # (c) the key
+            files = [f"'{f}'" for f in (*GRADLE_CACHE_FILES, WRAPPER_PROPS)]
+            if mod_dir != ".":
+                files += [f"'{mod_dir}/{f}'" for f in GRADLE_CACHE_FILES]
+            key = re.search(r"key: (port-gradle-.*)", rest_)
+            ok &= say("key hashes the build's four files", bool(key) and all(f in key.group(1) for f in files), key and key.group(1))
+            ok &= say("save and record use the restore's key",
+                      bool(key) and f"key: {key.group(1)}" in save and f"KEY: {key.group(1)}" in rec)
+            ok &= say("restore falls back by prefix", re.search(r"restore-keys: port-gradle-.*\$\{\{ runner.os \}\}-\n", rest_) is not None)
+            ok &= say("no save over an exact hit", "steps.gradle-cache.outputs.cache-hit != 'true'" in save)
+            # (d) the record
+            ok &= say("record runs whatever the outcome", "        if: always()\n" in rec)
+            ok &= say("record reads hit and matched key", "steps.gradle-cache.outputs.cache-hit" in rec
+                      and "steps.gradle-cache.outputs.cache-matched-key" in rec)
+            ok &= say("record: hit, partial or miss, and the count", all(x in rec for x in ("o=hit", "o=partial", "o=miss",
+                      'echo "cache: $o, $n artifacts downloaded" >> "$GITHUB_STEP_SUMMARY"', "cache-record.json")))
+            ok &= say("nothing spliced into a script", "${{" not in rec.split("run: |", 1)[1] and "${{" not in prune.split("run: ", 1)[1])
+            up = [b for b in re.split(r"\n(?=      - )", job(wf, j)) if b.startswith("      - uses: actions/upload-artifact")
+                  and "if: always()" in b]
+            ok &= say("the record is uploaded", any("/port-ci/cache-record.json" in b for b in up), [b[:80] for b in up])
+    # the record step's script, run: hit, partial, miss and the count it writes
+    import subprocess, tempfile
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gitbash import BASH
+    rec = job(fixture(False), "gates").split("      - name: Gradle cache record (hit, partial or miss; artifacts downloaded)\n", 1)[1]
+    script = "\n".join(l[10:] for l in rec.split("        run: |\n", 1)[1].split("\n      - ", 1)[0].splitlines())
+    with tempfile.TemporaryDirectory() as d:
+        home, tmp = pathlib.Path(d) / "home", pathlib.Path(d) / "tmp"
+        mods = home / ".gradle/caches/modules-2/files-2.1/com.example/lib"
+        mods.mkdir(parents=True); tmp.mkdir()
+        for i in range(5):
+            (mods / f"f{i}").write_text("x", encoding="utf-8")
+        for hit, matched, want_o in (("true", "k", "hit"), ("false", "port-gradle-Linux-", "partial"), ("", "", "miss")):
+            summ = pathlib.Path(d) / "summary.md"
+            summ.write_text("", encoding="utf-8")
+            env = dict(os.environ, HOME=str(home), RUNNER_TEMP=str(tmp), GITHUB_STEP_SUMMARY=str(summ), GITHUB_JOB="gates",
+                       HIT=hit, MATCHED=matched, KEY="port-gradle-Linux-abc", PRIVATE="false", PORT_CACHE_BEFORE="2")
+            r = subprocess.run([BASH, "-c", script], env=env, capture_output=True, text=True, encoding="utf-8")
+            got = summ.read_text(encoding="utf-8").strip()
+            rj = (tmp / "port-ci/cache-record.json")
+            data = json.loads(rj.read_text(encoding="utf-8")) if rj.is_file() else {}
+            ok &= want(f"gradle cache record script: {want_o}", r.returncode == 0 and got == f"cache: {want_o}, 3 artifacts downloaded"
+                       and data.get("outcome") == want_o and data.get("downloaded") == 3 and data.get("private") is False,
+                       f"cache: {want_o}, 3 artifacts downloaded", (r.returncode, got, data, r.stderr[-200:]))
+    print(f"port-ci self-check: the Gradle cache: {'OK' if ok else 'FAIL'}")
+    return ok
+
+
 def gatec_check():
     """The fork's own Gate C in a job of its own: (a) no gate-c.json, the golden byte for byte (covered by the goldens
     and release_gate_check); (b) with one, a `gate-c` job that needs nothing and runs on the gates' runs, the author's
@@ -2879,6 +3079,7 @@ def self_check():
             head = wf.split(f"\n  {job}:\n", 1)[1].split("\n    steps:", 1)[0]
             ok &= f"\n      {name}: ${{{{ steps." in head
     ok &= variant_check()
+    ok &= gradle_cache_check()
     ok &= records_check()
     ok &= kit_probe_check()
     ok &= workflow_check_check()
