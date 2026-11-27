@@ -3051,6 +3051,9 @@ def narrowed_guard(st, it, d, v, ref=None):
                       f"{it.get('id', '<this item>')}`")
 
 
+CI_RECORD_AB_OK = (0, 17, 18)       # fork-port --gates ab exits a ci_record version's t_gates takes as green
+
+
 def t_gates(st, it, log):
     """ONE full gate run on the version's checkout. Records what it gated (gated_head, before the records commit) and
     when, after removing the checkout's old jars: the library's pre-merge dependent gate takes only a jar this run
@@ -3069,7 +3072,10 @@ def t_gates(st, it, log):
             # by default (not with MMVU_ROUND_REUSE=0), no library dependent gate (it takes the jar this run builds): an
             # A/B green record standing for this tree (fork-branches.py ab_reusable) is not run again; PR CI runs Gate C either way
             fb = mod("fb")
-            reused, why = fb.ab_reusable(F["dir"], d, v, st.data["frozen"], ok=(0, 18)) if fb.reuse_on() and not seg_ids(
+            # fork-port --gates ab: 17 = A/B green with no Gate C on record (none is run here: the PR's CI is the gate of
+            # record), 18 = A/B green over a Gate C record whose done list is open; both are this step's green. A branch
+            # whose Gate C records are only its Port CI releases (no local GATES.md) always exits 17 (round of 2026-11-26)
+            reused, why = fb.ab_reusable(F["dir"], d, v, st.data["frozen"], ok=CI_RECORD_AB_OK) if fb.reuse_on() and not seg_ids(
                 st, it, ("depgate",)) else (None, None)
             if why:
                 say_to(log)(f"round: gates: A/B runs: {why}")
@@ -3078,7 +3084,8 @@ def t_gates(st, it, log):
                             f"{reused['exit']}; records only since)")
             else:
                 try:
-                    r_ = gate_sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"], gates="ab"), log, ok=(0, 18))
+                    r_ = gate_sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"], gates="ab"), log,
+                                 ok=CI_RECORD_AB_OK)
                 except (StepError, Blocked):
                     fb.drop_ab_green(F["dir"], v)        # red: a retry never reuses an older green
                     raise
@@ -9682,9 +9689,30 @@ def self_check():
                     nab, rab, kab = gates_(_StAB)
                     expect(kab == 1 and "reused" not in nab, f"code changed since the record: runs: {nab}")
                     d_ = json.loads(rec_f_.read_text(encoding="utf-8"))
-                    rec_f_.write_text(json.dumps({"1.21.10": dict(d_["1.21.10"], exit=17)}), encoding="utf-8")
+                    rec_f_.write_text(json.dumps({"1.21.10": dict(d_["1.21.10"], exit=11)}), encoding="utf-8")
                     nab, rab, kab = gates_(_StAB)
-                    expect(kab == 1, f"a record with exit 17 (t_gates takes 0 or 18): runs: {nab}")
+                    expect(kab == 1, f"a record with exit 11 (t_gates takes 0, 17 or 18): runs: {nab}")
+                    # THE MEASURED CASE (round of 2026-11-26): a ci_record branch with no local GATES.md (its Gate C
+                    # records are its Port CI releases) -- fork-port --gates ab exits 17, A/B green: the step is green
+                    # and the record it writes (exit 17) is reused next time
+                    sh_ok17 = G["sh"]
+                    def sh17_(st_, it_, cmd, log, ok=(0,), **k_):
+                        seen_cmds.append([str(c) for c in cmd])
+                        if 17 not in ok:
+                            raise StepError("fork-port.py exit 17")
+                        return subprocess.CompletedProcess(cmd, 17, "", "")
+                    G["sh"] = sh17_
+                    try:
+                        rec_f_.unlink(missing_ok=True)
+                        nab, rab, kab = gates_(_StAB)
+                        expect(kab == 1 and rab.get("ci_record") and "Gate C is the PR's CI" in nab
+                               and json.loads(rec_f_.read_text(encoding="utf-8"))["1.21.10"]["exit"] == 17,
+                               f"a ci_record version whose A/B run exits 17 (no Gate C on record here): green: {nab}")
+                        commit(nc_, ".port/1.21.10/COST.md", "cost again\n", "a record")
+                        nab, rab, kab = gates_(_StAB)
+                        expect(kab == 0 and "reused from" in nab, f"its exit-17 record is reused: {nab}")
+                    finally:
+                        G["sh"] = sh_ok17
                     fbm_.kit_id = lambda: "kit-b"
                     nab, rab, kab = gates_(_StAB)
                     expect(kab == 1, f"another migrator kit: runs: {nab}")
