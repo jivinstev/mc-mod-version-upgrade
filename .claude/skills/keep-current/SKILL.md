@@ -236,7 +236,7 @@ run is green, and it is then gated against the dependency's NEW build.
    release's asset that stands for the pinned one, its sha256, `--dep-jar` and `--dep-jar-variant` together, every other
    option and the kit as they are; written, not committed: run the fork's `after_repin` commands, then commit it all).
    A version branch of several mods re-pins with `layer-deps.py resolve --port-release` as one mod does (it reads every
-   mod's workflow and build.gradle; the same coordinate pinned differently by two mods' workflows (unless it is the library this re-pin moves: head-repin and resolve --port-release move every workflow pinning it to its one new release, report each workflow's old and new release, and refuse only if they would still differ), or a CurseForge/Modrinth dependency two mods' builds
+   mod's workflow and build.gradle; the same coordinate pinned differently by two mods' workflows (unless it is the library this re-pin moves: head-repin and resolve --port-release move every workflow pinning it to its one new release, report each workflow's old and new release, and refuse only if they would still differ; in head-repin a pinned coordinate that is its old release's own version and that no build.gradle names (the jar read by file or from a lock) moves to the new release's version, so pins split across releases end on one, while a coordinate a build names, literally or through a `${property}`, is kept), or a CurseForge/Modrinth dependency two mods' builds
    pin at different builds, is refused, naming
    both), then `fork-branches.py ci --target <v> --run` with no `--modid` renders each mod's workflow. A `--dep-jar`
    no build.gradle names (the build reads the jar from mavenLocal) is re-pinned like a named one.

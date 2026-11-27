@@ -196,20 +196,25 @@ def workflows(repo):
     return [(path, fk.workflow_text(repo, path)) for _n, path in fk.port_ci_workflows(repo)]
 
 
-def union_pins(repo, read, moving=()):
+def union_pins(repo, read, moving=(), follow=False):
     """{group:artifact: value} of `read` (port_deps, workflow_pins) over every Port CI workflow of the checkout: one
     workflow's for a one-mod repository; for a repository of several mods their union. The same coordinate pinned
     differently by two mods' workflows raises ValueError naming both: which release is the build's cannot be told --
     unless it is a library this run re-pins (`moving`: owner/repo names, any case, read from port_deps' `repo`) at the
     same coordinate version in both: the re-pin moves every workflow to its one new release anyway (a split left by an
-    earlier re-pin of one mod alone), and the first workflow's value stands for the old one."""
+    earlier re-pin of one mod alone), and the first workflow's value stands for the old one. With `follow` (head-repin,
+    which moves a coordinate that is its release's own version with the release: head_repin_args) such a library's
+    split pins are accepted at different coordinate versions too, when each follows its own tag (follows_tag);
+    head-repin still refuses if the workflows would end pinned differently."""
     out, where = {}, {}
     moving = {m.lower() for m in moving}
     for path, text in workflows(repo):
         for ga, val in read(text).items():
             if (ga in out and out[ga] != val and isinstance(val, dict) and isinstance(out[ga], dict)
                     and val.get("repo", "").lower() in moving and out[ga].get("repo", "").lower() in moving
-                    and val.get("version") == out[ga].get("version")):
+                    and (val.get("version") == out[ga].get("version")
+                         or (follow and follows_tag(val.get("version", ""), val.get("tag", ""))
+                             and follows_tag(out[ga].get("version", ""), out[ga].get("tag", ""))))):
                 continue
             if ga in out and out[ga] != val:
                 show = lambda v: (f"{v['repo']}@{v['tag']}/{v['asset']} as {v['version']}" if isinstance(v, dict)
@@ -221,10 +226,31 @@ def union_pins(repo, read, moving=()):
     return out
 
 
-def fork_port_deps(repo, moving=()):
+def follows_tag(version, tag):
+    """Does a pinned coordinate version follow its release's tag (the tag holds it as one dash-separated part:
+    1.0.11 of examplelib-1.0.11-mc1.21.1, or 1.0.11-mc1.21.1 of the same tag)? Such a coordinate is the release's own
+    version, and a re-pin moves it with the release (tag_followed_version)."""
+    return bool(version) and bool(re.search(rf"(?:^|-){re.escape(version)}(?:-|$)", tag or ""))
+
+
+def tag_followed_version(version, old_tag, new_tag):
+    """The coordinate version `version` moved from release `old_tag` to `new_tag`, when it follows the old tag
+    (follows_tag) and the new tag has the same shape around it (the same name before it, the same -mc<mc> after);
+    None otherwise (the coordinate is kept)."""
+    m = re.search(rf"(?:^|-)({re.escape(version)})(?:-|$)", old_tag or "") if version else None
+    if not m:
+        return None
+    pre, post = old_tag[:m.start(1)], old_tag[m.end(1):]
+    if not (new_tag.startswith(pre) and new_tag.endswith(post)) or len(new_tag) <= len(pre) + len(post):
+        return None
+    new = new_tag[len(pre):len(new_tag) - len(post)]
+    return new if re.fullmatch(r"[\w.+-]+", new) else None
+
+
+def fork_port_deps(repo, moving=(), follow=False):
     """port_deps over every Port CI workflow of the checkout (union_pins; `moving`: the libraries this run re-pins, whose
-    split pins are accepted)."""
-    return union_pins(repo, port_deps, moving)
+    split pins are accepted; `follow`: head-repin's, see union_pins)."""
+    return union_pins(repo, port_deps, moving, follow)
 
 
 def build_files(repo):
@@ -2724,6 +2750,29 @@ def _check_several_mods(expect):
                         runner=lambda cmd: (cmds.append(cmd), 0)[1], say=out.append)
         expect(rc == 2 and not cmds and any("pinned differently" in o for o in out),
                f"split pins whose re-pin results would differ: refused before anything is written: {rc} {out}")
+        # ... unless no build names the coordinate (the jar is read by file or from a lock, as a level build reads its
+        # core) and each pin is its release's own version: then both follow the new release to one pin
+        for n_ in ("alpha", "zeta"):
+            (sp / n_ / "build.gradle").write_text("apply from: '../shared/level.gradle'\n", encoding="utf-8")
+        cmds, out = [], []
+        rc = head_repin(sp, {"owner/examplelib": "examplelib-1.1-mc1.21.1"}, "neoforge-1.21.1", assets,
+                        runner=lambda cmd: (cmds.append(cmd), 0)[1], say=out.append)
+        one_pin = "owner/examplelib@examplelib-1.1-mc1.21.1/examplelib-1.1.jar=com.example:examplelib:1.1"
+        expect(rc == 0 and len(cmds) == 2 and all(dep(c_) == [one_pin] for c_ in cmds)
+               and any("alpha examplelib-1.0-mc1.21.1 -> examplelib-1.1-mc1.21.1" in o
+                       and "zeta examplelib-0.9-mc1.21.1 -> examplelib-1.1-mc1.21.1" in o for o in out),
+               f"head-repin: split pins at their releases' own versions, named by no build, end on the new release's "
+               f"version: {rc} {cmds} {out}")
+        expect(follows_tag("1.0.11", "examplemod-1.0.11-mc1.21.8") and follows_tag("1.0.11-mc1.21.8", "examplemod-1.0.11-mc1.21.8")
+               and not follows_tag("1.0", "examplemod-1.0.11-mc1.21.8") and not follows_tag("", "x-1.0"),
+               "follows_tag: the version is one dash-separated part of the tag (or its tail)")
+        expect(tag_followed_version("1.0.11", "examplemod-1.0.11-mc1.21.8", "examplemod-1.0.12-mc1.21.8") == "1.0.12"
+               and tag_followed_version("1.0.11-mc1.21.8", "examplemod-1.0.11-mc1.21.8", "examplemod-1.0.12-mc1.21.8")
+               == "1.0.12-mc1.21.8"
+               and tag_followed_version("1.0.11", "examplemod-1.0.11-mc1.21.8", "othermod-1.0.12-mc1.21.8") is None
+               and tag_followed_version("1.0.11", "examplemod-1.0.11-mc1.21.8", "examplemod-1.0.12-mc1.21.10") is None
+               and tag_followed_version("2.0", "examplemod-1.0.11-mc1.21.8", "examplemod-1.0.12-mc1.21.8") is None,
+               "tag_followed_version: the new tag's version in the same place, or None (the coordinate is kept)")
         # resolve --port-release on a version branch with split pins of the released library: no longer refused upfront
         c2 = pathlib.Path(td) / "split-vb"
         several_mods_fixture(c2, "1.21.4")
@@ -2920,11 +2969,14 @@ def _port_ci():
     return _PC[0]
 
 
-def head_repin_args(rec, releases, assets_of, mc):
+def head_repin_args(rec, releases, assets_of, mc, named=frozenset()):
     """A head workflow's read-back port-ci.py arguments `rec` (port-ci.py recover_args) with each --dep-jar and
     --dep-jar-variant of a released library moved to its new release: `releases` {owner/repo (lower case): tag}; the
     asset is the one of that release standing for the pinned one (pick_release_asset: the same name and variant, as
-    resolve_port reads a release), the coordinate kept (the build names it). assets_of(repo, tag) -> ([names], None) or
+    resolve_port reads a release). The coordinate is kept when a build names it (`named`: the group:artifact of every
+    `g:a:<version>` a build of the checkout spells, a literal or a ${property}) or does not follow the old tag; a
+    coordinate that is the old release's own version (follows_tag) and no build names (the build reads the jar by file
+    or from a lock) moves to the new release's version, so two workflows split across releases end on one pin. assets_of(repo, tag) -> ([names], None) or
     (None, why). -> (args, [(old spec, new spec)]); ValueError when a release has no asset that stands for the pin."""
     out, moved, i = [], [], 0
     while i < len(rec):
@@ -2939,7 +2991,10 @@ def head_repin_args(rec, releases, assets_of, mc):
                 name, why = pick_release_asset(names, m.group(3), mc)
                 if not name:
                     raise ValueError(f"{m.group(1)}'s release {tag}: {why}")
-                new = f"{m.group(1)}@{tag}/{name}={m.group(4)}"
+                coord = m.group(4)
+                ga_, _c, ver = coord.rpartition(":")
+                moved_ver = tag_followed_version(ver, m.group(2), tag) if ga_ and ga_ not in named else None
+                new = f"{m.group(1)}@{tag}/{name}={ga_ + ':' + moved_ver if moved_ver else coord}"
                 if new != spec:
                     moved.append((spec, new))
                 spec = new
@@ -2960,9 +3015,11 @@ def head_repin(repo, releases, branch, assets_of=None, runner=None, say=print):
     no asset for the pin; two mods' workflows pinning one coordinate differently)."""
     repo = pathlib.Path(repo)
     try:
-        fork_port_deps(repo, releases)      # a library re-pinned here may be pinned differently by two mods' workflows
+        fork_port_deps(repo, releases, follow=True)      # a library re-pinned here may be pinned differently by two mods' workflows
     except ValueError as e:
         say(f"layer-deps: head-repin: {e}"); return 2
+    # a coordinate a build names (`g:a:1.0`, or `g:a:${prop}`: a property holds the version) is kept as it is
+    named = {ga for _p, t_ in build_files(repo) for ga in re.findall(r"([\w.-]+:[\w.-]+):", t_)}
     pc = _port_ci()
     assets_of = assets_of or (lambda r, t: (lambda a: ([n for n, _u in a[0]] if a[0] is not None else None, a[1]))(
         release_assets(r, t)))
@@ -2977,7 +3034,7 @@ def head_repin(repo, releases, branch, assets_of=None, runner=None, say=print):
         mc = (re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) or [None, ""])[1] \
             if gp.is_file() else ""
         try:
-            args, moved = head_repin_args(rec, releases, assets_of, mc)
+            args, moved = head_repin_args(rec, releases, assets_of, mc, named)
         except ValueError as e:
             say(f"layer-deps: head-repin: {path}: {e}"); return 2
         hit |= {pd["repo"].lower() for pd in port_deps(text).values() if pd["repo"].lower() in releases}
