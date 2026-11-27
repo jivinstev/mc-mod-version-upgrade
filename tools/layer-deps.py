@@ -196,13 +196,21 @@ def workflows(repo):
     return [(path, fk.workflow_text(repo, path)) for _n, path in fk.port_ci_workflows(repo)]
 
 
-def union_pins(repo, read):
+def union_pins(repo, read, moving=()):
     """{group:artifact: value} of `read` (port_deps, workflow_pins) over every Port CI workflow of the checkout: one
     workflow's for a one-mod repository; for a repository of several mods their union. The same coordinate pinned
-    differently by two mods' workflows raises ValueError naming both: which release is the build's cannot be told."""
+    differently by two mods' workflows raises ValueError naming both: which release is the build's cannot be told --
+    unless it is a library this run re-pins (`moving`: owner/repo names, any case, read from port_deps' `repo`) at the
+    same coordinate version in both: the re-pin moves every workflow to its one new release anyway (a split left by an
+    earlier re-pin of one mod alone), and the first workflow's value stands for the old one."""
     out, where = {}, {}
+    moving = {m.lower() for m in moving}
     for path, text in workflows(repo):
         for ga, val in read(text).items():
+            if (ga in out and out[ga] != val and isinstance(val, dict) and isinstance(out[ga], dict)
+                    and val.get("repo", "").lower() in moving and out[ga].get("repo", "").lower() in moving
+                    and val.get("version") == out[ga].get("version")):
+                continue
             if ga in out and out[ga] != val:
                 show = lambda v: (f"{v['repo']}@{v['tag']}/{v['asset']} as {v['version']}" if isinstance(v, dict)
                                   else f"{v[1].split()[0]} as {v[0]}")
@@ -213,9 +221,10 @@ def union_pins(repo, read):
     return out
 
 
-def fork_port_deps(repo):
-    """port_deps over every Port CI workflow of the checkout (union_pins)."""
-    return union_pins(repo, port_deps)
+def fork_port_deps(repo, moving=()):
+    """port_deps over every Port CI workflow of the checkout (union_pins; `moving`: the libraries this run re-pins, whose
+    split pins are accepted)."""
+    return union_pins(repo, port_deps, moving)
 
 
 def build_files(repo):
@@ -913,7 +922,7 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
     mpath = repo / ".github/port-install.json"
     manifest = json.loads(mpath.read_text(encoding="utf-8")) if mpath.exists() else None
     roles = manifest_roles(manifest)
-    ports = fork_port_deps(repo)                # every Port CI workflow: one per mod of a repository of several
+    ports = fork_port_deps(repo, checkouts)     # every Port CI workflow: one per mod of a repository of several
     deps = fork_gradle_deps(repo)               # the root build.gradle and each mod folder's
     deps += workflow_only(ports, deps)          # a --dep-jar no build names: a port row all the same
     kept, bumps = kept or {}, bumps or {}
@@ -1187,7 +1196,10 @@ def cmd_resolve(a):
               "its pins are build.gradle's, moved only by --bump)")
         return 2
     try:
-        fork_port_deps(repo)        # two mods' workflows pinning one library differently: refused before anything
+        # two mods' workflows pinning one library differently: refused before anything -- unless this run re-pins that
+        # library (--port-release / --port-checkout), which moves both to its one new release
+        fork_port_deps(repo, [s.partition("@")[0] for s in getattr(a, "port_release", [])]
+                       + [s.partition("=")[0] for s in a.port_checkout])
         bumps = parse_bumps(getattr(a, "bump", []), getattr(a, "bump_all", False),
                             [d for d in fork_gradle_deps(repo) if d["kind"] in ("curse", "modrinth")])
     except ValueError as e:
@@ -2679,6 +2691,53 @@ def _check_several_mods(expect):
         rc = head_repin(h, {"owner/examplelib": "examplelib-1.1-mc1.21.1"}, "neoforge-1.21.1",
                         lambda r, t: (["other-1.1.jar"], None), runner=lambda cmd: (cmds.append(cmd), 0)[1], say=out.append)
         expect(rc == 2 and not cmds and "no asset" in out[-1], f"a release with no asset for the pin: exit 2: {out[-1:]}")
+        # split pins: both mods pin examplelib (the same coordinate) at DIFFERENT releases -- head-repin moves both to the
+        # new release and says so per workflow; the union check accepts it only for the library re-pinned here
+        sp = pathlib.Path(td) / "split"
+        several_mods_fixture(sp, "1.21.1")
+        zf_ = sp / ".github/workflows/port-ci-zeta.yml"
+        zf_.write_text(zf_.read_text(encoding="utf-8").replace("examplelib-core", "examplelib")
+                       .replace("examplelib-1.0-mc1.21.1", "examplelib-0.9-mc1.21.1"), encoding="utf-8")
+        try:
+            fork_port_deps(sp)
+            split_err = ""
+        except ValueError as e:
+            split_err = str(e)
+        expect("pinned differently" in split_err, f"split pins with no re-pin: still refused: {split_err!r}")
+        cmds, out = [], []
+        rc = head_repin(sp, {"owner/examplelib": "examplelib-1.1-mc1.21.1"}, "neoforge-1.21.1", assets,
+                        runner=lambda cmd: (cmds.append(cmd), 0)[1], say=out.append)
+        both = "owner/examplelib@examplelib-1.1-mc1.21.1/examplelib-1.1.jar=com.example:examplelib:1.0"
+        expect(rc == 0 and len(cmds) == 2 and all(dep(c_) == [both] for c_ in cmds)
+               and any("alpha examplelib-1.0-mc1.21.1 -> examplelib-1.1-mc1.21.1" in o
+                       and "zeta examplelib-0.9-mc1.21.1 -> examplelib-1.1-mc1.21.1" in o for o in out),
+               f"head-repin: split pins of the re-pinned library move to its one new release, reported per workflow: "
+               f"{rc} {cmds} {out}")
+        # the results would differ (the two pin different coordinate versions): refused, naming both
+        zf_.write_text(zf_.read_text(encoding="utf-8").replace("examplelib/1.0", "examplelib/0.9")
+                       .replace("<version>1.0</version>", "<version>0.9</version>")
+                       .replace("examplelib 1.0 from", "examplelib 0.9 from"), encoding="utf-8")
+        expect({pd["version"] for _p, t_ in workflows(sp) for pd in port_deps(t_).values()} == {"1.0", "0.9"},
+               "fixture: the two mods now pin examplelib at different coordinate versions")
+        cmds, out = [], []
+        rc = head_repin(sp, {"owner/examplelib": "examplelib-1.1-mc1.21.1"}, "neoforge-1.21.1", assets,
+                        runner=lambda cmd: (cmds.append(cmd), 0)[1], say=out.append)
+        expect(rc == 2 and not cmds and any("pinned differently" in o for o in out),
+               f"split pins whose re-pin results would differ: refused before anything is written: {rc} {out}")
+        # resolve --port-release on a version branch with split pins of the released library: no longer refused upfront
+        c2 = pathlib.Path(td) / "split-vb"
+        several_mods_fixture(c2, "1.21.4")
+        z2 = c2 / ".github/workflows/port-ci-zeta.yml"
+        z2.write_text(z2.read_text(encoding="utf-8").replace("examplelib-core", "examplelib").replace("lib-1.0-mc", "lib-0.9-mc"),
+                      encoding="utf-8")
+        expect(sorted(fork_port_deps(c2, ["Owner/ExampleLib"])) == ["com.example:examplelib"],
+               "fork_port_deps: split pins of a library this run re-pins are accepted (any case)")
+        try:
+            fork_port_deps(c2, ["owner/other"])
+            other_err = ""
+        except ValueError as e:
+            other_err = str(e)
+        expect("pinned differently" in other_err, "split pins of a library this run does NOT re-pin: still refused")
         # one mod: a workflow-only pin gets its row too; the head's one workflow regenerated as before
         one = pathlib.Path(td) / "one"
         (one / ".github/workflows").mkdir(parents=True)
@@ -2901,13 +2960,13 @@ def head_repin(repo, releases, branch, assets_of=None, runner=None, say=print):
     no asset for the pin; two mods' workflows pinning one coordinate differently)."""
     repo = pathlib.Path(repo)
     try:
-        fork_port_deps(repo)
+        fork_port_deps(repo, releases)      # a library re-pinned here may be pinned differently by two mods' workflows
     except ValueError as e:
         say(f"layer-deps: head-repin: {e}"); return 2
     pc = _port_ci()
     assets_of = assets_of or (lambda r, t: (lambda a: ([n for n, _u in a[0]] if a[0] is not None else None, a[1]))(
         release_assets(r, t)))
-    hit, rc = set(), 0
+    hit, rc, plan, after = set(), 0, [], {}
     for path, text in workflows(repo):
         try:
             rec = pc.recover_args(text)
@@ -2922,6 +2981,22 @@ def head_repin(repo, releases, branch, assets_of=None, runner=None, say=print):
         except ValueError as e:
             say(f"layer-deps: head-repin: {path}: {e}"); return 2
         hit |= {pd["repo"].lower() for pd in port_deps(text).values() if pd["repo"].lower() in releases}
+        for ga, pd in port_deps(text).items():          # what each workflow pins of a re-pinned library, before -> after
+            if pd["repo"].lower() in releases:
+                new = next((n for o, n in moved if o.startswith(f"{pd['repo']}@{pd['tag']}/{pd['asset']}=")),
+                           f"{pd['repo']}@{pd['tag']}/{pd['asset']}={ga}:{pd['version']}")
+                after.setdefault(ga, []).append((path, pd["tag"], new))
+        plan.append((path, args, moved))
+    for ga, rows in sorted(after.items()):
+        name = lambda p_: pathlib.PurePosixPath(p_).stem.replace("port-ci-", "") or p_
+        if len({n.split("@", 1)[1].split("/", 1)[0] + "=" + n.split("=", 1)[1] for _p, _t, n in rows}) > 1:
+            say(f"layer-deps: head-repin: {ga} would end pinned differently: "
+                + "; ".join(f"{name(p_)} -> {n}" for p_, _t, n in rows) + " -- pin one release of it in every workflow")
+            return 2
+        if len(rows) > 1 or len({t for _p, t, _n in rows}) > 1:
+            say(f"layer-deps: head-repin: {ga}: " + ", ".join(
+                f"{name(p_)} {t} -> {n.split('@', 1)[1].split('/', 1)[0]}" for p_, t, n in rows))
+    for path, args, moved in plan:
         if not moved:
             continue
         for old, new in moved:
