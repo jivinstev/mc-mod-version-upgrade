@@ -122,7 +122,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "{{JAVA}}"
+          java-version: "{{JAVA}}"{{GRADLE_CACHE}}
       - name: Software OpenGL for the client gate
         run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
 {{PRE_BUILD}}{{VARIANT_STEPS}}{{DEP_OVERRIDE_STEP}}
@@ -131,7 +131,7 @@ jobs:
           git rev-parse "HEAD^{tree}" > "$RUNNER_TEMP/built-tree.txt"   # the tree this run built: a from_run release checks it
           git fetch --no-tags origin "{{BASE}}"
           python3 .port-tools/tools/ci-gates.py --repo {{MOD_DIR}} --modid "{{MODID}}" --base "origin/{{BASE}}" \
-            --gatec "{{GATEC}}" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md" --port-ci{{FORK_GATEC_ELSEWHERE}}
+            --gatec "{{GATEC}}" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md" --port-ci{{FORK_GATEC_ELSEWHERE}}{{GRADLE_CACHE_SAVE}}
       - name: Gate summary
         if: always()
         run: cat "$RUNNER_TEMP/gates.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
@@ -142,6 +142,7 @@ jobs:
           path: |
             ${{ runner.temp }}/port-ci/*.log
             ${{ runner.temp }}/port-ci/*.jsonl
+            ${{ runner.temp }}/port-ci/cache-record.json
             ${{ runner.temp }}/port-ci/gate-c-out/
             ${{ runner.temp }}/gates.md
             ${{ runner.temp }}/built-tree.txt
