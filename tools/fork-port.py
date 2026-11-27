@@ -1392,9 +1392,16 @@ def folder_modid(folder):
     return m.group(1) if m else None
 
 
-def parse_modid(toml_text):
+def parse_modid(toml_text, props_text=""):
+    """The [[mods]] modId of a neoforge.mods.toml. A templated one (`modId="${mod_id}"`, expanded from
+    gradle.properties by the build's processResources) is resolved from `props_text`, the root gradle.properties;
+    None when it cannot be (a `${...}` left in would be taken as the mod's namespace and refuse every id it owns)."""
     m = re.search(r'(?s)\[\[mods\]\].*?modId\s*=\s*"([^"]+)"', toml_text)
-    return m.group(1) if m else None
+    if not m:
+        return None
+    props = dict(re.findall(r"(?m)^\s*([A-Za-z0-9_.-]+)\s*[=:]\s*(\S+)", props_text or ""))
+    v = re.sub(r"\$\{([^}]+)\}", lambda x: props.get(x.group(1).strip(), x.group(0)), m.group(1))
+    return None if "${" in v else v
 
 
 def plain_froms(text):
@@ -1824,7 +1831,9 @@ class Run:
         if self.a.modid:
             return self.a.modid
         f = self.repo / "src/main/resources/META-INF/neoforge.mods.toml"
-        return parse_modid(f.read_text(encoding="utf-8")) if f.is_file() else None
+        gp = self.repo / "gradle.properties"
+        return parse_modid(f.read_text(encoding="utf-8"),
+                           gp.read_text(encoding="utf-8", errors="replace") if gp.is_file() else "") if f.is_file() else None
 
     def s_gates(self):
         if self.a.gates == "none":
@@ -2915,6 +2924,9 @@ def self_check():
             (mv / "targets" / t / "target.properties").write_text(f"inherits={inh}\n" if inh else "x=1\n", encoding="utf-8")
         expect(chain(mv, "1.21.5") == ["1.21.5", "1.21.4"], "chain")
     expect(parse_modid('[[mods]]\nmodId = "examplemod"\n[[dependencies.examplemod]]\nmodId = "neoforge"\n') == "examplemod", "modid")
+    expect(parse_modid('[[mods]]\nmodId="${mod_id}"\n', "mod_id=examplemod\nmod_version=1.0\n") == "examplemod",
+           "modid templated from gradle.properties")
+    expect(parse_modid('[[mods]]\nmodId="${mod_id}"\n', "") is None, "modid templated, no gradle.properties: unknown, not ${mod_id}")
     # the residue builder over a canned compile log, plus a canned loop log
     cs = load("compile_summary", "compile-summary.py")
     log = ("> Task :compileJava\n/w/build/mc1.21.5/mv/java/m/A.java:3: error: cannot find symbol\n  symbol:   class Foo\n"
