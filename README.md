@@ -494,7 +494,7 @@ driver pushes the merge and skips that version's review, gates, PR and release, 
 changed; a version whose only changes are ones a fresh review already passed lower down, file for file
 (`.port/CHANGE-REVIEWS.md`), skips its fresh review. On a fork whose Port CI workflow takes the `from_run` and
 `dep_override` inputs (both kinds of fork; `ci-check` regenerates an older workflow once), the PR's CI is the gate of
-record: the round builds and runs Gate A/B locally with no machine lock, Gate C runs in CI's three environments in
+record: the round builds and runs Gate A/B locally under the machine's one gate lock (one heavy Gradle job at a time, as each cascade's `--gates ab` run), Gate C runs in CI's three environments in
 parallel, the release reuses that PR run's jars and attaches its gate summaries (`gates-<env>.md`), which the done
 check (`check-done`) reads as the version's Gate C record when no committed `GATES.md` is current -- no commit after the
 merge; a library's pre-merge dependent gate is the dependent's CI dispatched with the PR run's candidate jar, named

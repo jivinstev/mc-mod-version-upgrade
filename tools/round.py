@@ -2527,12 +2527,12 @@ def t_mergeup(st, it, log):
                             "version's port_taken, fixes the issue there and merges it into the head "
                             "(\"A fork with version branches\" step 2); without it the fix never leaves the head")
         for r in refs:
-            sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d, f"{frm}..{v}", "--port-ref", r,
-                        "--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
+            heavy_sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d, f"{frm}..{v}", "--port-ref",
+                              r, "--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
         pn, pr_ = post_merge(st, it, before, log)
         return f"{', '.join(refs)} carried into neoforge-{v} (--port-ref), A/B green" + pn, pr_
     try:
-        sh(st, it, cmd + ["--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
+        heavy_sh(st, it, cmd + ["--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
     except StepError as e:
         open_ = open_remerges(d, v)
         if open_:            # what keeps the version red once it builds: said, so the fixer works on it (measured,
@@ -2624,8 +2624,8 @@ def t_resync(st, it, log):
     d = F["dir"]
     git(d, "fetch", "-q", "origin", check=True)
     before = git(d, "rev-parse", f"refs/heads/neoforge-{v}").stdout.strip()
-    sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d, f"{frm}..{v}", "--gates", "ab",
-                "--untaken-ok", st.data["frozen"]] + (["--reuse-ab"] if mod("fb").reuse_on() else []), log)
+    heavy_sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d, f"{frm}..{v}", "--gates", "ab",
+                      "--untaken-ok", st.data["frozen"]] + (["--reuse-ab"] if mod("fb").reuse_on() else []), log)
     pn, pr_ = post_merge(st, it, before, log)          # #325: what the merge brought into a path a command owns
     after = git(d, "rev-parse", f"refs/heads/neoforge-{v}").stdout.strip()
     moved = shipped_changes(d, before, after, v) if before and after and before != after else []
@@ -2947,6 +2947,16 @@ def gate_run_cmd(d, v, stage, frozen, *extra, gates="full"):
 ENV_STOP = "environmental, not a code failure"
 
 
+def heavy_sh(st, it, cmd, log, run=None, **kw):
+    """A Gradle gate run the driver starts -- a cascade's --gates ab, a ci_record version's or head's A/B run -- under
+    the machine's one gate lock (full_gate_lock), held by the run itself (sh's hold): one heavy job at a time. Two or
+    three of them at once on a 4-CPU machine (load ~7, weekly round of 2026-11-26) made a timing test miss its budget
+    on three rungs and sent a green merge-up to two fixers. `run`: gate_sh (the default sh otherwise)."""
+    who = it.get("id") or f"{it.get('fork', '?')}@{it.get('version', '?')}:{it.get('step', '?')}"
+    with full_gate_lock(who, say_to(log)) as lk:
+        return (run or sh)(st, it, cmd, log, hold=lk, **kw)
+
+
 def gate_sh(st, it, cmd, log, **kw):
     """A gate run (sh) whose red result fork-port.py judged ENVIRONMENTAL -- a JVM the machine killed, too little free
     memory, or a suite stopped at the gate's time budget (#330) -- blocks the step with fork-port's own reason instead of
@@ -3068,7 +3078,7 @@ def t_gates(st, it, log):
         for j in built_jars(d):
             j.unlink()
         gated, at = head(d), time.time()
-        if ci_record(d):            # the PR's CI is the gate of record: the build and Gate A/B here, no client, no lock
+        if ci_record(d):            # the PR's CI is the gate of record: the build and Gate A/B here, no client
             # by default (not with MMVU_ROUND_REUSE=0), no library dependent gate (it takes the jar this run builds): an
             # A/B green record standing for this tree (fork-branches.py ab_reusable) is not run again; PR CI runs Gate C either way
             fb = mod("fb")
@@ -3084,8 +3094,8 @@ def t_gates(st, it, log):
                             f"{reused['exit']}; records only since)")
             else:
                 try:
-                    r_ = gate_sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"], gates="ab"), log,
-                                 ok=CI_RECORD_AB_OK)
+                    r_ = heavy_sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"], gates="ab"), log,
+                                  run=gate_sh, ok=CI_RECORD_AB_OK)
                 except (StepError, Blocked):
                     fb.drop_ab_green(F["dir"], v)        # red: a retry never reuses an older green
                     raise
@@ -3135,7 +3145,7 @@ def t_gates(st, it, log):
     if ci_record(d):                # the PR's CI is the gate of record (both kinds): build and Gate A/B here
         pins()                      # no lock here, as for the build itself: every dependent gate has its own mavenLocal
         for cmd in sv_gate_cmds(d, up, gatec=""):
-            gate_sh(st, it, cmd, log)
+            heavy_sh(st, it, cmd, log, run=gate_sh)        # one heavy job at a time on the machine
         return "ci-gates build and Gate A/B green (full and minimal); Gate C is the PR's CI (the gate of record)", {
             "gated_head": gated, "gated_at": at, "head_after": head(d), "ci_record": True}
     with full_gate_lock(it["id"], say_to(log)) as lk:
@@ -9623,12 +9633,18 @@ def self_check():
                        f"first=True waits for the round's own run only; without it a later red dispatch decides: {t1}")
             finally:
                 G.update(keep_)
-            # t_gates on a ci_record version branch: the build and Gate A/B only (fork-port --gates ab), no machine lock
+            # t_gates on a ci_record version branch: the build and Gate A/B only (fork-port --gates ab), no Gate C
+            # client -- under the machine's one gate lock (heavy_sh): one heavy job at a time (weekly round 2026-11-26)
             commit(nc_, ".github/workflows/port-ci.yml", wf_new, "the new template again")
             seen_cmds.clear()
             sh = rec_out("")
             lock_keep = G["full_gate_lock"]
-            G["full_gate_lock"] = lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("the gate lock was taken"))
+            locks_ = []
+            @contextlib.contextmanager
+            def rec_lock_(who, say=print):
+                locks_.append(who)
+                yield None
+            G["full_gate_lock"] = rec_lock_
             class _St10(_St7):
                 data = {"allow": ["push-version-branches"], "frozen": str(tmp / "frozen.json")}
             try:
@@ -9638,6 +9654,7 @@ def self_check():
                 expect(r_.get("ci_record") and r_["gated_head"] == head(nc_) and len(ran_) == 1
                        and "--gates ab" in ran_[0] and "fork-port.py" in ran_[0],
                        f"a ci_record version: build and Gate A/B here, Gate C the PR's CI: {note} {ran_}")
+                expect(locks_ == ["nc@1.21.10:gates"], f"the A/B run holds the machine's gate lock: {locks_}")
                 # MMVU_ROUND_REUSE=1: an A/B green record standing for this tree is not run again here (PR CI runs
                 # Gate C); each precondition that fails runs it as before; flag off, the run above is today's
                 fbm_ = mod("fb")
@@ -9760,7 +9777,12 @@ def self_check():
                     raise KeyError(i_)
             ck_keep = G["checkout"]
             G["checkout"] = lambda d__, b__, create_from=None: str(sv_)
-            G["full_gate_lock"] = lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("the gate lock was taken"))
+            sv_locks_ = []
+            @contextlib.contextmanager
+            def sv_lock_(who, say=print):
+                sv_locks_.append(who)
+                yield None
+            G["full_gate_lock"] = sv_lock_       # each ci-gates run holds the machine's gate lock (heavy_sh)
             seen_cmds.clear()
             sh = rec_out("")
             ld_, pinned_ = mod("ld"), []
@@ -9794,6 +9816,8 @@ def self_check():
                        and all(c[c.index("--gatec") + 1] == "" for c in ran_)
                        and not (sv_ / ".port/1.21.1/GATES.md").exists(),
                        f"a single-version ci_record head: build and Gate A/B in both environments, no GATES.md: {note} {ran_}")
+                expect(sv_locks_ and set(sv_locks_) == {"examplemod@1.21.1:gates"} and len(sv_locks_) == 2 * 2,
+                       f"each ci-gates run (full and minimal, both t_gates calls) holds the machine's gate lock: {sv_locks_}")
                 # MMVU_ROUND_REUSE=1 on the single-version route: nothing reused or skipped -- its gates run both
                 # environments even with an A/B record naming this very commit, and its merge's push-run wait stays
                 # with its release (release_waits_push); only the summary end marker (fork-agnostic) applies to it
