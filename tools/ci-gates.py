@@ -117,6 +117,65 @@ def data_rejections(log, modid):
     return list(dict.fromkeys(out))
 
 
+# A Gradle run that failed only because a dependency or plugin could not be DOWNLOADED (a repository that answered 429 or
+# 5xx, timed out, or briefly served nothing) is not a finding on the code: it is run once more, after a pause, with
+# --refresh-dependencies, and its row says so. Measured: a dependent's gate failed twice in one hour, once per job, on
+# `Plugin [id: 'net.neoforged.gradle.userdev', version: '7.1.39'] was not found` while the same pom answered 200.
+# Only a failure whose every "What went wrong" is a download is retried; a compile error, a failing test or a gate is
+# never retried here.
+DOWNLOAD_FAILURE = re.compile(
+    r"was not found in any of the following sources"
+    r"|could not resolve plugin artifact"
+    r"|Could not resolve all (?:files|dependencies|artifacts|task dependencies) for configuration"
+    r"|Could not (?:resolve|download) [\w.\-]+:[\w.\-]+(?::[\w.\-+]+)?"
+    r"|Could not (?:GET|HEAD) 'https?://"
+    r"|Received status code (?:429|5\d\d)"
+    r"|(?:Read|Connect) timed out|Connection reset|Remote host terminated the handshake",
+    re.I)
+NOT_DOWNLOAD = re.compile(r"Compilation failed|There were failing tests|Execution failed for task '[^']*:(?:compile|test)",
+                          re.I)
+DOWNLOAD_RETRY_ROW = "passed on a download retry"
+
+
+def download_failure(log_text):
+    """True when the Gradle log failed, and every one of its `* What went wrong:` sections is a download failure (above).
+    A log with no such section (Gradle never got that far, or it passed) is not one."""
+    parts = re.findall(r"\* What went wrong:\n(.*?)(?=\n\* Try:|\n\* What went wrong:|\Z)", log_text, re.S)
+    return bool(parts) and all(DOWNLOAD_FAILURE.search(x) and not NOT_DOWNLOAD.search(x) for x in parts)
+
+
+def gradle_download_retry(pu, repo, args, log, wait=None, **kw):
+    """pu.gradle(repo, args, log, **kw), run once more when it failed on a download only (download_failure): after
+    `wait` seconds (PORT_DOWNLOAD_RETRY_WAIT, default 60) and with --refresh-dependencies, that one retry only. The first
+    attempt's log is kept beside `log` (`<log>.first-attempt`). Returns (result, retried)."""
+    r = pu.gradle(repo, args, log, **kw)
+    text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace") if pathlib.Path(log).is_file() else ""
+    if r.returncode == 0 or not download_failure(text):
+        return r, False
+    pathlib.Path(str(log) + ".first-attempt").write_text(text, encoding="utf-8")
+    secs = float(os.environ.get("PORT_DOWNLOAD_RETRY_WAIT", "60") if wait is None else wait)
+    print(f"[ci-gates] Gradle failed on a download only; once more in {secs:.0f}s with --refresh-dependencies", flush=True)
+    import time
+    time.sleep(secs)
+    return pu.gradle(repo, ["--refresh-dependencies", *args], log, **kw), True
+
+
+def install_central_mirror(home=None, env=None):
+    """On a Port CI runner, install tools/central-mirror.init.gradle as ~/.gradle/init.d/port-central-mirror.gradle, so
+    the Gradle runs that ci-gates does not start itself (a fork's own Gate C script, a client loop) also reach Maven
+    Central through Google's mirror; ci-gates' own calls carry it with -I (port_gates.gradle). PORT_CENTRAL_MIRROR=off
+    installs nothing (and removes nothing). Only Port CI runs install it: a person's own ~/.gradle is never written.
+    Returns the installed path, or None."""
+    pu = _load("port_gates_cm", "port_gates.py")
+    if not pu.central_mirror_on(env):
+        return None
+    d = pathlib.Path(home if home is not None else pathlib.Path.home()) / ".gradle/init.d"
+    d.mkdir(parents=True, exist_ok=True)
+    dst = d / "port-central-mirror.gradle"
+    dst.write_text((ROOT / "tools/central-mirror.init.gradle").read_text(encoding="utf-8"), encoding="utf-8")
+    return dst
+
+
 def green_detail(text):
     """What a green gate log proves, in one line: the GameTest count, or the client's PASS line and spawns."""
     m = re.search(r"All (\d+) required tests passed", text) or re.search(r"BOOT_TEST: (PASS[^\n]*)", text)
@@ -1059,6 +1118,91 @@ def fork_gatec_check():
     return ok
 
 
+DL_GRADLEW = """#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")" && pwd)"
+printf '%s\\n' "$*" >> "$d/calls.txt"
+n=$(wc -l < "$d/calls.txt")
+case "$(cat "$d/mode.txt")" in
+  download) [ "$n" -ge 2 ] && { echo "BUILD SUCCESSFUL"; exit 0; } ;;
+  download-twice) ;;
+  compile) printf "* What went wrong:\\nExecution failed for task ':compileJava'.\\n> Compilation failed; see the compiler output.\\n\\n* Try:\\n"; exit 1 ;;
+  ok) echo "BUILD SUCCESSFUL"; exit 0 ;;
+esac
+printf "* What went wrong:\\nPlugin [id: 'net.neoforged.gradle.userdev', version: '7.1.39'] was not found in any of the following sources:\\n- Plugin Repositories (could not resolve plugin artifact 'x:y:7.1.39')\\n\\n* Try:\\n"
+exit 1
+"""
+
+
+def download_retry_check():
+    """A Gradle run that failed on a download only is run once more, with --refresh-dependencies on that retry alone;
+    a compile failure, a mixed failure and a pass are never retried; a second download failure stays a failure. Driven
+    on a single-version fixture checkout (one project, its own gradlew)."""
+    ok, why = True, []
+    pu = _load("port_gates_dl", "port_gates.py")
+    plugin = ("* What went wrong:\nPlugin [id: 'net.neoforged.gradle.userdev', version: '7.1.39'] was not found in any "
+              "of the following sources:\n\n- Plugin Repositories (could not resolve plugin artifact 'a:b:7.1.39')\n\n* Try:\n")
+    cases = [("plugin not found", plugin, True),
+             ("artifact GET 502", "* What went wrong:\nCould not resolve all files for configuration ':compileClasspath'.\n"
+                                  "> Could not GET 'https://maven.example.invalid/a.pom'. Received status code 502\n", True),
+             ("429", "* What went wrong:\nCould not resolve com.example:lib:1.0.\n> Received status code 429 from server\n", True),
+             ("read timed out", "* What went wrong:\nCould not resolve all dependencies for configuration ':x'.\n"
+                                "> Read timed out\n", True),
+             ("compile error", "* What went wrong:\nExecution failed for task ':compileJava'.\n> Compilation failed\n", False),
+             ("failing test", "* What went wrong:\nExecution failed for task ':test'.\n> There were failing tests.\n", False),
+             ("download and a compile error", plugin + "\n* What went wrong:\nExecution failed for task ':compileJava'.\n"
+                                              "> Compilation failed\n", False),
+             ("no section", "BUILD SUCCESSFUL in 3s\n", False),
+             ("a test that prints a download error", "Could not GET 'https://x.invalid/'\n* What went wrong:\n"
+                                                    "Execution failed for task ':test'.\n> There were failing tests.\n", False)]
+    for name, text, want in cases:
+        if download_failure(text) != want:
+            ok = False
+            why.append(f"classifier, {name}: {not want}")
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d).resolve()
+        (r / ".git").mkdir()
+        (r / "gradle.properties").write_text("mod_id=examplemod\nminecraft_version=1.21.1\n", encoding="utf-8")
+        (r / "gradlew").write_text(DL_GRADLEW, encoding="utf-8")
+        for mode, rc, retried, calls in (("download", 0, True, 2), ("download-twice", 1, True, 2),
+                                         ("compile", 1, False, 1), ("ok", 0, False, 1)):
+            (r / "mode.txt").write_text(mode + "\n", encoding="utf-8")
+            (r / "calls.txt").write_text("", encoding="utf-8")
+            res, did = gradle_download_retry(pu, r, ["build"], r / "g.log", wait=0, timeout=60)
+            got = [l for l in (r / "calls.txt").read_text(encoding="utf-8").splitlines() if l.strip()]
+            refresh = ["--refresh-dependencies" in l for l in got]
+            good = (res.returncode == rc and did == retried and len(got) == calls
+                    and refresh == ([False, True] if calls == 2 else [False]))
+            if retried:
+                good &= (r / "g.log.first-attempt").is_file()
+                (r / "g.log.first-attempt").unlink(missing_ok=True)
+            if not good:
+                ok = False
+                why.append(f"fixture, {mode}: rc={res.returncode} retried={did} calls={got}")
+    with tempfile.TemporaryDirectory() as d:
+        # the mirror: -I on every gate Gradle call, and installed for runs ci-gates does not start; PORT_CENTRAL_MIRROR=off
+        # drops both. The retry keeps the mirror: it goes through the same pu.gradle.
+        r = pathlib.Path(d).resolve()
+        (r / "gradlew").write_text(DL_GRADLEW, encoding="utf-8")
+        (r / "mode.txt").write_text("download\n", encoding="utf-8")
+        for env, want in ((dict(os.environ, PORT_CENTRAL_MIRROR=""), True), (dict(os.environ, PORT_CENTRAL_MIRROR="off"), False)):
+            (r / "calls.txt").write_text("", encoding="utf-8")
+            gradle_download_retry(pu, r, ["build"], r / "g.log", wait=0, env=env, timeout=60)
+            got = [l for l in (r / "calls.txt").read_text(encoding="utf-8").splitlines() if l.strip()]
+            mirrored = ["central-mirror.init.gradle" in l for l in got]
+            if len(got) != 2 or mirrored != [want, want]:
+                ok = False
+                why.append(f"mirror on every attempt ({'on' if want else 'off'}): {got}")
+            home = r / ("home-" + ("on" if want else "off"))
+            dst = install_central_mirror(home=home, env=env)
+            inst = home / ".gradle/init.d/port-central-mirror.gradle"
+            if want != inst.is_file() or (want and (dst is None or "CentralMirror" not in inst.read_text(encoding="utf-8"))):
+                ok = False
+                why.append(f"install ({'on' if want else 'off'}): {dst}")
+    for w in why:
+        print(f"ci-gates self-check FAIL [download retry]: {w}")
+    return ok
+
+
 def self_check():
     ok = green_detail("[x] All 4 required tests passed :)") == "4 required test(s) passed"
     # #262: the harness's base -- harness_base wins; else base_minecraft_version, as before; else 1.21.1
@@ -1247,6 +1391,7 @@ def self_check():
         ok &= zero_uses_row(r, d) is None
     ok &= multimod_check()
     ok &= fork_gatec_check()
+    ok &= download_retry_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -1293,6 +1438,10 @@ def main():
                                  "it must be that branch's): the run takes build/.fork-port.lock, so a second run on the "
                                  "same checkout is refused (exit 14)")
     a = ap.parse_args()
+    if a.port_ci:
+        cm = install_central_mirror()
+        print(f"[ci-gates] Maven Central through Google's mirror for every Gradle run: {cm}" if cm else
+              "[ci-gates] PORT_CENTRAL_MIRROR=off: no Central mirror", flush=True)
     repo = pathlib.Path(a.repo).resolve()
     why = _load("fork_kind", "fork-kind.py").refuse_layer(repo, "ci-gates")
     if why:
@@ -1357,7 +1506,8 @@ def main():
     if a.env == "minimal":
         env0 = dict(os.environ, **pu.gate_env(c))
         lst = work / "runtime-artifacts.log"
-        r = pu.gradle(repo, ["portRuntimeArtifacts", "-q"], lst, extra_init=[env0["PORT_GRADLE_INIT"]], env=env0)
+        r, rt_retried = gradle_download_retry(pu, repo, ["portRuntimeArtifacts", "-q"], lst,
+                                              extra_init=[env0["PORT_GRADLE_INIT"]], env=env0)
         arts = [tuple(l[len("PORT_RT "):].split("\t", 1)) for l in lst.read_text(encoding="utf-8", errors="replace").splitlines()
                 if l.startswith("PORT_RT ")]
         if r.returncode or not arts:
@@ -1370,7 +1520,7 @@ def main():
         if arts:
             rows.append("| environment | minimal | " + (("without " + ", ".join(m for ms in excluded.values() for m in ms))
                                                        if ex else "nothing to leave out: every runtime mod is required")
-                        + " |")
+                        + (f"; listed {DOWNLOAD_RETRY_ROW}" if rt_retried else "") + " |")
             print(f"[ci-gates] minimal environment: leaving out {ex or 'nothing'}", flush=True)
     if not a.skip_author_build and a.env == "full":
         jars = ss.author_jar_tasks(repo)
@@ -1379,7 +1529,7 @@ def main():
         # build "failed" on our own harness (measured: a second ci-gates run on the same checkout). CI is always fresh.
         shutil.rmtree(bdir / "classes/java/test", ignore_errors=True)
         shutil.rmtree(bdir / "test-results", ignore_errors=True)
-        r = pu.gradle(repo, ["build", *jars], work / "author-build.log")
+        r, retried = gradle_download_retry(pu, repo, ["build", *jars], work / "author-build.log")
         built = sorted(p.name for p in (bdir / "libs").glob("*.jar")) if (bdir / "libs").is_dir() else []
         passed = r.returncode == 0 and bool(built)
         if not passed:   # the reason, on the run page -- the log itself is only in the downloadable artifact
@@ -1387,7 +1537,8 @@ def main():
             m = re.search(r"\* What went wrong:\n(.*?)(?:\n\* Try:|\Z)", log, re.S)
             print("author's build failed:\n" + (m.group(1).strip() if m else log[-3000:]), flush=True)
         record("author's own build (`build" + "".join(f" {j}" for j in jars) + "`)", passed,
-               ", ".join(built) or "no jar produced")
+               (", ".join(built) or "no jar produced") + (f"; {DOWNLOAD_RETRY_ROW}" if retried and passed else
+                                                          "; failed again on its download retry" if retried else ""))
 
     if a.fork_gatec_only:        # Port CI's gate-c job: the fork's own Gate C on what the author's build made, alone
         fork_gatec_step(fork, a, ok, pu, repo, work, rows, record)

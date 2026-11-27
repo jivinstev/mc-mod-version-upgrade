@@ -77,8 +77,16 @@ def port_root(repo):
     return top if top is not None and (top / ".port").is_dir() else repo
 
 
+def central_mirror_on(env=None):
+    """Maven Central through Google's mirror (tools/central-mirror.init.gradle) on every gate Gradle call, unless
+    PORT_CENTRAL_MIRROR=off. Google mirrors Maven Central only: NeoForge's own maven has no such mirror."""
+    return (env if env is not None else os.environ).get("PORT_CENTRAL_MIRROR", "").strip().lower() != "off"
+
+
 def gradle(repo, args, log, extra_init=(), env=None, timeout=2400):
-    cmd = [*gradlew_cmd(repo), "--console=plain", "-I", str(ROOT / "tools/central-mirror.init.gradle")]
+    cmd = [*gradlew_cmd(repo), "--console=plain"]
+    if central_mirror_on(env):
+        cmd += ["-I", str(ROOT / "tools/central-mirror.init.gradle")]
     for i in extra_init:
         cmd += ["-I", str(i)]
     cmd += gradle_target_args(env)      # PORT_GRADLE_ARGS: extra arguments every Gradle call of a gate run carries
