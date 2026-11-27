@@ -541,7 +541,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   and its `port_jar` pins -- gets no job at all: the driver pushes the merge and records to the branch, waits for its
   push run when the workflow changed, and skips its review, gates, dependent gates, PR, release and library records.
   **CI as the gate of record** (a fork whose Port CI workflow has the `from_run` and `dep_override` inputs, either
-  kind): the driver's `gates` step builds and runs Gate A/B only, without the machine lock; the PR's CI (Gate C in
+  kind): the driver's `gates` step builds and runs Gate A/B only, without the machine lock (on a version branch
+  `fork-port.py --gates ab`, whose exit 0, 17 -- no Gate C on record, the case of a branch whose Gate C records are
+  only its Port CI releases -- or 18 is green there); the PR's CI (Gate C in
   three environments, in parallel) certifies the version; a library's dependent gate runs after that CI, as the
   dependent's Port CI dispatched with `dep_override` naming the PR run's candidate jar (by the sha256 the run's gates
   job annotates, read over the API: a cloud session cannot reach the artifact storage; without those annotations and
