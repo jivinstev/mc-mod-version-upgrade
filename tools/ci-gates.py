@@ -160,6 +160,22 @@ def gradle_download_retry(pu, repo, args, log, wait=None, **kw):
     return pu.gradle(repo, ["--refresh-dependencies", *args], log, **kw), True
 
 
+def install_central_mirror(home=None, env=None):
+    """On a Port CI runner, install tools/central-mirror.init.gradle as ~/.gradle/init.d/port-central-mirror.gradle, so
+    the Gradle runs that ci-gates does not start itself (a fork's own Gate C script, a client loop) also reach Maven
+    Central through Google's mirror; ci-gates' own calls carry it with -I (port_gates.gradle). PORT_CENTRAL_MIRROR=off
+    installs nothing (and removes nothing). Only Port CI runs install it: a person's own ~/.gradle is never written.
+    Returns the installed path, or None."""
+    pu = _load("port_gates_cm", "port_gates.py")
+    if not pu.central_mirror_on(env):
+        return None
+    d = pathlib.Path(home if home is not None else pathlib.Path.home()) / ".gradle/init.d"
+    d.mkdir(parents=True, exist_ok=True)
+    dst = d / "port-central-mirror.gradle"
+    dst.write_text((ROOT / "tools/central-mirror.init.gradle").read_text(encoding="utf-8"), encoding="utf-8")
+    return dst
+
+
 def green_detail(text):
     """What a green gate log proves, in one line: the GameTest count, or the client's PASS line and spawns."""
     m = re.search(r"All (\d+) required tests passed", text) or re.search(r"BOOT_TEST: (PASS[^\n]*)", text)
@@ -1162,6 +1178,26 @@ def download_retry_check():
             if not good:
                 ok = False
                 why.append(f"fixture, {mode}: rc={res.returncode} retried={did} calls={got}")
+    with tempfile.TemporaryDirectory() as d:
+        # the mirror: -I on every gate Gradle call, and installed for runs ci-gates does not start; PORT_CENTRAL_MIRROR=off
+        # drops both. The retry keeps the mirror: it goes through the same pu.gradle.
+        r = pathlib.Path(d).resolve()
+        (r / "gradlew").write_text(DL_GRADLEW, encoding="utf-8")
+        (r / "mode.txt").write_text("download\n", encoding="utf-8")
+        for env, want in ((dict(os.environ, PORT_CENTRAL_MIRROR=""), True), (dict(os.environ, PORT_CENTRAL_MIRROR="off"), False)):
+            (r / "calls.txt").write_text("", encoding="utf-8")
+            gradle_download_retry(pu, r, ["build"], r / "g.log", wait=0, env=env, timeout=60)
+            got = [l for l in (r / "calls.txt").read_text(encoding="utf-8").splitlines() if l.strip()]
+            mirrored = ["central-mirror.init.gradle" in l for l in got]
+            if len(got) != 2 or mirrored != [want, want]:
+                ok = False
+                why.append(f"mirror on every attempt ({'on' if want else 'off'}): {got}")
+            home = r / ("home-" + ("on" if want else "off"))
+            dst = install_central_mirror(home=home, env=env)
+            inst = home / ".gradle/init.d/port-central-mirror.gradle"
+            if want != inst.is_file() or (want and (dst is None or "CentralMirror" not in inst.read_text(encoding="utf-8"))):
+                ok = False
+                why.append(f"install ({'on' if want else 'off'}): {dst}")
     for w in why:
         print(f"ci-gates self-check FAIL [download retry]: {w}")
     return ok
@@ -1402,6 +1438,10 @@ def main():
                                  "it must be that branch's): the run takes build/.fork-port.lock, so a second run on the "
                                  "same checkout is refused (exit 14)")
     a = ap.parse_args()
+    if a.port_ci:
+        cm = install_central_mirror()
+        print(f"[ci-gates] Maven Central through Google's mirror for every Gradle run: {cm}" if cm else
+              "[ci-gates] PORT_CENTRAL_MIRROR=off: no Central mirror", flush=True)
     repo = pathlib.Path(a.repo).resolve()
     why = _load("fork_kind", "fork-kind.py").refuse_layer(repo, "ci-gates")
     if why:
